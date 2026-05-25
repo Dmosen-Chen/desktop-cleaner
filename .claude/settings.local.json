@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(cat)",
+      "Read(//c/Users/CXHY3/Desktop/**)",
+      "Bash(python *)"
+    ]
+  }
+}
