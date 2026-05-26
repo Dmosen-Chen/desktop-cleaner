@@ -106,7 +106,10 @@ class WorkspaceModel:
         group = self.group(tab.group_id)
         self.config.panel_tabs = [entry for entry in self.config.panel_tabs if entry.id != tab_id]
         group.tab_ids = [entry for entry in group.tab_ids if entry != tab_id]
-        self.config.rules = [rule for rule in self.config.rules if rule.target_tab_id != tab_id]
+        for rule in self.config.rules:
+            if rule.target_tab_id == tab_id:
+                rule.enabled = False
+                rule.target_tab_id = ""
         self.config.manual_overrides = [
             entry for entry in self.config.manual_overrides if entry.target_tab_id != tab_id
         ]
@@ -133,10 +136,14 @@ class WorkspaceModel:
         if self.config.panel_groups:
             return self.config.panel_groups[0]
         defaults = build_default_configuration(self.config.desktop.path)
+        existing_rule_ids = {rule.id for rule in self.config.rules}
+        missing_default_rules = [
+            rule for rule in defaults.rules if rule.id not in existing_rule_ids
+        ]
         defaults.panel_groups[0].appearance = deepcopy(self.config.appearance_defaults)
         self.config.panel_groups = defaults.panel_groups
         self.config.panel_tabs = defaults.panel_tabs
-        self.config.rules = defaults.rules
+        self.config.rules.extend(missing_default_rules)
         return self.config.panel_groups[0]
 
     def _reindex_tabs(self) -> None:

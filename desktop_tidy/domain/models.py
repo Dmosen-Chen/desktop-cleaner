@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import re
 from typing import Any
+
+
+_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 @dataclass
@@ -265,3 +271,248 @@ class Configuration:
                 ItemRef.from_dict(dict(item)) for item in payload.get("external_refs", [])
             ],
         )
+
+
+class InvalidConfiguration(ValueError):
+    """Raised when a schema v2 configuration violates its structural contract."""
+
+
+def _required_object(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    raw = payload.get(key)
+    if not isinstance(raw, dict):
+        raise InvalidConfiguration(f"{key} must be an object")
+    return raw
+
+
+def _required_string(payload: dict[str, Any], key: str, label: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise InvalidConfiguration(f"{label} must be a string")
+    return value
+
+
+def _required_text(payload: dict[str, Any], key: str, label: str) -> None:
+    if not _required_string(payload, key, label).strip():
+        raise InvalidConfiguration(f"{label} must not be blank")
+
+
+def _required_bool(payload: dict[str, Any], key: str, label: str) -> None:
+    if key not in payload or type(payload[key]) is not bool:
+        raise InvalidConfiguration(f"{label} must be a boolean")
+
+
+def _required_number(payload: dict[str, Any], key: str, label: str) -> None:
+    if key not in payload or type(payload[key]) not in (int, float):
+        raise InvalidConfiguration(f"{label} must be a number")
+
+
+def _required_integer(payload: dict[str, Any], key: str, label: str) -> None:
+    if key not in payload or type(payload[key]) is not int:
+        raise InvalidConfiguration(f"{label} must be an integer")
+
+
+def _required_list(payload: dict[str, Any], key: str) -> list[Any]:
+    raw = payload.get(key)
+    if not isinstance(raw, list):
+        raise InvalidConfiguration(f"{key} must be a list")
+    return raw
+
+
+def _required_string_list(payload: dict[str, Any], key: str, label: str) -> list[str]:
+    raw = _required_list(payload, key)
+    if not all(isinstance(item, str) for item in raw):
+        raise InvalidConfiguration(f"{label} must contain only strings")
+    return raw
+
+
+def _validate_appearance_payload(payload: dict[str, Any], label: str) -> None:
+    _required_string(payload, "background_color", f"{label}.background_color")
+    _required_number(payload, "background_opacity", f"{label}.background_opacity")
+
+
+def _is_absolute_desktop_path(path: str) -> bool:
+    normalized = path.strip()
+    if not normalized:
+        return False
+    if Path(normalized).is_absolute():
+        return True
+    return _WINDOWS_ABSOLUTE.match(normalized) is not None
+
+
+def _reference_is_inside_desktop(canonical_path: str, desktop_path: str) -> bool:
+    ref = Path(canonical_path)
+    desktop = Path(desktop_path)
+    if ref.is_absolute() and desktop.is_absolute():
+        from desktop_tidy.domain.classification import is_inside
+
+        try:
+            return is_inside(ref, desktop)
+        except OSError:
+            pass
+    ref_norm = str(canonical_path).casefold().replace("/", "\\").rstrip("\\")
+    desktop_norm = str(desktop_path).casefold().replace("/", "\\").rstrip("\\")
+    if not desktop_norm:
+        return False
+    if ref_norm == desktop_norm:
+        return True
+    return ref_norm.startswith(desktop_norm + "\\")
+
+
+def _validate_desktop_path_value(path: str) -> None:
+    if not path.strip():
+        raise InvalidConfiguration("desktop.path must not be blank")
+    if not _is_absolute_desktop_path(path):
+        raise InvalidConfiguration("desktop.path must be an absolute path")
+
+
+def validate_configuration_payload(payload: dict[str, Any]) -> None:
+    """Validate the persisted schema v2 shape before any tolerant conversion."""
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 2:
+        raise InvalidConfiguration("schema_version must be the integer 2")
+
+    desktop = _required_object(payload, "desktop")
+    _validate_desktop_path_value(_required_string(desktop, "path", "desktop.path"))
+    for key in (
+        "takeover_enabled",
+        "restore_required",
+        "explorer_icons_hidden",
+        "startup_enabled",
+    ):
+        _required_bool(desktop, key, f"desktop.{key}")
+    _required_text(desktop, "primary_screen_id", "desktop.primary_screen_id")
+
+    appearance_defaults = _required_object(payload, "appearance_defaults")
+    _validate_appearance_payload(appearance_defaults, "appearance_defaults")
+
+    groups = _required_list(payload, "panel_groups")
+    for index, raw_group in enumerate(groups):
+        if not isinstance(raw_group, dict):
+            raise InvalidConfiguration(f"panel_groups[{index}] must be an object")
+        label = f"panel_groups[{index}]"
+        _required_text(raw_group, "id", f"{label}.id")
+        _required_text(raw_group, "screen_id", f"{label}.screen_id")
+        geometry = _required_object(raw_group, "geometry")
+        for key in ("rx", "ry", "rw", "rh"):
+            _required_number(geometry, key, f"{label}.geometry.{key}")
+        _required_string_list(raw_group, "tab_ids", f"{label}.tab_ids")
+        _required_string(raw_group, "active_tab_id", f"{label}.active_tab_id")
+        appearance = _required_object(raw_group, "appearance")
+        _validate_appearance_payload(appearance, f"{label}.appearance")
+        _required_bool(raw_group, "locked", f"{label}.locked")
+        _required_bool(raw_group, "collapsed", f"{label}.collapsed")
+
+    tabs = _required_list(payload, "panel_tabs")
+    for index, raw_tab in enumerate(tabs):
+        if not isinstance(raw_tab, dict):
+            raise InvalidConfiguration(f"panel_tabs[{index}] must be an object")
+        label = f"panel_tabs[{index}]"
+        for key in ("id", "group_id", "name", "category_role"):
+            _required_text(raw_tab, key, f"{label}.{key}")
+        _required_integer(raw_tab, "order", f"{label}.order")
+
+    rules = _required_list(payload, "rules")
+    for index, raw_rule in enumerate(rules):
+        if not isinstance(raw_rule, dict):
+            raise InvalidConfiguration(f"rules[{index}] must be an object")
+        label = f"rules[{index}]"
+        for key in ("id", "name", "matcher_kind"):
+            _required_text(raw_rule, key, f"{label}.{key}")
+        _required_string(raw_rule, "target_tab_id", f"{label}.target_tab_id")
+        _required_string_list(raw_rule, "extensions", f"{label}.extensions")
+        _required_bool(raw_rule, "enabled", f"{label}.enabled")
+        _required_integer(raw_rule, "order", f"{label}.order")
+
+    overrides = _required_list(payload, "manual_overrides")
+    for index, raw_override in enumerate(overrides):
+        if not isinstance(raw_override, dict):
+            raise InvalidConfiguration(f"manual_overrides[{index}] must be an object")
+        label = f"manual_overrides[{index}]"
+        _required_text(raw_override, "canonical_path", f"{label}.canonical_path")
+        _required_string(raw_override, "target_tab_id", f"{label}.target_tab_id")
+
+    references = _required_list(payload, "external_refs")
+    for index, raw_reference in enumerate(references):
+        if not isinstance(raw_reference, dict):
+            raise InvalidConfiguration(f"external_refs[{index}] must be an object")
+        label = f"external_refs[{index}]"
+        for key in ("id", "source_kind", "canonical_path"):
+            _required_text(raw_reference, key, f"{label}.{key}")
+        _required_string(raw_reference, "target_tab_id", f"{label}.target_tab_id")
+
+
+def _validate_appearance(label: str, appearance: AppearanceSettings) -> None:
+    if not _COLOR.fullmatch(appearance.background_color):
+        raise InvalidConfiguration(f"{label} color must use #RRGGBB format")
+    if not 0.0 <= appearance.background_opacity <= 1.0:
+        raise InvalidConfiguration(f"{label} opacity must be between 0 and 1")
+
+
+def _validate_geometry(group: PanelGroup) -> None:
+    geometry = group.geometry
+    if not 0.0 <= geometry.rx <= 1.0 or not 0.0 <= geometry.ry <= 1.0:
+        raise InvalidConfiguration(f"panel group {group.id} position is outside the desktop")
+    if not 0.0 < geometry.rw <= 1.0 or not 0.0 < geometry.rh <= 1.0:
+        raise InvalidConfiguration(f"panel group {group.id} size is outside the desktop")
+    if geometry.rx + geometry.rw > 1.0 or geometry.ry + geometry.rh > 1.0:
+        raise InvalidConfiguration(f"panel group {group.id} extends outside the desktop")
+
+
+def validate_configuration(config: Configuration) -> None:
+    """Validate the references and normalized values required by schema v2."""
+    if config.schema_version != 2:
+        raise InvalidConfiguration(f"schema version {config.schema_version} is not version 2")
+    _validate_desktop_path_value(config.desktop.path)
+    if not config.panel_groups:
+        raise InvalidConfiguration("configuration must contain at least one panel group")
+
+    group_ids = {group.id for group in config.panel_groups}
+    tab_ids = {tab.id for tab in config.panel_tabs}
+    if len(group_ids) != len(config.panel_groups):
+        raise InvalidConfiguration("panel group ids must be unique")
+    if len(tab_ids) != len(config.panel_tabs):
+        raise InvalidConfiguration("panel tab ids must be unique")
+
+    tabs_by_id = {tab.id: tab for tab in config.panel_tabs}
+    _validate_appearance("default appearance", config.appearance_defaults)
+    listed_tab_ids: set[str] = set()
+    for group in config.panel_groups:
+        if not group.tab_ids:
+            raise InvalidConfiguration(f"panel group {group.id} must contain at least one tab")
+        if len(set(group.tab_ids)) != len(group.tab_ids):
+            raise InvalidConfiguration(f"panel group {group.id} contains duplicate tabs")
+        if group.active_tab_id not in group.tab_ids:
+            raise InvalidConfiguration(f"panel group {group.id} has an unknown active tab")
+        for tab_id in group.tab_ids:
+            tab = tabs_by_id.get(tab_id)
+            if tab is None or tab.group_id != group.id:
+                raise InvalidConfiguration(f"panel group {group.id} references an unknown tab")
+            if tab_id in listed_tab_ids:
+                raise InvalidConfiguration(f"panel tab {tab_id} belongs to multiple groups")
+            listed_tab_ids.add(tab_id)
+        _validate_geometry(group)
+        _validate_appearance(f"panel group {group.id} appearance", group.appearance)
+
+    if listed_tab_ids != tab_ids:
+        raise InvalidConfiguration("configuration contains tabs outside panel groups")
+    for rule in config.rules:
+        if rule.target_tab_id in tab_ids:
+            continue
+        if not rule.enabled and rule.target_tab_id == "":
+            continue
+        raise InvalidConfiguration(f"classification rule {rule.id} targets an unknown tab")
+    for override in config.manual_overrides:
+        if override.target_tab_id not in tab_ids:
+            raise InvalidConfiguration("manual override targets an unknown tab")
+    for reference in config.external_refs:
+        if reference.source_kind != "external":
+            raise InvalidConfiguration(f"external reference {reference.id} has an invalid source kind")
+        if reference.target_tab_id not in tab_ids:
+            raise InvalidConfiguration(f"external reference {reference.id} targets an unknown tab")
+        if not _is_absolute_desktop_path(reference.canonical_path):
+            raise InvalidConfiguration(
+                f"external reference {reference.id} must use an absolute path"
+            )
+        if _reference_is_inside_desktop(reference.canonical_path, config.desktop.path):
+            raise InvalidConfiguration(
+                f"external reference {reference.id} must point outside the desktop"
+            )

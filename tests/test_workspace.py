@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 from desktop_tidy.domain.classification import classify_path
 from desktop_tidy.domain.defaults import build_default_configuration
+from desktop_tidy.domain.models import ClassificationRule, validate_configuration
 from desktop_tidy.domain.workspace import WorkspaceModel
 
 
@@ -55,6 +56,58 @@ class WorkspaceTests(unittest.TestCase):
         new_tab = model.add_tab("group-default", "临时")
 
         self.assertEqual(model.group("group-default").active_tab_id, new_tab.id)
+
+    def test_delete_tab_disables_and_clears_its_rule_instead_of_deleting_it(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        custom = model.add_tab("group-default", "Custom", tab_id="tab-custom")
+        rule = ClassificationRule(
+            "rule-custom", "Custom", "extension", custom.id, [".custom"], enabled=True, order=50
+        )
+        model.config.rules.append(rule)
+
+        model.delete_tab(custom.id)
+
+        saved_rule = next(entry for entry in model.config.rules if entry.id == "rule-custom")
+        self.assertFalse(saved_rule.enabled)
+        self.assertEqual(saved_rule.target_tab_id, "")
+        validate_configuration(model.config)
+
+    def test_default_group_rebuild_preserves_detached_rules_as_valid_disabled_entries(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        custom = model.add_tab("group-default", "Custom", tab_id="tab-custom")
+        model.config.rules.append(
+            ClassificationRule(
+                "rule-custom", "Custom", "extension", custom.id, [".custom"], order=50
+            )
+        )
+        existing_rule_ids = {entry.id for entry in model.config.rules}
+
+        for tab_id in list(model.group("group-default").tab_ids):
+            model.delete_tab(tab_id)
+
+        rules_by_id = {entry.id: entry for entry in model.config.rules}
+        self.assertEqual(set(rules_by_id), existing_rule_ids)
+        for rule_id in existing_rule_ids:
+            with self.subTest(rule_id=rule_id):
+                self.assertFalse(rules_by_id[rule_id].enabled)
+                self.assertEqual(rules_by_id[rule_id].target_tab_id, "")
+        validate_configuration(model.config)
+
+    def test_default_group_rebuild_only_adds_missing_default_rules(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        model.config.rules = [
+            entry for entry in model.config.rules if entry.id != "rule-images"
+        ]
+
+        for tab_id in list(model.group("group-default").tab_ids):
+            model.delete_tab(tab_id)
+
+        rules_by_id = {entry.id: entry for entry in model.config.rules}
+        self.assertFalse(rules_by_id["rule-folders"].enabled)
+        self.assertEqual(rules_by_id["rule-folders"].target_tab_id, "")
+        self.assertTrue(rules_by_id["rule-images"].enabled)
+        self.assertEqual(rules_by_id["rule-images"].target_tab_id, "tab-images")
+        validate_configuration(model.config)
 
     def test_tab_commands_rename_cleanup_and_keep_a_minimum_default_group(self) -> None:
         with TemporaryDirectory() as tmp:

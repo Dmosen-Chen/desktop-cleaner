@@ -14,9 +14,25 @@ from urllib.request import url2pathname
 
 from desktop_tidy.domain.classification import canonical_key, is_inside
 from desktop_tidy.domain.defaults import build_default_configuration
-from desktop_tidy.domain.models import AppearanceSettings, Configuration, ItemRef
+from desktop_tidy.domain.models import (
+    AppearanceSettings,
+    Configuration,
+    InvalidConfiguration,
+    ItemRef,
+    _is_absolute_desktop_path,
+    validate_configuration,
+    validate_configuration_payload,
+)
 
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+class UnsupportedConfigurationVersion(ValueError):
+    """Raised when a configuration declares a schema this application cannot read."""
+
+    def __init__(self, schema_version: object) -> None:
+        super().__init__(f"unsupported configuration schema version: {schema_version}")
+        self.schema_version = schema_version
 
 
 def _timestamp() -> str:
@@ -47,7 +63,9 @@ def _atomic_save(path: Path, config: Configuration) -> None:
 def _desktop_path(payload: dict[str, Any]) -> str | None:
     raw = payload.get("desktop")
     if isinstance(raw, str) and raw.strip():
-        return raw.strip()
+        path = raw.strip()
+        if _is_absolute_desktop_path(path):
+            return str(Path(path).expanduser())
     return None
 
 
@@ -187,10 +205,15 @@ def load_or_migrate(path: Path) -> Configuration:
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         _copy_aside(path, "corrupt")
         return build_default_configuration()
-    if payload.get("schema_version") == 2:
+    if "schema_version" in payload:
+        if payload["schema_version"] != 2:
+            raise UnsupportedConfigurationVersion(payload["schema_version"])
         try:
-            return Configuration.from_dict(payload)
-        except (KeyError, TypeError, ValueError):
+            validate_configuration_payload(payload)
+            config = Configuration.from_dict(payload)
+            validate_configuration(config)
+            return config
+        except (KeyError, TypeError, ValueError, InvalidConfiguration):
             _copy_aside(path, "corrupt")
             return build_default_configuration()
     _copy_aside(path, "pre-qt-v1")

@@ -86,7 +86,11 @@ def _default_rules() -> list[ClassificationRule]:
 
 
 def build_default_configuration(desktop_path: str | Path | None = None) -> Configuration:
-    path = str(desktop_path if desktop_path is not None else Path.home() / "Desktop")
+    if desktop_path is None:
+        from desktop_tidy.services.desktop_location import resolve_desktop_path
+
+        desktop_path = resolve_desktop_path()
+    path = str(desktop_path)
     tabs = [
         PanelTab(tab_id, DEFAULT_GROUP_ID, name, index, category_role)
         for index, (tab_id, name, category_role) in enumerate(DEFAULT_TABS)

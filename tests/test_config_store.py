@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from desktop_tidy.domain.defaults import build_default_configuration
+from desktop_tidy.domain.models import InvalidConfiguration, ItemRef
 from desktop_tidy.persistence.config_store import ConfigurationStore
 
 
@@ -31,6 +32,39 @@ class ConfigurationStoreTests(unittest.TestCase):
             replace.assert_called_once_with(path.with_suffix(".tmp"), path)
             self.assertFalse(path.with_suffix(".tmp").exists())
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), config.to_dict())
+
+    def test_save_rejects_relative_external_ref_canonical_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            invalid = build_default_configuration(r"D:\Desktop")
+            invalid.external_refs.append(
+                ItemRef("external-relative", "external", "notes.txt", "tab-other")
+            )
+            store = ConfigurationStore(path)
+
+            with self.assertRaisesRegex(
+                InvalidConfiguration,
+                "external reference external-relative must use an absolute path",
+            ):
+                store.save(invalid)
+
+            self.assertFalse(path.exists())
+
+    def test_save_rejects_invalid_configuration_without_modifying_existing_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            valid = build_default_configuration(r"D:\Desktop")
+            path.write_text(json.dumps(valid.to_dict(), ensure_ascii=False), encoding="utf-8")
+            original = path.read_text(encoding="utf-8")
+            invalid = build_default_configuration(r"D:\Desktop")
+            invalid.panel_groups[0].active_tab_id = "tab-missing"
+            store = ConfigurationStore(path)
+
+            with self.assertRaises(InvalidConfiguration):
+                store.save(invalid)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertFalse(path.with_suffix(".tmp").exists())
 
     def test_load_reads_schema_v2_without_creating_migration_backup(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -7,11 +7,13 @@ from .models import (
     ClassificationRule,
     Configuration,
     DesktopIntegrationState,
+    InvalidConfiguration,
     ItemRef,
     ManualOverride,
     PanelGeometry,
     PanelGroup,
     PanelTab,
+    validate_configuration,
 )
 
 __all__ = [
@@ -19,11 +21,13 @@ __all__ = [
     "ClassificationRule",
     "Configuration",
     "DesktopIntegrationState",
+    "InvalidConfiguration",
     "ItemRef",
     "ManualOverride",
     "PanelGeometry",
     "PanelGroup",
     "PanelTab",
+    "validate_configuration",
     "build_default_configuration",
     "canonical_key",
     "classify_path",

@@ -6,7 +6,12 @@ import json
 import os
 from pathlib import Path
 
-from desktop_tidy.domain.models import Configuration
+from desktop_tidy.domain.models import (
+    Configuration,
+    InvalidConfiguration,
+    validate_configuration,
+    validate_configuration_payload,
+)
 
 from .migration import load_or_migrate
 
@@ -24,6 +29,8 @@ class ConfigurationStore:
         return load_or_migrate(self.path)
 
     def save(self, config: Configuration) -> None:
+        validate_configuration_payload(config.to_dict())
+        validate_configuration(config)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(

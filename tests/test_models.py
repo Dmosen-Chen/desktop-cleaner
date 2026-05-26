@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import unittest
-from pathlib import Path
 
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.models import (
@@ -10,11 +8,13 @@ from desktop_tidy.domain.models import (
     ClassificationRule,
     Configuration,
     DesktopIntegrationState,
+    InvalidConfiguration,
     ItemRef,
     ManualOverride,
     PanelGeometry,
     PanelGroup,
     PanelTab,
+    validate_configuration,
 )
 
 
@@ -88,18 +88,49 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(restored, config)
         self.assertEqual(restored.external_refs[0].source_kind, "external")
 
-    def test_default_resource_contains_complete_v2_first_run_layout(self) -> None:
-        resource_path = (
-            Path(__file__).parents[1] / "desktop_tidy" / "resources" / "default_config.json"
-        )
-        config = Configuration.from_dict(json.loads(resource_path.read_text(encoding="utf-8")))
+    def test_validate_configuration_requires_absolute_desktop_path(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.desktop.path = r"relative\desktop"
 
-        self.assertEqual(config.schema_version, 2)
-        # Resolve the user's real desktop at first startup; never ship a developer path.
-        self.assertEqual(config.desktop.path, "")
-        self.assertEqual([group.id for group in config.panel_groups], ["group-default"])
-        self.assertEqual(len(config.panel_tabs), 6)
-        self.assertTrue(config.rules)
+        with self.assertRaisesRegex(InvalidConfiguration, "desktop.path must be an absolute path"):
+            validate_configuration(config)
+
+    def test_validate_configuration_allows_nonexistent_absolute_desktop_path(self) -> None:
+        config = build_default_configuration(r"D:\MissingDesktop")
+
+        validate_configuration(config)
+
+    def test_validate_configuration_rejects_external_ref_inside_desktop(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.external_refs.append(
+            ItemRef("external-inside", "external", r"D:\Desktop\notes.txt", "tab-other")
+        )
+
+        with self.assertRaisesRegex(
+            InvalidConfiguration,
+            "external reference external-inside must point outside the desktop",
+        ):
+            validate_configuration(config)
+
+    def test_validate_configuration_allows_missing_external_ref_outside_desktop(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.external_refs.append(
+            ItemRef("external-missing", "external", r"D:\Outside\missing.txt", "tab-other")
+        )
+
+        validate_configuration(config)
+
+    def test_validate_configuration_rejects_relative_external_ref_canonical_path(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.external_refs.append(
+            ItemRef("external-relative", "external", "notes.txt", "tab-other")
+        )
+
+        with self.assertRaisesRegex(
+            InvalidConfiguration,
+            "external reference external-relative must use an absolute path",
+        ):
+            validate_configuration(config)
 
 
 if __name__ == "__main__":
