@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from PySide6.QtCore import QFileSystemWatcher, QObject, Signal
+
 from desktop_tidy.domain.classification import canonical_key
 
 FILE_ATTRIBUTE_HIDDEN = 0x2
@@ -62,3 +64,21 @@ class DesktopIndex:
         )
         self._last = current
         return changes
+
+
+class DesktopWatcher(QObject):
+    """Emits rescan results when the indexed desktop directory changes."""
+
+    changed = Signal(object)
+
+    def __init__(self, index: DesktopIndex, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._index = index
+        self._watcher = QFileSystemWatcher(self)
+        desktop_path = str(self._index.desktop)
+        if self._index.desktop.is_dir():
+            self._watcher.addPath(desktop_path)
+        self._watcher.directoryChanged.connect(self._on_directory_changed)
+
+    def _on_directory_changed(self, _path: str) -> None:
+        self.changed.emit(self._index.rescan())

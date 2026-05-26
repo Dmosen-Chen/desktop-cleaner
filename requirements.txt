@@ -1,3 +1,6 @@
+# Qt preview shell (M2+); legacy tray/drag helpers retained until final cutover.
+PySide6>=6.8,<7
+
 # 运行完整功能（含系统托盘、托盘图标；直接拖入面板为实验功能）：
 pystray>=0.19,<1
 Pillow>=10,<12

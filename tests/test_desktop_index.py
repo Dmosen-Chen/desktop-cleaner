@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -51,6 +52,42 @@ class DesktopIndexTests(unittest.TestCase):
             self.assertEqual([item.path.name for item in changed.current], ["after.txt"])
             self.assertEqual([item.path.name for item in changed.added], ["after.txt"])
             self.assertEqual([item.path.name for item in changed.removed], ["before.txt"])
+
+
+class DesktopWatcherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_watcher_emits_rescan_changes_after_temp_directory_update(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtTest import QSignalSpy, QTest
+
+        from desktop_tidy.services.desktop_index import DesktopWatcher
+
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp)
+            index = DesktopIndex(desktop)
+            watcher = DesktopWatcher(index)
+            spy = QSignalSpy(watcher.changed)
+            index.rescan()
+
+            new_file = desktop / "watched.txt"
+            new_file.write_text("x", encoding="utf-8")
+
+            for _ in range(100):
+                type(self).app.processEvents()
+                if spy.count() > 0:
+                    break
+                QTest.qWait(20)
+
+            self.assertGreaterEqual(spy.count(), 1)
+            changes = spy.at(spy.count() - 1)[0]
+            self.assertEqual([item.path.name for item in changes.added], ["watched.txt"])
+            self.assertEqual(new_file.read_text(encoding="utf-8"), "x")
 
 
 if __name__ == "__main__":
