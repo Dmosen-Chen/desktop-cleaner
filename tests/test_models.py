@@ -20,10 +20,10 @@ from desktop_tidy.domain.models import (
 
 class ModelTests(unittest.TestCase):
     def test_default_configuration_has_required_group_tabs_appearance_and_rules(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
 
         self.assertEqual(config.schema_version, 2)
-        self.assertEqual(config.desktop.path, r"E:\system\桌面")
+        self.assertEqual(config.desktop.path, r"C:\Users\Example\Desktop")
         self.assertEqual(config.desktop.primary_screen_id, "primary")
         self.assertEqual(len(config.panel_groups), 1)
         group = config.panel_groups[0]
@@ -75,11 +75,11 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(type(entity).from_dict(entity.to_dict()), entity)
 
     def test_configuration_round_trip_persists_only_external_refs_not_desktop_inventory(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         config.external_refs.append(
             ItemRef("external-1", "external", r"D:\draft\readme.md", "tab-other")
         )
-        config.manual_overrides.append(ManualOverride(r"e:\system\桌面\fixed.png", "tab-documents"))
+        config.manual_overrides.append(ManualOverride(r"c:\users\example\desktop\fixed.png", "tab-documents"))
 
         payload = config.to_dict()
         restored = Configuration.from_dict(payload)

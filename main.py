@@ -113,7 +113,7 @@ def merge_default_rules(cfg: dict) -> dict:
 
     if not (out.get("desktop") or "").strip():
 
-        out["desktop"] = base.get("desktop") or r"E:\system\桌面"
+        out["desktop"] = base.get("desktop") or str(desktop_dir({}))
 
     return out
 
@@ -121,18 +121,18 @@ def merge_default_rules(cfg: dict) -> dict:
 
 
 
-XZ_DOC_EXTS = (
+DEFAULT_DOC_EXTS = (
     ".txt .pdf .doc .docx .ppt .pptx .xls .xlsx .csv .wps .xml .rtf .wtf "
     ".dot .dotm .xps .htm .html .mht .mhtml .odt .xlsb .xltx .xltm .xlt "
     ".prn .dif .slk .xlam .xla .ods .pptm .pot .potm .potx .ppsx .pps "
     ".ppsm .ppam .thmx .ppa .xmsl .xlsm .md"
 )
-XZ_PIC_EXTS = (
+DEFAULT_PIC_EXTS = (
     ".img .jpg .jpeg .png .psd .gif .webp .bmp .svg .ai .tif .tiff .dib "
     ".eps .raw .pxr .mac .tga .vst .pcd .pct .fpx .cal .wi .ico .cr2 "
     ".crw .cur .ani .psb .sai"
 )
-XZ_ZIP_EXTS = (
+DEFAULT_ZIP_EXTS = (
     ".zip .rar .7z .dmg .gz .001 .a .apm .ar .arj .bz2 .bzip2 .cab "
     ".cpio .cramfs .deb .epub .esd .ext .ext2 .ext3 .ext4 .gpt .zipx "
     ".gzip .hfs .hfsx .hxi .hxq .hxr .hxs .hxw .ihex .iso .jar .lha "
@@ -140,11 +140,11 @@ XZ_ZIP_EXTS = (
     ".r00 .scap .squashfs .swm .tar .taz .tbz .tbz2 .txz .uefif .vdi "
     ".vmdk .wim .xar .xip .xpi .xz .z .z01"
 )
-XZ_AUDIO_EXTS = (
+DEFAULT_AUDIO_EXTS = (
     ".mp3 .midi .wma .cd .amr .au .cda .wav .wave .aiff .mpeg .mp3pro "
     ".mpeg-4 .realaudio .vqf .ogg .oggvorbis .ape .flac .aac .ra .mod"
 )
-XZ_VIDEO_EXTS = (
+DEFAULT_VIDEO_EXTS = (
     ".mp4 .avi .mov .flv .mod .m4v .rm .ram .rmvb .3gp .mpeg .mpg .asf "
     ".wmv .navi .realvideo .mkv .f4v .dat .divx .dv .vob .qt .cpk .fli"
 )
@@ -152,13 +152,13 @@ XZ_VIDEO_EXTS = (
 
 COLLECT_RULE_PRESETS: list[tuple[str, str, str, tuple[str, ...]]] = [
     ("文件夹", "folder", "", ("文件夹",)),
-    ("压缩包", "extension", XZ_ZIP_EXTS, ("压缩包",)),
-    ("文档", "extension", XZ_DOC_EXTS, ("文档",)),
-    ("图片", "extension", XZ_PIC_EXTS, ("图片",)),
+    ("压缩包", "extension", DEFAULT_ZIP_EXTS, ("压缩包",)),
+    ("文档", "extension", DEFAULT_DOC_EXTS, ("文档",)),
+    ("图片", "extension", DEFAULT_PIC_EXTS, ("图片",)),
     ("快捷方式", "extension", ".lnk", ("电脑", "工具")),
     ("网页链接", "extension", ".url", ("电脑", "工具")),
-    ("音频", "extension", XZ_AUDIO_EXTS, ("音频", "图片")),
-    ("视频", "extension", XZ_VIDEO_EXTS, ("视频", "图片")),
+    ("音频", "extension", DEFAULT_AUDIO_EXTS, ("音频", "图片")),
+    ("视频", "extension", DEFAULT_VIDEO_EXTS, ("视频", "图片")),
     ("其它", "other", "", ("draft", "其它")),
 ]
 

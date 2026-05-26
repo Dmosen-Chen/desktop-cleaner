@@ -137,7 +137,7 @@ from desktop_tidy.domain.models import Configuration, ItemRef
 
 class ModelTests(unittest.TestCase):
     def test_default_configuration_has_one_unlocked_six_tab_group(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         self.assertEqual(config.schema_version, 2)
         self.assertEqual(len(config.panel_groups), 1)
         group = config.panel_groups[0]
@@ -151,7 +151,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(group.tab_ids, [tab.id for tab in config.panel_tabs])
 
     def test_real_desktop_items_are_not_serialized_as_references(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         config.external_refs.append(
             ItemRef(id="external-1", source_kind="external", canonical_path=r"D:\draft\readme.md", target_tab_id="tab-other")
         )
@@ -436,14 +436,14 @@ from desktop_tidy.domain.models import ManualOverride
 
 class ClassificationTests(unittest.TestCase):
     def test_manual_override_wins_over_matching_extension(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
-        path = Path(r"E:\system\桌面\cover.png")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
+        path = Path(r"C:\Users\Example\Desktop\cover.png")
         config.manual_overrides.append(ManualOverride(str(path).casefold(), "tab-documents"))
         self.assertEqual(classify_path(path, config), "tab-documents")
 
     def test_unknown_extension_targets_other(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
-        self.assertEqual(classify_path(Path(r"E:\system\桌面\blob.abc"), config), "tab-other")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
+        self.assertEqual(classify_path(Path(r"C:\Users\Example\Desktop\blob.abc"), config), "tab-other")
 ```
 
 ```python
@@ -715,13 +715,13 @@ class ItemGridWidgetTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_group_uses_background_alpha_without_fading_children(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         widget = PanelGroupWidget(config.panel_groups[0], config.panel_tabs)
         self.assertEqual(widget.windowOpacity(), 1.0)
         self.assertEqual(widget.background_opacity, 0.60)
 
     def test_item_caption_is_limited_to_two_elided_lines(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         widget = PanelGroupWidget(config.panel_groups[0], config.panel_tabs)
         caption = widget.item_grid.caption_text("一个特别特别特别长的桌面文档文件名称.pdf", width=80)
         self.assertLessEqual(len(caption.splitlines()), 2)
@@ -782,14 +782,14 @@ git commit -m "feat: render pyqt desktop panel preview"
 
 ```python
 def test_delete_last_group_recreates_default_group(self) -> None:
-    model = WorkspaceModel(build_default_configuration(r"E:\system\桌面"))
+    model = WorkspaceModel(build_default_configuration(r"C:\Users\Example\Desktop"))
     only_tab = model.config.panel_tabs[0].id
     model.delete_tab(only_tab)
     self.assertEqual(len(model.config.panel_groups), 1)
     self.assertGreaterEqual(len(model.config.panel_tabs), 1)
 
 def test_add_tab_joins_current_group_and_requests_inline_rename(self) -> None:
-    model = WorkspaceModel(build_default_configuration(r"E:\system\桌面"))
+    model = WorkspaceModel(build_default_configuration(r"C:\Users\Example\Desktop"))
     new_tab = model.add_tab("group-default")
     self.assertEqual(new_tab.group_id, "group-default")
     self.assertEqual(model.config.panel_groups[0].active_tab_id, new_tab.id)
@@ -798,7 +798,7 @@ def test_add_tab_joins_current_group_and_requests_inline_rename(self) -> None:
 ```python
 # tests/test_qt_panel_group.py
 def make_group_widget() -> PanelGroupWidget:
-    config = build_default_configuration(r"E:\system\桌面")
+    config = build_default_configuration(r"C:\Users\Example\Desktop")
     return PanelGroupWidget(config.panel_groups[0], config.panel_tabs)
 
 
@@ -890,7 +890,7 @@ git commit -m "feat: manage panel tabs through qt header actions"
 
 ```python
 def make_item_grid() -> ItemGridWidget:
-    config = build_default_configuration(r"E:\system\桌面")
+    config = build_default_configuration(r"C:\Users\Example\Desktop")
     return ItemGridWidget(active_tab_id="tab-images")
 
 
@@ -900,7 +900,7 @@ def test_local_file_urls_are_emitted_for_any_suffix(self) -> None:
     self.assertEqual(paths, [Path(r"D:\draft\asset.weird")])
 
 def test_settings_has_supported_sections_only(self) -> None:
-    window = SettingsWindow(build_default_configuration(r"E:\system\桌面"))
+    window = SettingsWindow(build_default_configuration(r"C:\Users\Example\Desktop"))
     text = window.visible_section_names()
     self.assertEqual(text, ["基础设置", "桌面分区", "桌面整理", "面板外观"])
     self.assertNotIn("壁纸", window.all_text())
@@ -962,13 +962,13 @@ git commit -m "feat: add virtual reference drops and qt settings"
 
 ```python
 def test_drop_group_over_target_merges_using_pointer_position(self) -> None:
-    model = WorkspaceModel(build_default_configuration(r"E:\system\桌面"))
+    model = WorkspaceModel(build_default_configuration(r"C:\Users\Example\Desktop"))
     second = model.detach_tab("tab-images", PanelGeometry(0.6, 0.2, 0.3, 0.4))
     model.merge_group_at_point(second.id, QPoint(180, 160), bounds={"group-default": QRect(100, 100, 400, 300)})
     self.assertEqual(model.tab("tab-images").group_id, "group-default")
 
 def test_drag_tab_outside_group_detaches_without_moving_content_files(self) -> None:
-    model = WorkspaceModel(build_default_configuration(r"E:\system\桌面"))
+    model = WorkspaceModel(build_default_configuration(r"C:\Users\Example\Desktop"))
     detached = model.detach_tab("tab-images", PanelGeometry(0.5, 0.2, 0.3, 0.4))
     self.assertEqual(model.tab("tab-images").group_id, detached.id)
     self.assertEqual(detached.appearance.background_opacity, 0.60)
@@ -1094,14 +1094,14 @@ class FakeShell:
 
 class TakeoverTests(unittest.TestCase):
     def test_attach_failure_never_hides_explorer_icons(self) -> None:
-        state = build_default_configuration(r"E:\system\桌面")
+        state = build_default_configuration(r"C:\Users\Example\Desktop")
         shell = FakeShell(attach_ok=False)
         controller = DesktopTakeoverController(state, shell, lambda: None)
         self.assertFalse(controller.enable(123))
         self.assertEqual(shell.calls, ["attach"])
 
     def test_restore_marker_is_saved_before_icons_are_hidden(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         events = []
         shell = FakeShell()
         controller = DesktopTakeoverController(config, shell, lambda: events.append(config.desktop.restore_required))
@@ -1110,7 +1110,7 @@ class TakeoverTests(unittest.TestCase):
         self.assertEqual(shell.calls, ["attach", "hide"])
 
     def test_startup_recovers_stale_hidden_state_first(self) -> None:
-        config = build_default_configuration(r"E:\system\桌面")
+        config = build_default_configuration(r"C:\Users\Example\Desktop")
         config.desktop.restore_required = True
         shell = FakeShell()
         DesktopTakeoverController(config, shell, lambda: None).recover_if_required()
@@ -1249,8 +1249,8 @@ def test_quit_requests_icon_restore_before_application_exit(self) -> None:
 
 def test_desktop_path_change_rebuilds_watcher_without_creating_entries(self) -> None:
     lifecycle = make_lifecycle()
-    lifecycle.set_desktop_path(r"E:\system\桌面")
-    self.assertEqual(lifecycle.watcher.path, Path(r"E:\system\桌面"))
+    lifecycle.set_desktop_path(r"C:\Users\Example\Desktop")
+    self.assertEqual(lifecycle.watcher.path, Path(r"C:\Users\Example\Desktop"))
     self.assertEqual(lifecycle.model.config.external_refs, [])
 ```
 

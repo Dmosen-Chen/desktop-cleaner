@@ -10,3 +10,5 @@ build/
 dist/
 *.egg-info/
 DesktopTidy.spec
+.claude/
+tempCodeRunnerFile.py

@@ -1,6 +1,6 @@
 {
   "archive_root": "",
-  "desktop": "E:\\system\\桌面",
+  "desktop": "",
   "rules": {
     ".pdf": "文档",
     ".doc": "文档",
