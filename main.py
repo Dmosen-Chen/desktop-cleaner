@@ -1057,7 +1057,7 @@ class App(tk.Tk):
         ttk.Label(top_row, text="整理规则", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
 
         ttk.Button(top_row, text="+ 自定义规则", command=lambda: edit_rule(None)).pack(side=tk.RIGHT)
-        ttk.Button(top_row, text="恢复小智分类", command=lambda: reset_default_rules()).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(top_row, text="恢复默认分类", command=lambda: reset_default_rules()).pack(side=tk.RIGHT, padx=(0, 8))
 
         columns = ("type", "exts", "target", "enabled")
 
@@ -1135,7 +1135,7 @@ class App(tk.Tk):
 
         def reset_default_rules() -> None:
 
-            if not messagebox.askyesno("恢复默认分类", "用参考小智桌面的默认分类覆盖当前整理规则？", parent=dlg):
+            if not messagebox.askyesno("恢复默认分类", "用内置推荐分类覆盖当前整理规则？", parent=dlg):
 
                 return
 
