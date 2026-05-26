@@ -1,4 +1,4 @@
-"""Qt settings surface for the desktop panel preview."""
+"""Qt settings surface for the desktop panel."""
 
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ class SettingsWindow(QWidget):
         self._reload_screen_combo(self._config)
         form.addRow("\u663e\u793a\u5668", self._screen_combo)
         form.addRow("桌面路径", path_row)
-        self._takeover_checkbox = QCheckBox("启用桌面接管（仅预览）", page)
+        self._takeover_checkbox = QCheckBox("启用桌面接管（暂未开放）", page)
         self._takeover_checkbox.setChecked(self._config.desktop.takeover_enabled)
         form.addRow(self._takeover_checkbox)
         self._startup_checkbox = QCheckBox("开机启动", page)
@@ -193,7 +193,7 @@ class SettingsWindow(QWidget):
         page = QWidget(self)
         layout = QVBoxLayout(page)
         layout.addWidget(
-            QLabel("默认面板组包含六个分类标签，可在预览面板中增删标签。", page)
+            QLabel("默认面板组包含六个分类标签，可在面板中增删标签。", page)
         )
         for group in self._config.panel_groups:
             layout.addWidget(QLabel(f"面板组：{group.id}", page))

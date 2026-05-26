@@ -22,7 +22,7 @@ class ConfigurationStore:
 
     @classmethod
     def default(cls) -> ConfigurationStore:
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopTidy"
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopCleaner"
         return cls(base / "config.json")
 
     def load(self) -> Configuration:

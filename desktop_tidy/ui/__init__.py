@@ -1,4 +1,4 @@
-"""Qt widgets for the desktop panel preview."""
+"""Qt widgets for the desktop panel."""
 
 from .item_grid import ItemGridWidget
 from .panel_group import PanelGroupWidget

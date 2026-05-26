@@ -1,4 +1,4 @@
-"""Read-only desktop item icons for the Qt preview grid."""
+"""Read-only desktop item icons for the Qt item grid."""
 
 from __future__ import annotations
 

@@ -17,7 +17,7 @@ class ConfigurationStoreTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             self.assertEqual(
                 ConfigurationStore.default().path,
-                Path(tmp) / "DesktopTidy" / "config.json",
+                Path(tmp) / "DesktopCleaner" / "config.json",
             )
 
     def test_save_replaces_temporary_json_atomically(self) -> None:

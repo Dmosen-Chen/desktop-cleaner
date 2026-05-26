@@ -1,4 +1,4 @@
-"""Qt screen discovery helpers for preview panel placement."""
+"""Qt screen discovery helpers for panel placement."""
 
 from __future__ import annotations
 

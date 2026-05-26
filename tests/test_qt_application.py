@@ -15,8 +15,8 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from desktop_tidy.application import (
-    PreviewApplication,
-    preview_store,
+    DesktopCleanerApplication,
+    application_store,
     visible_entries_for_active_tab,
 )
 from desktop_tidy.domain.classification import classify_path
@@ -35,50 +35,50 @@ from tests.test_qt_panel_group import (
 )
 
 
-def assert_preview_application_wires_panel_signals(app: PreviewApplication) -> None:
+def assert_application_wires_panel_signals(app: DesktopCleanerApplication) -> None:
     panel = app.panel
     for signal_name in ("tab_detach_requested", "group_merge_requested"):
         if getattr(panel, signal_name, None) is None:
             raise AssertionError(f"PanelGroupWidget must expose {signal_name}")
 
 
-class PreviewApplicationTests(unittest.TestCase):
+class DesktopCleanerApplicationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_preview_store_uses_preview_config_not_user_config(self) -> None:
+    def test_application_store_uses_application_config(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
-            store = preview_store()
+            store = application_store()
 
             self.assertEqual(
                 store.path,
-                Path(tmp) / "DesktopTidy" / "preview-config.json",
+                Path(tmp) / "DesktopCleaner" / "config.json",
             )
-            self.assertNotEqual(store.path.name, "config.json")
-            self.assertNotEqual(store.path, ConfigurationStore.default().path)
+            self.assertEqual(store.path.name, "config.json")
+            self.assertEqual(store.path, ConfigurationStore.default().path)
 
-    def test_preview_application_uses_preview_store_by_default(self) -> None:
+    def test_desktop_cleaner_application_uses_application_store_by_default(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
-            app = PreviewApplication(build_default_configuration(r"D:\Preview\Desktop"))
+            app = DesktopCleanerApplication(build_default_configuration(r"D:\Example\Desktop"))
 
             self.assertEqual(
                 app.store.path,
-                Path(tmp) / "DesktopTidy" / "preview-config.json",
+                Path(tmp) / "DesktopCleaner" / "config.json",
             )
 
     def test_external_drop_is_saved_only_as_external_refs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop = root / "desktop"
             outside = root / "outside"
             desktop.mkdir()
             outside.mkdir()
             source = outside / "sample.weird"
             source.write_text("keep-me", encoding="utf-8")
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
 
             app.handle_paths_dropped([source], "tab-images")
             app.save()
@@ -89,18 +89,18 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertEqual(list(desktop.iterdir()), [])
             self.assertEqual(source.read_text(encoding="utf-8"), "keep-me")
 
-    def test_handle_paths_dropped_persists_preview_config_without_explicit_save(self) -> None:
+    def test_handle_paths_dropped_persists_application_config_without_explicit_save(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop = root / "desktop"
             outside = root / "outside"
             desktop.mkdir()
             outside.mkdir()
             source = outside / "sample.weird"
             source.write_text("keep-me", encoding="utf-8")
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
 
             app.handle_paths_dropped([source], "tab-images")
 
@@ -113,7 +113,7 @@ class PreviewApplicationTests(unittest.TestCase):
             saved_path = store.path
             self.assertTrue(
                 saved_path.is_file(),
-                "handle_paths_dropped must persist preview-config.json without app.save()",
+                "handle_paths_dropped must persist config.json without app.save()",
             )
             payload = json.loads(saved_path.read_text(encoding="utf-8"))
             self.assertEqual(len(payload["external_refs"]), 1)
@@ -155,15 +155,15 @@ class PreviewApplicationTests(unittest.TestCase):
     def test_settings_desktop_path_change_rebuilds_index_in_same_preview_session(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop_a = root / "desktop-a"
             desktop_b = root / "desktop-b"
             desktop_a.mkdir()
             desktop_b.mkdir()
             (desktop_a / "photo-a.png").write_text("a", encoding="utf-8")
             (desktop_b / "photo-b.png").write_text("b", encoding="utf-8")
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop_a), store=store)
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop_a), store=store)
 
             settings = SettingsWindow(app.model.config)
             settings.config_saved.connect(app._on_settings_saved)
@@ -174,12 +174,12 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertEqual(
                 app.index.desktop.resolve(),
                 desktop_b.resolve(),
-                "PreviewApplication must rebuild DesktopIndex for the new desktop path",
+                "DesktopCleanerApplication must rebuild DesktopIndex for the new desktop path",
             )
             self.assertEqual(
                 app.watcher._index.desktop.resolve(),
                 desktop_b.resolve(),
-                "PreviewApplication must reconnect DesktopWatcher to the new desktop path",
+                "DesktopCleanerApplication must reconnect DesktopWatcher to the new desktop path",
             )
 
             app.panel.activate_tab("tab-images")
@@ -191,24 +191,24 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertEqual(list(desktop_b.iterdir()), [desktop_b / "photo-b.png"])
 
             self.assertTrue(store.path.is_file())
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
             self.assertFalse(str(store.path.resolve()).startswith(str(desktop_a.resolve())))
             self.assertFalse(str(store.path.resolve()).startswith(str(desktop_b.resolve())))
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(Path(payload["desktop"]["path"]).resolve(), desktop_b.resolve())
 
-    def test_save_writes_preview_config_outside_configured_desktop_directory(self) -> None:
+    def test_save_writes_application_config_outside_configured_desktop_directory(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop = root / "desktop"
             outside = root / "outside"
             desktop.mkdir()
             outside.mkdir()
             source = outside / "folder-ref"
             source.mkdir()
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
 
             app.handle_paths_dropped([source], "tab-folders")
             app.save()
@@ -224,23 +224,23 @@ class PreviewApplicationTests(unittest.TestCase):
     def test_save_does_not_create_config_json_in_preview_directory(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop = root / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
 
             app.save()
 
             self.assertTrue(store.path.exists())
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
 
     def test_detach_creates_second_panel_widget_and_refresh_keeps_both_in_sync(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
@@ -264,12 +264,12 @@ class PreviewApplicationTests(unittest.TestCase):
                 "tab-images",
             )
 
-    def test_merge_on_pointer_inside_target_panel_persists_to_preview_config(self) -> None:
+    def test_merge_on_pointer_inside_target_panel_persists_to_application_config(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
@@ -293,13 +293,13 @@ class PreviewApplicationTests(unittest.TestCase):
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(len(payload["panel_groups"]), 1)
             self.assertIn("tab-images", payload["panel_groups"][0]["tab_ids"])
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
 
     def test_merge_rejects_release_outside_target_panel_bounds(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            app = PreviewApplication(build_default_configuration(desktop))
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
             app.show()
             type(self).app.processEvents()
 
@@ -320,16 +320,16 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertEqual(len(app.panel_widgets()), 2)
             self.assertEqual(app.model.tab("tab-images").group_id, source.group_id)
 
-    def test_mouse_tab_drag_outside_wires_detach_and_persists_preview_config(self) -> None:
+    def test_mouse_tab_drag_outside_wires_detach_and_persists_application_config(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
-            assert_preview_application_wires_panel_signals(app)
+            assert_application_wires_panel_signals(app)
 
             panel = app.panel
             panel.activate_tab("tab-images")
@@ -348,18 +348,18 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertTrue(store.path.is_file())
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(len(payload["panel_groups"]), 2)
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
 
-    def test_mouse_header_drag_release_wires_merge_and_persists_preview_config(self) -> None:
+    def test_mouse_header_drag_release_wires_merge_and_persists_application_config(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
-            assert_preview_application_wires_panel_signals(app)
+            assert_application_wires_panel_signals(app)
 
             app.panel.activate_tab("tab-images")
             app.detach_tab_to_new_group("tab-images", PanelGeometry(0.55, 0.18, 0.28, 0.42))
@@ -385,12 +385,12 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
-            assert_preview_application_wires_panel_signals(app)
+            assert_application_wires_panel_signals(app)
 
             panel = app.panel
             panel.set_locked(True)
@@ -412,11 +412,11 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            app = PreviewApplication(build_default_configuration(desktop))
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
             app.show()
             type(self).app.processEvents()
 
-            assert_preview_application_wires_panel_signals(app)
+            assert_application_wires_panel_signals(app)
 
             default_panel = app.panel
             self.assertEqual(default_panel.group_id, "group-default")
@@ -442,7 +442,7 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertIs(
                 app.panel,
                 surviving_panel,
-                "PreviewApplication.panel must follow the surviving widget after default merge",
+                "DesktopCleanerApplication.panel must follow the surviving widget after default merge",
             )
             self.assertNotIn("group-default", {panel.group_id for panel in live_panels})
 
@@ -459,7 +459,7 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            app = PreviewApplication(build_default_configuration(desktop))
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
             app.show()
             type(self).app.processEvents()
 
@@ -505,16 +505,16 @@ class PreviewApplicationTests(unittest.TestCase):
                 0.33,
             )
 
-    def test_constructor_with_explicit_config_does_not_access_real_preview_store(
+    def test_constructor_with_explicit_config_does_not_access_real_application_store(
         self,
     ) -> None:
         invalid_root = r"S:\does-not-exist-917a3f2c"
         with patch.dict(os.environ, {"LOCALAPPDATA": invalid_root}):
             try:
-                app = PreviewApplication(build_default_configuration(r"D:\Preview\Desktop"))
+                app = DesktopCleanerApplication(build_default_configuration(r"D:\Example\Desktop"))
             except (OSError, PermissionError) as exc:
                 raise AssertionError(
-                    "PreviewApplication(config=...) must not stat or access the preview "
+                    "DesktopCleanerApplication(config=...) must not stat or access the preview "
                     "store path on the real filesystem"
                 ) from exc
 
@@ -528,12 +528,12 @@ class PreviewApplicationTests(unittest.TestCase):
             "#111111",
         )
 
-    def test_new_preview_config_uses_black_sixty_percent_appearance(self) -> None:
+    def test_new_application_config_uses_black_sixty_percent_appearance(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
 
             self.assertEqual(
                 app.model.group("group-default").appearance.background_color,
@@ -549,8 +549,8 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
@@ -569,8 +569,8 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
@@ -601,8 +601,8 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
@@ -658,7 +658,7 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            app = PreviewApplication(build_default_configuration(desktop))
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
             app.show()
             type(self).app.processEvents()
 
@@ -700,14 +700,14 @@ class PreviewApplicationTests(unittest.TestCase):
     def test_external_ref_with_override_is_not_restorable_for_auto_handler(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop = root / "desktop"
             outside = root / "outside"
             desktop.mkdir()
             outside.mkdir()
             source = outside / "linked.weird"
             source.write_text("keep", encoding="utf-8")
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
             config = build_default_configuration(desktop)
             tab_id = "tab-documents"
             key = canonical_key(source)
@@ -720,7 +720,7 @@ class PreviewApplicationTests(unittest.TestCase):
                 )
             )
             config.manual_overrides.append(ManualOverride(key, tab_id))
-            app = PreviewApplication(config, store=store)
+            app = DesktopCleanerApplication(config, store=store)
             app.show()
             app.panel.activate_tab(tab_id)
             app.refresh()
@@ -738,14 +738,14 @@ class PreviewApplicationTests(unittest.TestCase):
     def test_manual_override_restore_handler_returns_item_to_automatic_tab(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            preview_root = root / "appdata"
+            appdata_root = root / "appdata"
             desktop = root / "desktop"
             desktop.mkdir()
             photo = desktop / "photo.png"
             photo.write_text("img-bytes", encoding="utf-8")
             before = photo.read_text(encoding="utf-8")
-            store = ConfigurationStore(preview_root / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             app.show()
             type(self).app.processEvents()
 
@@ -779,7 +779,7 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertTrue(store.path.is_file())
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(payload.get("manual_overrides", []), [])
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
             self.assertEqual(photo.read_text(encoding="utf-8"), before)
 
     def test_one_click_organize_reapplies_rules_without_touching_files(self) -> None:
@@ -791,8 +791,8 @@ class PreviewApplicationTests(unittest.TestCase):
             desktop.mkdir()
             photo = desktop / "photo.png"
             photo.write_text("img-bytes", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
 
             app.show()
@@ -815,7 +815,7 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertTrue(store.path.is_file())
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(payload.get("manual_overrides", []), [])
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
 
     def test_new_desktop_items_show_in_other_until_one_click_organize(self) -> None:
         from desktop_tidy.application import ensure_application
@@ -824,8 +824,8 @@ class PreviewApplicationTests(unittest.TestCase):
             root = Path(tmp)
             desktop = root / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
 
             app.show()
@@ -863,8 +863,8 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             type(self).app.processEvents()
@@ -881,16 +881,16 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertGreater(geometry["rh"], 0.0)
             self.assertGreaterEqual(geometry["rx"], 0.0)
             self.assertGreaterEqual(geometry["ry"], 0.0)
-            self.assertFalse((store.path.parent / "config.json").exists())
+            self.assertEqual(store.path.name, "config.json")
 
-    def test_ctrl_wheel_icon_size_change_persists_to_preview_config(self) -> None:
+    def test_ctrl_wheel_icon_size_change_persists_to_application_config(self) -> None:
         from desktop_tidy.application import ensure_application
 
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             type(self).app.processEvents()
@@ -916,8 +916,8 @@ class PreviewApplicationTests(unittest.TestCase):
             desktop.mkdir()
             for name in ("one.pdf", "two.png"):
                 (desktop / name).write_text("x", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             app.detach_tab_to_new_group(
@@ -963,8 +963,8 @@ class PreviewApplicationTests(unittest.TestCase):
             desktop.mkdir()
             for name in ("one.pdf", "two.png", "three.zip"):
                 (desktop / name).write_text("x", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             app.detach_tab_to_new_group(
@@ -995,8 +995,8 @@ class PreviewApplicationTests(unittest.TestCase):
             desktop.mkdir()
             for name in ("one.pdf", "two.png", "three.zip"):
                 (desktop / name).write_text("x", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             app.detach_tab_to_new_group(
@@ -1043,8 +1043,8 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             app.detach_tab_to_new_group(
@@ -1079,8 +1079,8 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
             app.show()
             app.detach_tab_to_new_group(
@@ -1113,8 +1113,8 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertEqual(calls["primary"], 1)
             self.assertEqual(calls["secondary"], 0)
 
-    def test_preview_application_disables_quit_on_last_window_closed(self) -> None:
-        """PreviewApplication must set quitOnLastWindowClosed(False) to survive settings close."""
+    def test_desktop_cleaner_application_disables_quit_on_last_window_closed(self) -> None:
+        """DesktopCleanerApplication must set quitOnLastWindowClosed(False) to survive settings close."""
         app = QApplication.instance()
         self.assertIsNotNone(app)
 
@@ -1136,7 +1136,7 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            app = PreviewApplication(build_default_configuration(desktop))
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
             ensure_application()
 
             app.show()
@@ -1164,7 +1164,7 @@ class PreviewApplicationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
-            app = PreviewApplication(build_default_configuration(desktop))
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
             ensure_application()
 
             app.show()
@@ -1196,8 +1196,8 @@ class PreviewApplicationTests(unittest.TestCase):
             source = root / "outside" / "photo.png"
             source.parent.mkdir()
             source.write_text("img", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
 
             app.show()
@@ -1230,8 +1230,8 @@ class PreviewApplicationTests(unittest.TestCase):
             source = root / "outside" / "doc.txt"
             source.parent.mkdir()
             source.write_text("text", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
 
             app.show()
@@ -1263,8 +1263,8 @@ class PreviewApplicationTests(unittest.TestCase):
             outside.mkdir()
             source = outside / "linked.weird"
             source.write_text("keep", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
 
             app.handle_paths_dropped([source], "tab-documents")
@@ -1284,7 +1284,7 @@ class PreviewApplicationTests(unittest.TestCase):
             called_path = mock_open.call_args[0][0]
             self.assertEqual(called_path.resolve(), source.resolve())
 
-    def test_open_item_exception_does_not_crash_or_alter_preview_config(self) -> None:
+    def test_open_item_exception_does_not_crash_or_alter_application_config(self) -> None:
         from desktop_tidy.application import ensure_application
         from tests.test_qt_item_grid import _grid_item_buttons
 
@@ -1295,8 +1295,8 @@ class PreviewApplicationTests(unittest.TestCase):
             source = root / "outside" / "photo.png"
             source.parent.mkdir()
             source.write_text("img", encoding="utf-8")
-            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
-            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
 
             app.show()
@@ -1312,10 +1312,7 @@ class PreviewApplicationTests(unittest.TestCase):
 
             config_mtime_before = store.path.stat().st_mtime if store.path.is_file() else None
             source_content_before = source.read_text(encoding="utf-8")
-            self.assertFalse(
-                (store.path.parent / "config.json").exists(),
-                "real config.json must not exist in preview test",
-            )
+            self.assertEqual(store.path.name, "config.json")
 
             with patch(
                 "desktop_tidy.application.open_item",
@@ -1327,15 +1324,12 @@ class PreviewApplicationTests(unittest.TestCase):
             mock_open.assert_called_once()
             self.assertEqual(source.read_text(encoding="utf-8"), source_content_before)
             self.assertEqual(list(desktop.iterdir()), [])
-            self.assertFalse(
-                (store.path.parent / "config.json").exists(),
-                "open_item failure must not create config.json",
-            )
+            self.assertTrue(store.path.exists())
             if config_mtime_before is not None:
                 self.assertEqual(
                     store.path.stat().st_mtime,
                     config_mtime_before,
-                    "preview-config.json must not be rewritten after a bare open failure",
+                    "config.json must not be rewritten after a bare open failure",
                 )
 
 

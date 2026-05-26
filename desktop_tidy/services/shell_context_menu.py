@@ -1,4 +1,4 @@
-"""Optional Windows Shell context menu bridge for preview item cells."""
+"""Optional Windows Shell context menu bridge for item cells."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def _create_popup_owner(win32con, win32gui, global_pos: QPoint) -> int:  # type:
             win32gui.CreateWindowEx(
                 win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TOPMOST,
                 "STATIC",
-                "DesktopTidyContextMenu",
+                "DesktopCleanerContextMenu",
                 win32con.WS_POPUP,
                 int(global_pos.x()),
                 int(global_pos.y()),

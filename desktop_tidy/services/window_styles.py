@@ -1,4 +1,4 @@
-"""Small Windows window-style helpers for desktop-like Qt preview panels."""
+"""Small Windows window-style helpers for desktop-like Qt panels."""
 
 from __future__ import annotations
 

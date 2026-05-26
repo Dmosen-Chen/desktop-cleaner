@@ -1,4 +1,4 @@
-"""Qt application bootstrap for the desktop panel preview."""
+"""Qt application bootstrap for the desktop panel."""
 
 from __future__ import annotations
 
@@ -26,18 +26,20 @@ from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 
 
-PREVIEW_APPEARANCE_DEFAULTS = AppearanceSettings("#000000", 0.60)
+APP_DIR_NAME = "DesktopCleaner"
+APP_CONFIG_NAME = "config.json"
+APP_APPEARANCE_DEFAULTS = AppearanceSettings("#000000", 0.60)
 
 
-def preview_store() -> ConfigurationStore:
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopTidy"
-    return ConfigurationStore(base / "preview-config.json")
+def application_store() -> ConfigurationStore:
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / APP_DIR_NAME
+    return ConfigurationStore(base / APP_CONFIG_NAME)
 
 
-def apply_preview_appearance_defaults(config: Configuration) -> None:
-    config.appearance_defaults = deepcopy(PREVIEW_APPEARANCE_DEFAULTS)
+def apply_application_appearance_defaults(config: Configuration) -> None:
+    config.appearance_defaults = deepcopy(APP_APPEARANCE_DEFAULTS)
     for group in config.panel_groups:
-        group.appearance = deepcopy(PREVIEW_APPEARANCE_DEFAULTS)
+        group.appearance = deepcopy(APP_APPEARANCE_DEFAULTS)
 
 
 def ensure_application(argv: list[str] | None = None) -> QApplication:
@@ -68,8 +70,8 @@ def visible_entries_for_active_tab(
     return desktop_entries + external_entries
 
 
-class PreviewApplication:
-    """Development-only preview that reads the desktop without takeover."""
+class DesktopCleanerApplication:
+    """Qt desktop panel application that reads the desktop without takeover."""
 
     def __init__(
         self,
@@ -78,15 +80,15 @@ class PreviewApplication:
         store: ConfigurationStore | None = None,
     ) -> None:
         if config is None:
-            self.store = store or preview_store()
-            is_new_preview = not self.store.path.is_file()
+            self.store = store or application_store()
+            is_new_config = not self.store.path.is_file()
             self.model = WorkspaceModel(self.store.load())
         else:
-            self.store = store or preview_store()
+            self.store = store or application_store()
             self.model = WorkspaceModel(config)
-            is_new_preview = store is not None and not self.store.path.is_file()
-        if is_new_preview:
-            apply_preview_appearance_defaults(self.model.config)
+            is_new_config = store is not None and not self.store.path.is_file()
+        if is_new_config:
+            apply_application_appearance_defaults(self.model.config)
         self.config = self.model.config
         self.index = DesktopIndex(Path(self.config.desktop.path))
         self._panels: dict[str, PanelGroupWidget] = {}
