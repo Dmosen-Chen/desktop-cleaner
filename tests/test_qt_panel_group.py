@@ -18,7 +18,7 @@ from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.models import Configuration, PanelGeometry
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.services.desktop_index import IndexedItem
-from desktop_tidy.ui.panel_group import PanelGroupWidget
+from desktop_tidy.ui.panel_group import PanelGroupWidget, _ResizeRegion
 
 
 def make_group_widget(
@@ -656,6 +656,64 @@ class PanelGroupWidgetTests(unittest.TestCase):
         type(self).app.processEvents()
 
         self.assertEqual(widget.frameGeometry().right() + 1, 430)
+
+    def test_screen_id_positions_panel_on_selected_screen(self) -> None:
+        widget, model = make_group_widget()
+        group = model.group("group-default")
+        group.screen_id = "screen-1"
+        group.geometry = PanelGeometry(rx=0.10, ry=0.20, rw=0.30, rh=0.40)
+        widget.set_screen_geometries(
+            {
+                "primary": QRect(0, 0, 1000, 800),
+                "screen-1": QRect(1000, 0, 800, 600),
+            }
+        )
+
+        widget._apply_geometry_from_model()
+
+        self.assertEqual(widget.frameGeometry().x(), 1080)
+        self.assertEqual(widget.frameGeometry().y(), 120)
+        self.assertEqual(widget.frameGeometry().width(), 240)
+        self.assertEqual(widget.frameGeometry().height(), 240)
+
+    def test_header_drag_to_secondary_screen_updates_screen_id(self) -> None:
+        widget, model = make_group_widget()
+        group = model.group("group-default")
+        group.geometry = PanelGeometry(rx=0.05, ry=0.05, rw=0.30, rh=0.30)
+        widget.set_screen_geometries(
+            {
+                "primary": QRect(0, 0, 800, 600),
+                "screen-1": QRect(800, 0, 800, 600),
+            }
+        )
+        widget.setGeometry(40, 40, 240, 180)
+        widget.show()
+        type(self).app.processEvents()
+
+        widget._begin_header_drag(QPoint(100, 60))
+        widget._finish_header_drag(QPoint(900, 80))
+        type(self).app.processEvents()
+
+        self.assertEqual(group.screen_id, "screen-1")
+        self.assertGreaterEqual(group.geometry.rx, 0.0)
+        self.assertLessEqual(group.geometry.rx + group.geometry.rw, 1.0)
+
+    def test_snap_targets_on_other_screens_are_ignored(self) -> None:
+        widget, _model = make_group_widget()
+        widget.set_screen_geometries(
+            {
+                "primary": QRect(0, 0, 800, 600),
+                "screen-1": QRect(800, 0, 800, 600),
+            }
+        )
+        widget.set_snap_rects([QRect(805, 100, 240, 200)])
+
+        snapped = widget._snap_frame_to_screen(
+            QRect(510, 100, 280, 200),
+            QPoint(790, 120),
+        )
+
+        self.assertLessEqual(snapped.right(), 799)
 
     def test_titlebar_buttons_have_hover_and_pressed_feedback_styles(self) -> None:
         widget, _model = make_group_widget()
@@ -1427,6 +1485,74 @@ class PanelGroupWidgetTests(unittest.TestCase):
                 model.group("group-default").geometry.rw,
                 geometry_before.rw,
             )
+
+    def test_resize_snaps_width_to_other_panel_width(self) -> None:
+        widget, _model = make_group_widget()
+        widget.set_screen_geometries({"primary": QRect(0, 0, 1200, 900)})
+        widget.set_snap_rects([QRect(80, 40, 700, 260)])
+        widget.setGeometry(120, 420, 520, 260)
+        widget.show()
+        type(self).app.processEvents()
+
+        start = widget.mapToGlobal(QPoint(widget.width() - 2, widget.height() // 2))
+        widget._begin_resize_gesture(_ResizeRegion.RIGHT, start)
+        widget._update_resize_gesture(start + QPoint(700 - widget.width() - 6, 0))
+        widget._finish_resize_gesture()
+        type(self).app.processEvents()
+
+        self.assertEqual(widget.width(), 700)
+
+    def test_resize_snaps_height_to_other_panel_height(self) -> None:
+        widget, _model = make_group_widget()
+        widget.set_screen_geometries({"primary": QRect(0, 0, 1200, 900)})
+        widget.set_snap_rects([QRect(80, 40, 420, 380)])
+        widget.setGeometry(540, 220, 420, 260)
+        widget.show()
+        type(self).app.processEvents()
+
+        start = widget.mapToGlobal(QPoint(widget.width() // 2, widget.height() - 2))
+        widget._begin_resize_gesture(_ResizeRegion.BOTTOM, start)
+        widget._update_resize_gesture(start + QPoint(0, 380 - widget.height() - 6))
+        widget._finish_resize_gesture()
+        type(self).app.processEvents()
+
+        self.assertEqual(widget.height(), 380)
+
+    def test_live_resize_reflows_grid_without_rebuilding_cells(self) -> None:
+        with TemporaryDirectory() as tmp:
+            widget, _model = make_group_widget(Path(tmp) / "desktop")
+            widget.setGeometry(120, 120, 440, 260)
+            widget.show()
+            type(self).app.processEvents()
+            entries = [
+                IndexedItem(Path(tmp) / f"entry-{index:03d}.txt")
+                for index in range(16)
+            ]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            widget.item_grid.set_entries(entries)
+            type(self).app.processEvents()
+            rebuilt = QSignalSpy(widget.item_grid.cells_rebuilt)
+            layout = widget.item_grid._grid_host.layout()
+            before_position = layout.getItemPosition(3)
+
+            start = widget.mapToGlobal(QPoint(widget.width() - 2, widget.height() // 2))
+            widget._begin_resize_gesture(_ResizeRegion.RIGHT, start)
+            widget._update_resize_gesture(start + QPoint(420, 0))
+            type(self).app.processEvents()
+
+            during_position = layout.getItemPosition(3)
+            self.assertNotEqual(
+                during_position[:2],
+                before_position[:2],
+                "grid item positions should update while the panel is still being resized",
+            )
+            self.assertEqual(rebuilt.count(), 0)
+
+            widget._finish_resize_gesture()
+            type(self).app.processEvents()
+
+            self.assertEqual(rebuilt.count(), 0)
 
     def test_resize_from_content_bottom_edge_changes_height(self) -> None:
         """Dragging from the bottom edge of the scroll area must resize the panel."""

@@ -21,6 +21,7 @@ from desktop_tidy.services.desktop_index import (
     IndexedItem,
 )
 from desktop_tidy.services.item_launcher import open_item
+from desktop_tidy.services.screens import available_screen_geometries, available_screen_options
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 
@@ -179,12 +180,16 @@ class PreviewApplication:
             self.model.config.panel_tabs,
             workspace=self.model,
         )
+        panel.set_screen_geometries(available_screen_geometries())
         self._connect_panel(panel)
         self._panels[group_id] = panel
         return panel
 
     def _connect_panel(self, panel: PanelGroupWidget) -> None:
         panel.changed.connect(self._on_panel_changed)
+        panel.appearance_changed.connect(self._on_panel_appearance_changed)
+        panel.geometry_changed.connect(self._on_panel_geometry_changed)
+        panel.layout_gesture_started.connect(self._on_panel_layout_gesture_started)
         panel.settings_requested.connect(self._show_settings)
         panel.organize_requested.connect(self._on_organize_requested)
         panel.item_grid.paths_dropped.connect(self._on_paths_dropped)
@@ -201,12 +206,17 @@ class PreviewApplication:
             panel.reload_from_model()
 
     def _sync_panel_snap_targets(self) -> None:
+        screen_geometries = available_screen_geometries()
+        groups_by_id = {group.id: group for group in self.model.config.panel_groups}
         for group_id, panel in self._panels.items():
+            panel.set_screen_geometries(screen_geometries)
+            source_screen_id = groups_by_id[group_id].screen_id
             panel.set_snap_rects(
                 [
                     other.frameGeometry()
                     for other_id, other in self._panels.items()
                     if other_id != group_id
+                    and groups_by_id[other_id].screen_id == source_screen_id
                 ]
             )
 
@@ -232,6 +242,29 @@ class PreviewApplication:
         self._sync_panel_widgets_with_model()
         self.save()
         self.refresh()
+
+    def _on_panel_geometry_changed(self) -> None:
+        self.save()
+
+    def _on_panel_appearance_changed(self) -> None:
+        self.save()
+
+    def _on_panel_layout_gesture_started(self, group_id: str) -> None:
+        panel = self._panels.get(group_id)
+        if panel is None:
+            return
+        screen_geometries = available_screen_geometries()
+        groups_by_id = {group.id: group for group in self.model.config.panel_groups}
+        panel.set_screen_geometries(screen_geometries)
+        source_screen_id = groups_by_id[group_id].screen_id
+        panel.set_snap_rects(
+            [
+                other.frameGeometry()
+                for other_id, other in self._panels.items()
+                if other_id != group_id
+                and groups_by_id[other_id].screen_id == source_screen_id
+            ]
+        )
 
     def _sync_panel_widgets_with_model(self) -> None:
         live_group_ids = {group.id for group in self.model.config.panel_groups}
@@ -311,6 +344,7 @@ class PreviewApplication:
             self._settings_window = SettingsWindow(
                 self.model.config,
                 group_id=group_id,
+                screen_options=available_screen_options(),
             )
             self._settings_window.config_saved.connect(self._on_settings_saved)
         else:
@@ -336,6 +370,7 @@ class PreviewApplication:
         self.save()
         for panel in self._panels.values():
             panel.reload_from_model()
+        self._sync_panel_snap_targets()
         self.refresh()
 
     def _on_desktop_changed(self, _changes: IndexChanges) -> None:
@@ -348,7 +383,10 @@ class PreviewApplication:
 
     def show(self) -> PanelGroupWidget:
         self.index.rescan()
+        screen_geometries = available_screen_geometries()
         for panel in self._panels.values():
+            panel.set_screen_geometries(screen_geometries)
+            panel._apply_geometry_from_model()
             panel.show()
         self._sync_panel_snap_targets()
         self.refresh()

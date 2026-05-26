@@ -11,7 +11,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from desktop_tidy.application import (
@@ -26,11 +26,9 @@ from desktop_tidy.domain.models import ItemRef, ManualOverride, PanelGeometry
 from desktop_tidy.persistence.config_store import ConfigurationStore
 from desktop_tidy.services.desktop_index import DesktopIndex
 from desktop_tidy.ui.settings_window import SettingsWindow
-from tests.test_qt_item_grid import (
-    _RESTORE_AUTO_LABEL,
-    context_menu_action_labels,
-)
+from tests.test_qt_item_grid import send_ctrl_wheel
 from tests.test_qt_panel_group import (
+    _ResizeRegion,
     find_tab_button,
     simulate_header_drag_release_at_global_point,
     simulate_tab_drag_release_at_local_point,
@@ -699,7 +697,7 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertIs(app.panel, surviving_panel)
             self.assertNotIn(ephemeral_id, app._panels)
 
-    def test_external_ref_with_override_does_not_offer_restore_auto(self) -> None:
+    def test_external_ref_with_override_is_not_restorable_for_auto_handler(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             preview_root = root / "appdata"
@@ -729,9 +727,12 @@ class PreviewApplicationTests(unittest.TestCase):
             type(self).app.processEvents()
 
             self.assertIn(source.resolve(), app.panel.item_grid.entry_paths())
-            self.assertNotIn(
-                _RESTORE_AUTO_LABEL,
-                context_menu_action_labels(app.panel.item_grid, source),
+            self.assertEqual(
+                app._restorable_paths_for_tab(
+                    [entry for entry in app.panel.item_grid._entries],
+                    tab_id,
+                ),
+                set(),
             )
 
     def test_manual_override_restore_handler_returns_item_to_automatic_tab(self) -> None:
@@ -758,10 +759,6 @@ class PreviewApplicationTests(unittest.TestCase):
             app.refresh()
             type(self).app.processEvents()
             self.assertIn(photo.resolve(), app.panel.item_grid.entry_paths())
-            self.assertNotIn(
-                _RESTORE_AUTO_LABEL,
-                context_menu_action_labels(app.panel.item_grid, photo),
-            )
 
             app._on_restore_auto_requested(photo)
             type(self).app.processEvents()
@@ -885,6 +882,236 @@ class PreviewApplicationTests(unittest.TestCase):
             self.assertGreaterEqual(geometry["rx"], 0.0)
             self.assertGreaterEqual(geometry["ry"], 0.0)
             self.assertFalse((store.path.parent / "config.json").exists())
+
+    def test_ctrl_wheel_icon_size_change_persists_to_preview_config(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
+            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            type(self).app.processEvents()
+            before = app.model.group("group-default").appearance.item_icon_size
+
+            send_ctrl_wheel(app.panel.item_grid, 120)
+
+            self.assertGreater(
+                app.model.group("group-default").appearance.item_icon_size,
+                before,
+            )
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["panel_groups"][0]["appearance"]["item_icon_size"],
+                app.model.group("group-default").appearance.item_icon_size,
+            )
+
+    def test_ctrl_wheel_on_one_panel_does_not_reload_show_or_refresh_other_panels(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            for name in ("one.pdf", "two.png"):
+                (desktop / name).write_text("x", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
+            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(rx=0.45, ry=0.20, rw=0.30, rh=0.35),
+            )
+            type(self).app.processEvents()
+            primary = app.panel
+            secondary = next(
+                panel for panel in app.panel_widgets() if panel.group_id != primary.group_id
+            )
+            calls = {"reload": 0, "show": 0, "set_entries": 0}
+            original_reload = secondary.reload_from_model
+            original_show = secondary.show
+            original_set_entries = secondary.item_grid.set_entries
+
+            def record_reload():
+                calls["reload"] += 1
+                original_reload()
+
+            def record_show():
+                calls["show"] += 1
+                original_show()
+
+            def record_set_entries(*args, **kwargs):
+                calls["set_entries"] += 1
+                original_set_entries(*args, **kwargs)
+
+            secondary.reload_from_model = record_reload  # type: ignore[method-assign]
+            secondary.show = record_show  # type: ignore[method-assign]
+            secondary.item_grid.set_entries = record_set_entries  # type: ignore[method-assign]
+
+            send_ctrl_wheel(primary.item_grid, 120)
+            type(self).app.processEvents()
+
+            self.assertEqual(calls, {"reload": 0, "show": 0, "set_entries": 0})
+
+    def test_resizing_one_panel_does_not_refresh_other_panel_grids(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            for name in ("one.pdf", "two.png", "three.zip"):
+                (desktop / name).write_text("x", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
+            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(rx=0.45, ry=0.20, rw=0.30, rh=0.35),
+            )
+            type(self).app.processEvents()
+            primary = app.panel
+            secondary = next(
+                panel for panel in app.panel_widgets() if panel.group_id != primary.group_id
+            )
+            rebuilt = QSignalSpy(secondary.item_grid.cells_rebuilt)
+
+            start = primary.mapToGlobal(QPoint(primary.width() - 2, primary.height() // 2))
+            primary._begin_resize_gesture(_ResizeRegion.RIGHT, start)
+            primary._update_resize_gesture(start + QPoint(90, 0))
+            primary._finish_resize_gesture()
+            type(self).app.processEvents()
+
+            self.assertEqual(rebuilt.count(), 0)
+            self.assertTrue(store.path.is_file())
+
+    def test_resizing_one_panel_does_not_reload_show_or_set_entries_on_other_panels(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            for name in ("one.pdf", "two.png", "three.zip"):
+                (desktop / name).write_text("x", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
+            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(rx=0.45, ry=0.20, rw=0.30, rh=0.35),
+            )
+            type(self).app.processEvents()
+            primary = app.panel
+            secondary = next(
+                panel for panel in app.panel_widgets() if panel.group_id != primary.group_id
+            )
+            calls = {"reload": 0, "show": 0, "set_entries": 0}
+            original_reload = secondary.reload_from_model
+            original_show = secondary.show
+            original_set_entries = secondary.item_grid.set_entries
+
+            def record_reload():
+                calls["reload"] += 1
+                original_reload()
+
+            def record_show():
+                calls["show"] += 1
+                original_show()
+
+            def record_set_entries(*args, **kwargs):
+                calls["set_entries"] += 1
+                original_set_entries(*args, **kwargs)
+
+            secondary.reload_from_model = record_reload  # type: ignore[method-assign]
+            secondary.show = record_show  # type: ignore[method-assign]
+            secondary.item_grid.set_entries = record_set_entries  # type: ignore[method-assign]
+
+            start = primary.mapToGlobal(QPoint(primary.width() - 2, primary.height() // 2))
+            primary._begin_resize_gesture(_ResizeRegion.RIGHT, start)
+            primary._update_resize_gesture(start + QPoint(90, 0))
+            primary._finish_resize_gesture()
+            type(self).app.processEvents()
+
+            self.assertEqual(calls, {"reload": 0, "show": 0, "set_entries": 0})
+
+    def test_resizing_one_panel_does_not_update_other_panel_snap_targets(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
+            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(rx=0.45, ry=0.20, rw=0.30, rh=0.35),
+            )
+            type(self).app.processEvents()
+            primary = app.panel
+            secondary = next(
+                panel for panel in app.panel_widgets() if panel.group_id != primary.group_id
+            )
+            calls = {"secondary": 0}
+            original_set_snap_rects = secondary.set_snap_rects
+
+            def record_secondary_snap_rects(rects):
+                calls["secondary"] += 1
+                original_set_snap_rects(rects)
+
+            secondary.set_snap_rects = record_secondary_snap_rects  # type: ignore[method-assign]
+
+            start = primary.mapToGlobal(QPoint(primary.width() - 2, primary.height() // 2))
+            primary._begin_resize_gesture(_ResizeRegion.RIGHT, start)
+            primary._update_resize_gesture(start + QPoint(90, 0))
+            primary._finish_resize_gesture()
+            type(self).app.processEvents()
+
+            self.assertEqual(calls["secondary"], 0)
+
+    def test_starting_panel_resize_refreshes_only_that_panel_snap_targets(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopTidy" / "preview-config.json")
+            app = PreviewApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(rx=0.45, ry=0.20, rw=0.30, rh=0.35),
+            )
+            type(self).app.processEvents()
+            primary = app.panel
+            secondary = next(
+                panel for panel in app.panel_widgets() if panel.group_id != primary.group_id
+            )
+            calls = {"primary": 0, "secondary": 0}
+            original_primary = primary.set_snap_rects
+            original_secondary = secondary.set_snap_rects
+
+            def record_primary(rects):
+                calls["primary"] += 1
+                original_primary(rects)
+
+            def record_secondary(rects):
+                calls["secondary"] += 1
+                original_secondary(rects)
+
+            primary.set_snap_rects = record_primary  # type: ignore[method-assign]
+            secondary.set_snap_rects = record_secondary  # type: ignore[method-assign]
+
+            start = primary.mapToGlobal(QPoint(primary.width() - 2, primary.height() // 2))
+            primary._begin_resize_gesture(_ResizeRegion.RIGHT, start)
+
+            self.assertEqual(calls["primary"], 1)
+            self.assertEqual(calls["secondary"], 0)
 
     def test_preview_application_disables_quit_on_last_window_closed(self) -> None:
         """PreviewApplication must set quitOnLastWindowClosed(False) to survive settings close."""

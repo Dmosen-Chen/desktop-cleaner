@@ -195,7 +195,7 @@ class WorkspaceModel:
             source.active_tab_id = source.tab_ids[0]
         detached = PanelGroup(
             id=f"group-{uuid.uuid4().hex}",
-            screen_id=self.config.desktop.primary_screen_id,
+            screen_id=source.screen_id,
             geometry=deepcopy(geometry),
             tab_ids=[tab_id],
             active_tab_id=tab_id,

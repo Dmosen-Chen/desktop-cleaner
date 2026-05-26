@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from desktop_tidy.domain.models import PanelGeometry, PanelGroup, PanelTab
 from desktop_tidy.domain.workspace import WorkspaceModel
+from desktop_tidy.services.screens import available_screen_geometries, screen_id_containing_point
 from desktop_tidy.services.window_styles import hide_window_from_taskbar
 from desktop_tidy.ui.item_grid import ItemGridWidget
 
@@ -141,6 +142,9 @@ class _ResizeRegion(Enum):
 
 class PanelGroupWidget(QWidget):
     changed = Signal()
+    geometry_changed = Signal()
+    appearance_changed = Signal()
+    layout_gesture_started = Signal(str)
     settings_requested = Signal(str)
     organize_requested = Signal(str)
     tab_detach_requested = Signal(str, object)
@@ -173,6 +177,7 @@ class PanelGroupWidget(QWidget):
         self._start_geometry = PanelGeometry()
         self._start_frame = QRect()
         self._snap_rects: list[QRect] = []
+        self._screen_geometries: dict[str, QRect] = available_screen_geometries()
         self._suppress_click_tab_id = ""
         self._detach_preview = _TabDetachPreview(self)
         self._detach_preview.hide()
@@ -234,6 +239,11 @@ class PanelGroupWidget(QWidget):
 
         self._item_grid = ItemGridWidget(self, active_tab_id=group.active_tab_id)
         self._item_grid.setStyleSheet("background: transparent;")
+        self._item_grid.set_item_icon_size(
+            group.appearance.item_icon_size,
+            notify=False,
+        )
+        self._item_grid.item_icon_size_changed.connect(self._on_item_icon_size_changed)
         self._item_grid.cells_rebuilt.connect(self._install_content_resize_filters)
         self._install_content_resize_filters()
 
@@ -260,6 +270,10 @@ class PanelGroupWidget(QWidget):
         self._apply_collapsed_state()
         self._render_titlebar_control_states()
 
+    def _on_item_icon_size_changed(self, size: int) -> None:
+        self._group.appearance.item_icon_size = size
+        self.appearance_changed.emit()
+
     @property
     def group_id(self) -> str:
         return self._group.id
@@ -275,6 +289,10 @@ class PanelGroupWidget(QWidget):
     @property
     def active_tab_id(self) -> str:
         return self._group.active_tab_id
+
+    @property
+    def screen_id(self) -> str:
+        return self._group.screen_id
 
     @property
     def is_locked(self) -> bool:
@@ -300,6 +318,15 @@ class PanelGroupWidget(QWidget):
     def set_snap_rects(self, rects: list[QRect]) -> None:
         self._snap_rects = [QRect(rect) for rect in rects]
 
+    def set_screen_geometries(self, geometries: dict[str, QRect]) -> None:
+        self._screen_geometries = {
+            screen_id: QRect(geometry)
+            for screen_id, geometry in geometries.items()
+            if geometry.isValid() and geometry.width() > 0 and geometry.height() > 0
+        }
+        if not self._screen_geometries:
+            self._screen_geometries = available_screen_geometries()
+
     def activate_tab(self, tab_id: str) -> None:
         if tab_id not in self._group.tab_ids:
             return
@@ -315,6 +342,10 @@ class PanelGroupWidget(QWidget):
         self._group = self._workspace.group(self._group.id)
         self._locked = self._group.locked
         self._collapsed = self._group.collapsed
+        self._item_grid.set_item_icon_size(
+            self._group.appearance.item_icon_size,
+            notify=False,
+        )
         if list(self._group.tab_ids) != list(self._tab_buttons.keys()):
             self._rebuild_tab_buttons()
         else:
@@ -567,7 +598,14 @@ class PanelGroupWidget(QWidget):
             )
             self.resize(self.width(), target_height)
 
-    def _screen_geometry(self) -> QRect:
+    def _screen_geometry(self, screen_id: str | None = None) -> QRect:
+        if not self._screen_geometries:
+            self._screen_geometries = available_screen_geometries()
+        target_id = screen_id or self._group.screen_id or "primary"
+        if target_id in self._screen_geometries:
+            return QRect(self._screen_geometries[target_id])
+        if "primary" in self._screen_geometries:
+            return QRect(self._screen_geometries["primary"])
         screen = self.screen() or QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -576,8 +614,18 @@ class PanelGroupWidget(QWidget):
             return screen.geometry()
         return QRect(_FALLBACK_SCREEN)
 
+    def _screen_id_for_global_point(self, global_point: QPoint) -> str:
+        return screen_id_containing_point(
+            global_point,
+            self._screen_geometries,
+            fallback=self._group.screen_id or "primary",
+        )
+
+    def _screen_id_for_frame(self, frame: QRect) -> str:
+        return self._screen_id_for_global_point(frame.center())
+
     def _apply_geometry_from_model(self) -> None:
-        screen = self._screen_geometry()
+        screen = self._screen_geometry(self._group.screen_id)
         geometry = self._group.geometry
         width = max(_MIN_PANEL_WIDTH, int(screen.width() * geometry.rw))
         expanded_height = max(_MIN_PANEL_HEIGHT, int(screen.height() * geometry.rh))
@@ -589,17 +637,20 @@ class PanelGroupWidget(QWidget):
         self.setGeometry(x, y, width, height)
 
     def _frame_height_matches_expanded_rh(self, frame_height: int) -> bool:
-        screen = self._screen_geometry()
+        screen_id = self._group.screen_id or "primary"
+        screen = self._screen_geometry(screen_id)
         if screen.height() <= 0:
             return True
         expected = int(screen.height() * self._expanded_rh)
         return abs(frame_height - expected) <= 8
 
     def _persist_geometry_from_widget(self, *, update_rh: bool = False) -> None:
-        screen = self._screen_geometry()
+        frame = self.frameGeometry()
+        screen_id = self._screen_id_for_frame(frame)
+        screen = self._screen_geometry(screen_id)
+        self._group.screen_id = screen_id
         if screen.width() <= 0 or screen.height() <= 0:
             return
-        frame = self.frameGeometry()
         rx = (frame.x() - screen.x()) / screen.width()
         ry = (frame.y() - screen.y()) / screen.height()
         rw = frame.width() / screen.width()
@@ -622,7 +673,8 @@ class PanelGroupWidget(QWidget):
         return PanelGeometry(rx, ry, rw, rh)
 
     def _default_detach_geometry(self, global_point: tuple[int, int]) -> PanelGeometry:
-        screen = self._screen_geometry()
+        screen_id = self._group.screen_id or "primary"
+        screen = self._screen_geometry(screen_id)
         width = max(_MIN_PANEL_WIDTH, int(screen.width() * _DEFAULT_DETACHED_RW))
         height = max(_MIN_PANEL_HEIGHT, int(screen.height() * _DEFAULT_DETACHED_RH))
         center_x, center_y = global_point
@@ -754,6 +806,7 @@ class PanelGroupWidget(QWidget):
         region: _ResizeRegion,
         global_point: QPoint,
     ) -> None:
+        self.layout_gesture_started.emit(self._group.id)
         self._persist_geometry_from_widget()
         self._resize_active = True
         self._resize_region = region
@@ -765,6 +818,7 @@ class PanelGroupWidget(QWidget):
             self._group.geometry.rw,
             self._group.geometry.rh,
         )
+        self._item_grid.suspend_layout_updates()
         self._grab_mouse_for_layout_gesture()
 
     def _resize_frame_for_global_point(self, global_point: QPoint) -> QRect:
@@ -841,7 +895,24 @@ class PanelGroupWidget(QWidget):
             if value - snapped.top() + 1 >= _MIN_PANEL_HEIGHT:
                 snapped.setBottom(value)
 
-        screen = self._screen_geometry()
+        def set_width_from_stationary_edge(width: int) -> None:
+            if width < _MIN_PANEL_WIDTH:
+                return
+            if moves_right:
+                set_right(snapped.left() + width - 1)
+            elif moves_left:
+                set_left(snapped.right() - width + 1)
+
+        def set_height_from_stationary_edge(height: int) -> None:
+            if height < _MIN_PANEL_HEIGHT:
+                return
+            if moves_bottom:
+                set_bottom(snapped.top() + height - 1)
+            elif moves_top:
+                set_top(snapped.bottom() - height + 1)
+
+        screen_id = self._group.screen_id or "primary"
+        screen = self._screen_geometry(screen_id)
         if moves_left:
             if abs(snapped.left() - screen.left()) <= _SNAP_MARGIN or snapped.left() < screen.left():
                 set_left(screen.left())
@@ -856,6 +927,8 @@ class PanelGroupWidget(QWidget):
                 set_bottom(screen.bottom())
 
         for target in self._snap_rects:
+            if self._screen_id_for_frame(target) != screen_id:
+                continue
             if moves_right and abs((snapped.right() + 1) - target.left()) <= _SNAP_MARGIN:
                 set_right(target.left() - 1)
             if moves_left and abs(snapped.left() - (target.right() + 1)) <= _SNAP_MARGIN:
@@ -864,6 +937,10 @@ class PanelGroupWidget(QWidget):
                 set_bottom(target.top() - 1)
             if moves_top and abs(snapped.top() - (target.bottom() + 1)) <= _SNAP_MARGIN:
                 set_top(target.bottom() + 1)
+            if (moves_left or moves_right) and abs(snapped.width() - target.width()) <= _SNAP_MARGIN:
+                set_width_from_stationary_edge(target.width())
+            if (moves_top or moves_bottom) and abs(snapped.height() - target.height()) <= _SNAP_MARGIN:
+                set_height_from_stationary_edge(target.height())
         return snapped
 
     def _update_resize_gesture(self, global_point: QPoint) -> None:
@@ -885,17 +962,28 @@ class PanelGroupWidget(QWidget):
         self._resize_active = False
         self._resize_region = _ResizeRegion.NONE
         self._release_layout_mouse_grab()
+        self._item_grid.resume_layout_updates()
         self._persist_geometry_from_widget(update_rh=vertical_resize)
-        self.changed.emit()
+        self.geometry_changed.emit()
 
     def _begin_header_drag(self, global_point: QPoint) -> None:
+        self.layout_gesture_started.emit(self._group.id)
         self._header_drag_active = True
         self._drag_start_global = global_point
         self._start_frame = self.frameGeometry()
         self._grab_mouse_for_layout_gesture()
 
-    def _snap_frame_to_screen(self, frame: QRect) -> QRect:
-        screen = self._screen_geometry()
+    def _snap_frame_to_screen(
+        self,
+        frame: QRect,
+        global_point: QPoint | None = None,
+    ) -> QRect:
+        screen_id = (
+            self._screen_id_for_global_point(global_point)
+            if global_point is not None
+            else self._screen_id_for_frame(frame)
+        )
+        screen = self._screen_geometry(screen_id)
         snapped = QRect(frame)
         if abs(snapped.left() - screen.left()) <= _SNAP_MARGIN:
             snapped.moveLeft(screen.left())
@@ -914,6 +1002,8 @@ class PanelGroupWidget(QWidget):
         if snapped.bottom() > screen.bottom():
             snapped.moveBottom(screen.bottom())
         for target in self._snap_rects:
+            if self._screen_id_for_frame(target) != screen_id:
+                continue
             if abs((snapped.right() + 1) - target.left()) <= _SNAP_MARGIN:
                 snapped.moveRight(target.left() - 1)
             elif abs(snapped.left() - (target.right() + 1)) <= _SNAP_MARGIN:
@@ -930,7 +1020,7 @@ class PanelGroupWidget(QWidget):
             return
         frame = QRect(self._start_frame)
         frame.moveTopLeft(self._start_frame.topLeft() + delta)
-        frame = self._snap_frame_to_screen(frame)
+        frame = self._snap_frame_to_screen(frame, global_point)
         self.setGeometry(frame)
         if not self._collapsed:
             self._expanded_content_height = frame.height()
@@ -943,13 +1033,13 @@ class PanelGroupWidget(QWidget):
             return
         frame = QRect(self._start_frame)
         frame.moveTopLeft(self._start_frame.topLeft() + delta)
-        frame = self._snap_frame_to_screen(frame)
+        frame = self._snap_frame_to_screen(frame, global_point)
         self.setGeometry(frame)
         if not self._collapsed:
             self._expanded_content_height = frame.height()
         self._persist_geometry_from_widget(update_rh=False)
         self._apply_geometry_from_model()
-        self.changed.emit()
+        self.geometry_changed.emit()
         self.complete_header_drag_at_global_point((global_point.x(), global_point.y()))
 
     _CONTENT_RESIZE_MARGIN = 16

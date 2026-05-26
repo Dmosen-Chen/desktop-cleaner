@@ -26,6 +26,26 @@ class SettingsWindowTests(unittest.TestCase):
     def _make_window(self) -> SettingsWindow:
         return SettingsWindow(build_default_configuration(r"D:\Preview\Desktop"))
 
+    def test_screen_selector_saves_target_group_screen_id(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(
+            config,
+            screen_options=[
+                ("primary", "\u4e3b\u5c4f"),
+                ("screen-1", "\u526f\u5c4f 1"),
+            ],
+        )
+
+        self.assertEqual(window.selected_screen_id(), "primary")
+
+        index = window._screen_combo.findData("screen-1")
+        self.assertGreaterEqual(index, 0)
+        window._screen_combo.setCurrentIndex(index)
+        window._save()
+
+        self.assertEqual(config.panel_groups[0].screen_id, "screen-1")
+        self.assertEqual(config.desktop.primary_screen_id, "screen-1")
+
     def test_visible_sections_match_supported_settings_surface(self) -> None:
         window = self._make_window()
 

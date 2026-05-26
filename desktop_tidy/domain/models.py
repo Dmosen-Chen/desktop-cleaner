@@ -16,11 +16,13 @@ _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 class AppearanceSettings:
     background_color: str = "#111111"
     background_opacity: float = 0.60
+    item_icon_size: int = 48
 
     def to_dict(self) -> dict[str, object]:
         return {
             "background_color": self.background_color,
             "background_opacity": self.background_opacity,
+            "item_icon_size": self.item_icon_size,
         }
 
     @classmethod
@@ -28,6 +30,7 @@ class AppearanceSettings:
         return cls(
             background_color=str(payload.get("background_color", "#111111")),
             background_opacity=float(payload.get("background_opacity", 0.60)),
+            item_icon_size=int(payload.get("item_icon_size", 48)),
         )
 
 
@@ -328,6 +331,8 @@ def _required_string_list(payload: dict[str, Any], key: str, label: str) -> list
 def _validate_appearance_payload(payload: dict[str, Any], label: str) -> None:
     _required_string(payload, "background_color", f"{label}.background_color")
     _required_number(payload, "background_opacity", f"{label}.background_opacity")
+    if "item_icon_size" in payload:
+        _required_integer(payload, "item_icon_size", f"{label}.item_icon_size")
 
 
 def _is_absolute_desktop_path(path: str) -> bool:
@@ -445,6 +450,8 @@ def _validate_appearance(label: str, appearance: AppearanceSettings) -> None:
         raise InvalidConfiguration(f"{label} color must use #RRGGBB format")
     if not 0.0 <= appearance.background_opacity <= 1.0:
         raise InvalidConfiguration(f"{label} opacity must be between 0 and 1")
+    if not 32 <= appearance.item_icon_size <= 96:
+        raise InvalidConfiguration(f"{label} icon size must be between 32 and 96")
 
 
 def _validate_geometry(group: PanelGroup) -> None:

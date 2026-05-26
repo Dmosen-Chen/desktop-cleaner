@@ -51,7 +51,7 @@ class ModelTests(unittest.TestCase):
 
     def test_each_persisted_entity_supports_dictionary_round_trip(self) -> None:
         entities = [
-            AppearanceSettings("#234567", 0.4),
+            AppearanceSettings("#234567", 0.4, 56),
             PanelGeometry(0.1, 0.2, 0.3, 0.4),
             PanelGroup(
                 id="group-a",
@@ -130,6 +130,21 @@ class ModelTests(unittest.TestCase):
             InvalidConfiguration,
             "external reference external-relative must use an absolute path",
         ):
+            validate_configuration(config)
+
+    def test_appearance_settings_persist_item_icon_size(self) -> None:
+        appearance = AppearanceSettings("#234567", 0.4, 64)
+
+        payload = appearance.to_dict()
+
+        self.assertEqual(payload["item_icon_size"], 64)
+        self.assertEqual(AppearanceSettings.from_dict(payload), appearance)
+
+    def test_validate_configuration_rejects_invalid_item_icon_size(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.panel_groups[0].appearance.item_icon_size = 4
+
+        with self.assertRaisesRegex(InvalidConfiguration, "icon size"):
             validate_configuration(config)
 
 

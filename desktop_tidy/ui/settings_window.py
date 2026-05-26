@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from desktop_tidy.domain.models import Configuration, InvalidConfiguration, validate_configuration
+from desktop_tidy.services.screens import available_screen_options
 
 _SECTIONS = ["基础设置", "桌面分区", "桌面整理", "面板外观"]
 _OPACITY_MIN = 0.18
@@ -48,11 +49,13 @@ class SettingsWindow(QWidget):
         config: Configuration,
         *,
         group_id: str | None = None,
+        screen_options: list[tuple[str, str]] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
         self._group_id = group_id or config.panel_groups[0].id
+        self._screen_options = screen_options or available_screen_options()
         self.setWindowTitle("设置")
         self.resize(720, 520)
 
@@ -104,6 +107,7 @@ class SettingsWindow(QWidget):
         self._desktop_path_edit.setText(config.desktop.path)
         self._takeover_checkbox.setChecked(config.desktop.takeover_enabled)
         self._startup_checkbox.setChecked(config.desktop.startup_enabled)
+        self._reload_screen_combo(config)
         self._reload_rules_table()
         group = self._target_group(config)
         self._color_edit.setText(group.appearance.background_color)
@@ -149,6 +153,9 @@ class SettingsWindow(QWidget):
     def panel_opacity_maximum(self) -> float:
         return _OPACITY_MAX
 
+    def selected_screen_id(self) -> str:
+        return str(self._screen_combo.currentData() or "primary")
+
     def _build_basic_page(self) -> QWidget:
         page = QWidget(self)
         form = QFormLayout(page)
@@ -158,6 +165,9 @@ class SettingsWindow(QWidget):
         path_row = QHBoxLayout()
         path_row.addWidget(self._desktop_path_edit)
         path_row.addWidget(browse)
+        self._screen_combo = QComboBox(page)
+        self._reload_screen_combo(self._config)
+        form.addRow("\u663e\u793a\u5668", self._screen_combo)
         form.addRow("桌面路径", path_row)
         self._takeover_checkbox = QCheckBox("启用桌面接管（仅预览）", page)
         self._takeover_checkbox.setChecked(self._config.desktop.takeover_enabled)
@@ -166,6 +176,18 @@ class SettingsWindow(QWidget):
         self._startup_checkbox.setChecked(self._config.desktop.startup_enabled)
         form.addRow(self._startup_checkbox)
         return page
+
+    def _reload_screen_combo(self, config: Configuration) -> None:
+        current = self._target_group(config).screen_id or config.desktop.primary_screen_id
+        self._screen_combo.blockSignals(True)
+        self._screen_combo.clear()
+        for screen_id, label in self._screen_options:
+            self._screen_combo.addItem(label, screen_id)
+        index = self._screen_combo.findData(current)
+        if index < 0:
+            index = self._screen_combo.findData("primary")
+        self._screen_combo.setCurrentIndex(max(0, index))
+        self._screen_combo.blockSignals(False)
 
     def _build_partition_page(self) -> QWidget:
         page = QWidget(self)
@@ -286,6 +308,7 @@ class SettingsWindow(QWidget):
         config.desktop.path = self._desktop_path_edit.text().strip()
         config.desktop.takeover_enabled = self._takeover_checkbox.isChecked()
         config.desktop.startup_enabled = self._startup_checkbox.isChecked()
+        config.desktop.primary_screen_id = self.selected_screen_id()
         rules_by_id = {rule.id: rule for rule in config.rules}
         for row, rule in enumerate(sorted(config.rules, key=lambda entry: entry.order)):
             enabled_item = self._rules_table.item(row, 0)
@@ -318,6 +341,7 @@ class SettingsWindow(QWidget):
             target.extensions = extensions
             target.target_tab_id = target_tab_id
         group = self._target_group(config)
+        group.screen_id = self.selected_screen_id()
         group.appearance.background_color = self.panel_background_color()
         group.appearance.background_opacity = self._opacity_value.value()
 
@@ -327,6 +351,7 @@ class SettingsWindow(QWidget):
         target.desktop.path = source.desktop.path
         target.desktop.takeover_enabled = source.desktop.takeover_enabled
         target.desktop.startup_enabled = source.desktop.startup_enabled
+        target.desktop.primary_screen_id = source.desktop.primary_screen_id
         source_rules = {rule.id: rule for rule in source.rules}
         for rule in target.rules:
             updated = source_rules[rule.id]
@@ -335,12 +360,14 @@ class SettingsWindow(QWidget):
             rule.target_tab_id = updated.target_tab_id
         target_group = self._target_group(target)
         source_group = self._target_group(source)
+        target_group.screen_id = source_group.screen_id
         target_group.appearance.background_color = (
             source_group.appearance.background_color
         )
         target_group.appearance.background_opacity = (
             source_group.appearance.background_opacity
         )
+        target_group.appearance.item_icon_size = source_group.appearance.item_icon_size
 
     def _opacity_to_slider(self, opacity: float) -> int:
         span = _OPACITY_MAX - _OPACITY_MIN
