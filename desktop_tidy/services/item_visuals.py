@@ -69,7 +69,10 @@ class WindowsShellIconProvider:
         if target:
             candidates.append((Path(target), 0))
         for candidate, index in candidates:
-            icon = self._extract_icon(candidate, index, size)
+            try:
+                icon = self._extract_icon(candidate, index, size)
+            except Exception:  # pragma: no cover - depends on shortcut targets.
+                continue
             if icon is not None and not icon.isNull():
                 return icon
         return None
@@ -84,7 +87,7 @@ class WindowsShellIconProvider:
         flags |= 0 if size >= 32 else 0x000000001  # SHGFI_SMALLICON
         hicon = 0
         try:
-            hicon, *_ = shell.SHGetFileInfo(str(path), 0, flags)
+            hicon = self._hicon_from_shell_info(shell.SHGetFileInfo(str(path), 0, flags))
             return self._icon_from_hicon(hicon, size)
         finally:
             if hicon:
@@ -92,6 +95,13 @@ class WindowsShellIconProvider:
                     win32gui.DestroyIcon(hicon)
                 except Exception:
                     pass
+
+    def _hicon_from_shell_info(self, shell_info: object) -> int:
+        if not isinstance(shell_info, tuple) or not shell_info:
+            return 0
+        if len(shell_info) >= 2 and isinstance(shell_info[1], tuple) and shell_info[1]:
+            return int(shell_info[1][0] or 0)
+        return int(shell_info[0] or 0)
 
     def _extract_icon(self, path: Path, index: int, size: int) -> QIcon | None:
         if not str(path):
