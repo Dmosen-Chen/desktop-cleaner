@@ -71,6 +71,7 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
         class FakeUser32:
             def __init__(self) -> None:
                 self.parents: list[tuple[int, int]] = []
+                self.positions: list[tuple[int, int, int, int, int]] = []
                 self.show_calls: list[tuple[int, int]] = []
 
             def FindWindowW(self, class_name, _title):
@@ -100,6 +101,22 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
                 self.parents.append((int(hwnd), int(parent)))
                 return 1
 
+            def GetWindowRect(self, hwnd, rect):
+                rects = {
+                    40: (-7680, 0, 0, 2160),
+                    123: (-2880, 0, -1818, 1548),
+                }
+                left, top, right, bottom = rects[int(hwnd)]
+                rect.contents.left = left
+                rect.contents.top = top
+                rect.contents.right = right
+                rect.contents.bottom = bottom
+                return 1
+
+            def SetWindowPos(self, hwnd, _after, x, y, width, height, _flags):
+                self.positions.append((int(hwnd), int(x), int(y), int(width), int(height)))
+                return 1
+
             def ShowWindow(self, hwnd, command):
                 self.show_calls.append((int(hwnd), int(command)))
                 return 0
@@ -113,6 +130,7 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
         service.detach_panels()
 
         self.assertEqual(user32.parents, [(123, 40), (123, 0)])
+        self.assertEqual(user32.positions, [(123, 4800, 0, 1062, 1548)])
         self.assertEqual(user32.show_calls, [(30, 0), (30, 5)])
 
 

@@ -18,7 +18,19 @@ WM_SPAWN_WORKERW = 0x052C
 SMTO_NORMAL = 0x0000
 SW_HIDE = 0
 SW_SHOW = 5
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
 _CALLBACK_FACTORY = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
 
 
 @dataclass(frozen=True)
@@ -76,7 +88,10 @@ class DesktopTakeoverService:
         for hwnd in panel_hwnds:
             if not hwnd:
                 continue
+            original = self._window_rect(api, int(hwnd))
             api.SetParent(int(hwnd), workerw)
+            if original is not None:
+                self._set_child_rect(api, int(hwnd), workerw, original)
             attached.append(int(hwnd))
         if not attached and panel_hwnds:
             return TakeoverResult(False, "no-valid-panel-handles")
@@ -115,6 +130,40 @@ class DesktopTakeoverService:
             return False
         api.ShowWindow(list_view, SW_SHOW if visible else SW_HIDE)
         return True
+
+    def _window_rect(self, api, hwnd: int) -> tuple[int, int, int, int] | None:
+        try:
+            rect = _RECT()
+            if not api.GetWindowRect(hwnd, ctypes.pointer(rect)):
+                return None
+            return (
+                int(rect.left),
+                int(rect.top),
+                int(rect.right),
+                int(rect.bottom),
+            )
+        except AttributeError:
+            return None
+
+    def _set_child_rect(
+        self,
+        api,
+        hwnd: int,
+        parent_hwnd: int,
+        rect: tuple[int, int, int, int],
+    ) -> None:
+        parent_rect = self._window_rect(api, parent_hwnd) or (0, 0, 0, 0)
+        left, top, right, bottom = rect
+        parent_left, parent_top, _parent_right, _parent_bottom = parent_rect
+        api.SetWindowPos(
+            hwnd,
+            0,
+            left - parent_left,
+            top - parent_top,
+            max(1, right - left),
+            max(1, bottom - top),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
 
     def _desktop_parent_window(self, api) -> int:
         progman = int(api.FindWindowW("Progman", None))
