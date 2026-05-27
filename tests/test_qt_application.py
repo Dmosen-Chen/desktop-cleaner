@@ -5,6 +5,7 @@ import os
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -33,6 +34,45 @@ from tests.test_qt_panel_group import (
     simulate_header_drag_release_at_global_point,
     simulate_tab_drag_release_at_local_point,
 )
+
+
+class FakeTakeoverService:
+    def __init__(
+        self,
+        *,
+        attach_success: bool = True,
+        hide_result: bool = True,
+        restore_result: bool = True,
+    ) -> None:
+        self.attach_success = attach_success
+        self.hide_result = hide_result
+        self.restore_result = restore_result
+        self.calls: list[tuple[str, object]] = []
+
+    def attach_panels(self, panel_hwnds: list[int]):
+        self.calls.append(("attach", list(panel_hwnds)))
+        return SimpleNamespace(success=self.attach_success, message="fake")
+
+    def hide_explorer_icons(self) -> bool:
+        self.calls.append(("hide", None))
+        return self.hide_result
+
+    def restore_explorer_icons(self) -> bool:
+        self.calls.append(("restore", None))
+        return self.restore_result
+
+    def detach_panels(self) -> None:
+        self.calls.append(("detach", None))
+
+
+class FakeStartupService:
+    def __init__(self, result: bool = True) -> None:
+        self.result = result
+        self.calls: list[tuple[bool, Path]] = []
+
+    def set_enabled(self, enabled: bool, exe_path: Path) -> bool:
+        self.calls.append((enabled, exe_path))
+        return self.result
 
 
 def assert_application_wires_panel_signals(app: DesktopCleanerApplication) -> None:
@@ -66,6 +106,162 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 app.store.path,
                 Path(tmp) / "DesktopCleaner" / "config.json",
             )
+
+    def test_constructor_restores_leftover_hidden_desktop_icons_before_showing_panels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.restore_required = True
+            config.desktop.explorer_icons_hidden = True
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            takeover = FakeTakeoverService(restore_result=True)
+
+            DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+
+            self.assertEqual(takeover.calls, [("restore", None)])
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["desktop"]["restore_required"])
+            self.assertFalse(payload["desktop"]["explorer_icons_hidden"])
+
+    def test_takeover_disabled_does_not_attach_or_hide_when_showing_panels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            takeover = FakeTakeoverService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                takeover_service=takeover,
+            )
+
+            app.show()
+            type(self).app.processEvents()
+
+            self.assertEqual(takeover.calls, [])
+
+    def test_takeover_enabled_attaches_marks_restore_then_hides_icons(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            takeover = FakeTakeoverService()
+            app = DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+
+            app.show()
+            type(self).app.processEvents()
+
+            self.assertEqual([name for name, _value in takeover.calls], ["attach", "hide"])
+            self.assertTrue(config.desktop.takeover_enabled)
+            self.assertTrue(config.desktop.restore_required)
+            self.assertTrue(config.desktop.explorer_icons_hidden)
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["desktop"]["restore_required"])
+            self.assertTrue(payload["desktop"]["explorer_icons_hidden"])
+
+    def test_attach_failure_disables_takeover_and_never_hides_explorer_icons(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            takeover = FakeTakeoverService(attach_success=False)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+
+            app.show()
+            type(self).app.processEvents()
+
+            self.assertEqual([name for name, _value in takeover.calls], ["attach", "detach"])
+            self.assertFalse(config.desktop.takeover_enabled)
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+
+    def test_hide_failure_restores_detaches_and_disables_takeover(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            takeover = FakeTakeoverService(hide_result=False)
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+
+            app.show()
+            type(self).app.processEvents()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["attach", "hide", "restore", "detach"],
+            )
+            self.assertFalse(config.desktop.takeover_enabled)
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+
+    def test_disabling_takeover_from_settings_restores_icons_and_detaches_panels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            takeover = FakeTakeoverService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+            app.show()
+            type(self).app.processEvents()
+
+            config.desktop.takeover_enabled = False
+            app._on_settings_saved()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["attach", "hide", "restore", "detach"],
+            )
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+
+    def test_about_to_quit_restores_icons_when_takeover_is_active(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            takeover = FakeTakeoverService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+            app.show()
+            type(self).app.processEvents()
+
+            app._on_about_to_quit()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["attach", "hide", "restore", "detach"],
+            )
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+
+    def test_settings_saved_applies_startup_preference_without_real_registry_access(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            startup = FakeStartupService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store, startup_service=startup)
+
+            config.desktop.startup_enabled = True
+            app._on_settings_saved()
+
+            self.assertEqual(len(startup.calls), 1)
+            enabled, exe_path = startup.calls[0]
+            self.assertTrue(enabled)
+            self.assertTrue(exe_path.is_absolute())
 
     def test_external_drop_is_saved_only_as_external_refs(self) -> None:
         with TemporaryDirectory() as tmp:

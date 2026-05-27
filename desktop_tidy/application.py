@@ -20,8 +20,13 @@ from desktop_tidy.services.desktop_index import (
     IndexChanges,
     IndexedItem,
 )
+from desktop_tidy.services.desktop_takeover import (
+    DesktopRecoveryGuard,
+    DesktopTakeoverService,
+)
 from desktop_tidy.services.item_launcher import open_item
 from desktop_tidy.services.screens import available_screen_geometries, available_screen_options
+from desktop_tidy.services.startup import StartupService
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 
@@ -78,6 +83,8 @@ class DesktopCleanerApplication:
         config: Configuration | None = None,
         *,
         store: ConfigurationStore | None = None,
+        takeover_service: DesktopTakeoverService | None = None,
+        startup_service: StartupService | None = None,
     ) -> None:
         if config is None:
             self.store = store or application_store()
@@ -90,6 +97,11 @@ class DesktopCleanerApplication:
         if is_new_config:
             apply_application_appearance_defaults(self.model.config)
         self.config = self.model.config
+        self.takeover_service = takeover_service or DesktopTakeoverService()
+        self.startup_service = startup_service or StartupService()
+        self._takeover_active = False
+        if DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
+            self.save()
         self.index = DesktopIndex(Path(self.config.desktop.path))
         self._panels: dict[str, PanelGroupWidget] = {}
         for group in self.config.panel_groups:
@@ -151,6 +163,7 @@ class DesktopCleanerApplication:
     def _on_about_to_quit(self) -> None:
         for panel in self._panels.values():
             panel._persist_geometry_from_widget(update_rh=not panel.is_collapsed)
+        self._restore_desktop_takeover_if_needed()
         self.save()
 
     def handle_paths_dropped(self, paths: list[Path], tab_id: str) -> None:
@@ -369,6 +382,8 @@ class DesktopCleanerApplication:
             self.index = DesktopIndex(new_desktop)
             self.watcher = DesktopWatcher(self.index)
             self.watcher.changed.connect(self._on_desktop_changed)
+        self._apply_startup_preference()
+        self._apply_desktop_takeover_preference()
         self.save()
         for panel in self._panels.values():
             panel.reload_from_model()
@@ -392,6 +407,7 @@ class DesktopCleanerApplication:
             panel.show()
         self._sync_panel_snap_targets()
         self.refresh()
+        self._apply_desktop_takeover_preference()
         return self.panel
 
     def run(self) -> int:
@@ -400,3 +416,70 @@ class DesktopCleanerApplication:
         application = QApplication.instance()
         assert application is not None
         return application.exec()
+
+    def _panel_native_handles(self) -> list[int]:
+        return [int(panel.winId()) for panel in self._panels.values()]
+
+    def _startup_executable_path(self) -> Path:
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve()
+        return Path(sys.argv[0]).resolve()
+
+    def _apply_startup_preference(self) -> None:
+        enabled = self.startup_service.set_enabled(
+            self.model.config.desktop.startup_enabled,
+            self._startup_executable_path(),
+        )
+        if not enabled and self.model.config.desktop.startup_enabled:
+            self.model.config.desktop.startup_enabled = False
+
+    def _apply_desktop_takeover_preference(self) -> None:
+        if not self.model.config.desktop.takeover_enabled:
+            self._restore_desktop_takeover_if_needed()
+            return
+        if self._takeover_active:
+            return
+        result = self.takeover_service.attach_panels(self._panel_native_handles())
+        if not result.success:
+            self._disable_desktop_takeover_after_failure(restore=False)
+            return
+        self.model.config.desktop.restore_required = True
+        self.model.config.desktop.explorer_icons_hidden = False
+        self.save()
+        if not self.takeover_service.hide_explorer_icons():
+            self._disable_desktop_takeover_after_failure(restore=True)
+            return
+        self._takeover_active = True
+        self.model.config.desktop.explorer_icons_hidden = True
+        self.save()
+
+    def _disable_desktop_takeover_after_failure(self, *, restore: bool) -> None:
+        if restore:
+            restored = self.takeover_service.restore_explorer_icons()
+        else:
+            restored = True
+        self.takeover_service.detach_panels()
+        self._takeover_active = False
+        self.model.config.desktop.takeover_enabled = False
+        if restored:
+            self.model.config.desktop.restore_required = False
+            self.model.config.desktop.explorer_icons_hidden = False
+        else:
+            self.model.config.desktop.restore_required = True
+        self.save()
+
+    def _restore_desktop_takeover_if_needed(self) -> None:
+        if not (
+            self._takeover_active
+            or self.model.config.desktop.restore_required
+            or self.model.config.desktop.explorer_icons_hidden
+        ):
+            return
+        restored = self.takeover_service.restore_explorer_icons()
+        self.takeover_service.detach_panels()
+        self._takeover_active = False
+        if restored:
+            self.model.config.desktop.restore_required = False
+            self.model.config.desktop.explorer_icons_hidden = False
+        else:
+            self.model.config.desktop.restore_required = True

@@ -59,6 +59,14 @@ class SettingsWindowTests(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertNotIn(term, text)
 
+        self.assertNotIn("暂未开放", text)
+
+    def test_desktop_takeover_checkbox_is_now_available(self) -> None:
+        window = self._make_window()
+
+        self.assertEqual(window._takeover_checkbox.text(), "启用桌面接管")
+        self.assertTrue(window._takeover_checkbox.isEnabled())
+
     def test_panel_appearance_controls_reflect_configuration(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         config.panel_groups[0].appearance.background_color = "#336699"

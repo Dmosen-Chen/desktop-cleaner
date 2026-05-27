@@ -169,7 +169,7 @@ class SettingsWindow(QWidget):
         self._reload_screen_combo(self._config)
         form.addRow("\u663e\u793a\u5668", self._screen_combo)
         form.addRow("桌面路径", path_row)
-        self._takeover_checkbox = QCheckBox("启用桌面接管（暂未开放）", page)
+        self._takeover_checkbox = QCheckBox("启用桌面接管", page)
         self._takeover_checkbox.setChecked(self._config.desktop.takeover_enabled)
         form.addRow(self._takeover_checkbox)
         self._startup_checkbox = QCheckBox("开机启动", page)
