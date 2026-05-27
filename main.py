@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from desktop_tidy.application import DesktopCleanerApplication, ensure_application
+from desktop_tidy.services.single_instance import SingleInstanceLock
 
 
 def main() -> int:
-    ensure_application()
-    return DesktopCleanerApplication().run()
+    lock = SingleInstanceLock()
+    if not lock.acquire():
+        return 0
+
+    try:
+        ensure_application()
+        return DesktopCleanerApplication().run()
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
