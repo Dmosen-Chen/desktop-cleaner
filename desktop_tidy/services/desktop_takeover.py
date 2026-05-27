@@ -290,7 +290,7 @@ class DesktopTakeoverService:
         return right > left and bottom > top
 
     def _desktop_parent_window(self, api) -> int:
-        progman = int(api.FindWindowW("Progman", None))
+        progman = self._window_handle(api.FindWindowW("Progman", None))
         if progman:
             result = ctypes.c_ulong()
             try:
@@ -331,16 +331,18 @@ class DesktopTakeoverService:
         found = {"hwnd": 0}
 
         def check_root(hwnd: int) -> bool:
-            view = int(api.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None))
+            view = self._window_handle(api.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None))
             if not view:
                 return False
-            list_view = int(api.FindWindowExW(view, 0, "SysListView32", "FolderView"))
+            list_view = self._window_handle(
+                api.FindWindowExW(view, 0, "SysListView32", "FolderView")
+            )
             if list_view:
                 found["hwnd"] = list_view
                 return True
             return False
 
-        progman = int(api.FindWindowW("Progman", None))
+        progman = self._window_handle(api.FindWindowW("Progman", None))
         if progman and check_root(progman):
             return found["hwnd"]
 
@@ -354,3 +356,7 @@ class DesktopTakeoverService:
         )(callback)
         api.EnumWindows(enum_proc, 0)
         return found["hwnd"]
+
+    @staticmethod
+    def _window_handle(value) -> int:
+        return int(value or 0)

@@ -209,6 +209,21 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_restore_icons_returns_false_when_desktop_window_is_missing(self) -> None:
+        class FakeUser32:
+            def FindWindowW(self, _class_name, _title):
+                return None
+
+            def EnumWindows(self, _callback, _lparam):
+                return 1
+
+            def FindWindowExW(self, _parent, _after, _class_name, _title):
+                return None
+
+        service = DesktopTakeoverService(platform_name="win32", user32=FakeUser32())
+
+        self.assertFalse(service.restore_explorer_icons())
+
 
 if __name__ == "__main__":
     unittest.main()
