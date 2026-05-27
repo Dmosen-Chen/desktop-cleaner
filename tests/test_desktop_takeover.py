@@ -75,6 +75,7 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
                 self.insert_after: list[int] = []
                 self.flags: list[int] = []
                 self.show_calls: list[tuple[int, int]] = []
+                self.visible = True
 
             def FindWindowW(self, class_name, _title):
                 return 10 if class_name == "Progman" else 0
@@ -123,14 +124,20 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
 
             def ShowWindow(self, hwnd, command):
                 self.show_calls.append((int(hwnd), int(command)))
+                self.visible = command != 0
                 return 0
+
+            def IsWindowVisible(self, hwnd):
+                return self.visible
 
         user32 = FakeUser32()
         service = DesktopTakeoverService(platform_name="win32", user32=user32)
 
         self.assertEqual(service.attach_panels([123]), TakeoverResult(True, ""))
         self.assertTrue(service.hide_explorer_icons())
+        self.assertFalse(service.explorer_icons_visible())
         self.assertTrue(service.restore_explorer_icons())
+        self.assertTrue(service.explorer_icons_visible())
         service.detach_panels()
 
         self.assertEqual(user32.parents, [(123, 0)])

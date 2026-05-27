@@ -62,6 +62,10 @@ class FakeTakeoverService:
         self.calls.append(("restore", None))
         return self.restore_result
 
+    def explorer_icons_visible(self) -> bool | None:
+        self.calls.append(("visible", None))
+        return not self.hide_result
+
     def detach_panels(self) -> None:
         self.calls.append(("detach", None))
 
@@ -428,6 +432,40 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             enabled, exe_path = startup.calls[0]
             self.assertTrue(enabled)
             self.assertTrue(exe_path.is_absolute())
+
+    def test_settings_diagnostics_actions_use_recovery_export_and_log_services(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            takeover = FakeTakeoverService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                config,
+                store=store,
+                takeover_service=takeover,
+            )
+            app._show_settings(app.panel.group_id)
+            self.assertIsNotNone(app._settings_window)
+            settings = app._settings_window
+            assert settings is not None
+
+            with patch("desktop_tidy.application.open_item") as open_item:
+                settings._diagnostics_refresh_button.click()
+                settings._diagnostics_restore_icons_button.click()
+                settings._diagnostics_refresh_takeover_button.click()
+                settings._diagnostics_open_logs_button.click()
+                settings._diagnostics_export_button.click()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls if name != "visible"],
+                ["restore", "restore", "detach", "attach", "hide"],
+            )
+            open_item.assert_called_once_with(store.path.parent / "logs")
+            bundles = list(store.path.parent.glob("desktop-cleaner-diagnostics-*.zip"))
+            self.assertEqual(len(bundles), 1)
+            self.assertIn("已导出诊断包", settings.all_text())
 
     def test_external_drop_is_saved_only_as_external_refs(self) -> None:
         with TemporaryDirectory() as tmp:

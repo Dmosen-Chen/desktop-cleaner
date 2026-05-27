@@ -19,7 +19,7 @@ _SUPPORTED_SECTIONS = ["基础设置", "桌面分区", "桌面整理", "面板�
 _FORBIDDEN_TERMS = ("壁纸", "归档", "移动", "搜索", "AI", "同步")
 
 
-_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "功能面板"]
+_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "功能面板", "诊断与恢复"]
 
 
 class SettingsWindowTests(unittest.TestCase):
@@ -68,6 +68,47 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(add_panel_spy.at(0)[0], "clock")
         self.assertEqual(add_tab_spy.at(0)[0], "clock")
+
+    def test_diagnostics_page_exposes_status_logs_and_recovery_actions(self) -> None:
+        window = self._make_window()
+        refresh_spy = QSignalSpy(window.diagnostics_refresh_requested)
+        restore_icons_spy = QSignalSpy(window.diagnostics_restore_icons_requested)
+        refresh_takeover_spy = QSignalSpy(window.diagnostics_refresh_takeover_requested)
+        open_logs_spy = QSignalSpy(window.diagnostics_open_logs_requested)
+        export_spy = QSignalSpy(window.diagnostics_export_requested)
+        snapshot = SimpleNamespace(
+            desktop_path=r"D:\Preview\Desktop",
+            config_path=r"C:\Users\me\AppData\Local\DesktopCleaner\config.json",
+            log_path=r"C:\Users\me\AppData\Local\DesktopCleaner\logs\desktop-cleaner.log",
+            executable_path=r"D:\code\tool\dist\DesktopCleaner.exe",
+            takeover_enabled=True,
+            restore_required=False,
+            explorer_icons_hidden=True,
+            explorer_icons_visible=False,
+            group_count=2,
+            tab_count=8,
+            panel_window_count=2,
+            primary_screen_id="primary",
+            recent_errors=["2026 ERROR desktop_cleaner: boom"],
+        )
+
+        window.set_diagnostics(snapshot, ["line 1", "line 2"])
+        window._diagnostics_refresh_button.click()
+        window._diagnostics_restore_icons_button.click()
+        window._diagnostics_refresh_takeover_button.click()
+        window._diagnostics_open_logs_button.click()
+        window._diagnostics_export_button.click()
+
+        text = window.all_text()
+        self.assertIn("诊断与恢复", window.visible_section_names())
+        self.assertIn("D:\\Preview\\Desktop", text)
+        self.assertIn("Explorer 图标可见：否", text)
+        self.assertIn("line 2", text)
+        self.assertEqual(refresh_spy.count(), 1)
+        self.assertEqual(restore_icons_spy.count(), 1)
+        self.assertEqual(refresh_takeover_spy.count(), 1)
+        self.assertEqual(open_logs_spy.count(), 1)
+        self.assertEqual(export_spy.count(), 1)
 
     def test_history_page_lists_snapshots_and_emits_restore_request(self) -> None:
         window = self._make_window()

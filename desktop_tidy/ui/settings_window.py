@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QStackedWidget,
@@ -41,7 +42,7 @@ _DEFAULT_RULE_ROLES = {
     "rule-apps": "apps",
     "rule-other": "other",
 }
-_SECTIONS = _SECTIONS + ["面板历史", "功能面板"]
+_SECTIONS = _SECTIONS + ["面板历史", "功能面板", "诊断与恢复"]
 
 
 class SettingsWindow(QWidget):
@@ -51,6 +52,11 @@ class SettingsWindow(QWidget):
     add_widget_panel_requested = Signal(str)
     add_widget_tab_requested = Signal(str)
     history_restore_requested = Signal(str)
+    diagnostics_refresh_requested = Signal()
+    diagnostics_restore_icons_requested = Signal()
+    diagnostics_refresh_takeover_requested = Signal()
+    diagnostics_open_logs_requested = Signal()
+    diagnostics_export_requested = Signal()
 
     def __init__(
         self,
@@ -81,6 +87,7 @@ class SettingsWindow(QWidget):
         self._pages.addWidget(self._build_appearance_page())
         self._pages.addWidget(self._build_history_page())
         self._pages.addWidget(self._build_widgets_page())
+        self._pages.addWidget(self._build_diagnostics_page())
 
         self._section_list.currentRowChanged.connect(self._pages.setCurrentIndex)
         self._section_list.setCurrentRow(0)
@@ -147,6 +154,8 @@ class SettingsWindow(QWidget):
                 parts.append(widget.text())
             elif isinstance(widget, QComboBox):
                 parts.append(widget.currentText())
+            elif isinstance(widget, QPlainTextEdit):
+                parts.append(widget.toPlainText())
         for row in range(self._rules_table.rowCount()):
             for column in range(self._rules_table.columnCount()):
                 item = self._rules_table.item(row, column)
@@ -289,6 +298,49 @@ class SettingsWindow(QWidget):
         layout.addStretch(1)
         return page
 
+    def _build_diagnostics_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("诊断与恢复", page))
+        self._diagnostics_summary = QPlainTextEdit(page)
+        self._diagnostics_summary.setReadOnly(True)
+        self._diagnostics_summary.setPlaceholderText("点击刷新诊断状态。")
+        self._diagnostics_log_view = QPlainTextEdit(page)
+        self._diagnostics_log_view.setReadOnly(True)
+        self._diagnostics_log_view.setPlaceholderText("最近日志会显示在这里。")
+        self._diagnostics_refresh_button = QPushButton("刷新诊断", page)
+        self._diagnostics_restore_icons_button = QPushButton("恢复桌面图标", page)
+        self._diagnostics_refresh_takeover_button = QPushButton("刷新桌面接管", page)
+        self._diagnostics_open_logs_button = QPushButton("打开日志文件夹", page)
+        self._diagnostics_export_button = QPushButton("导出诊断包", page)
+        self._diagnostics_refresh_button.clicked.connect(
+            self.diagnostics_refresh_requested.emit
+        )
+        self._diagnostics_restore_icons_button.clicked.connect(
+            self.diagnostics_restore_icons_requested.emit
+        )
+        self._diagnostics_refresh_takeover_button.clicked.connect(
+            self.diagnostics_refresh_takeover_requested.emit
+        )
+        self._diagnostics_open_logs_button.clicked.connect(
+            self.diagnostics_open_logs_requested.emit
+        )
+        self._diagnostics_export_button.clicked.connect(
+            self.diagnostics_export_requested.emit
+        )
+        button_row = QHBoxLayout()
+        button_row.addWidget(self._diagnostics_refresh_button)
+        button_row.addWidget(self._diagnostics_restore_icons_button)
+        button_row.addWidget(self._diagnostics_refresh_takeover_button)
+        button_row.addWidget(self._diagnostics_open_logs_button)
+        button_row.addWidget(self._diagnostics_export_button)
+        layout.addLayout(button_row)
+        layout.addWidget(QLabel("当前状态", page))
+        layout.addWidget(self._diagnostics_summary, stretch=2)
+        layout.addWidget(QLabel("最近日志", page))
+        layout.addWidget(self._diagnostics_log_view, stretch=3)
+        return page
+
     def set_history_snapshots(self, snapshots: list[object]) -> None:
         self._history_list.clear()
         for snapshot in snapshots:
@@ -306,6 +358,47 @@ class SettingsWindow(QWidget):
         snapshot_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
         if snapshot_id:
             self.history_restore_requested.emit(snapshot_id)
+
+    def set_diagnostics(self, snapshot: object, recent_logs: list[str]) -> None:
+        self._diagnostics_summary.setPlainText(self._format_diagnostics(snapshot))
+        self._diagnostics_log_view.setPlainText("\n".join(recent_logs))
+
+    def show_diagnostics_message(self, message: str) -> None:
+        current = self._diagnostics_summary.toPlainText().strip()
+        separator = "\n\n" if current else ""
+        self._diagnostics_summary.setPlainText(f"{current}{separator}{message}")
+
+    def _format_diagnostics(self, snapshot: object) -> str:
+        visible = getattr(snapshot, "explorer_icons_visible", None)
+        if visible is True:
+            visible_text = "是"
+        elif visible is False:
+            visible_text = "否"
+        else:
+            visible_text = "未知"
+        enabled = "是" if getattr(snapshot, "takeover_enabled", False) else "否"
+        restore_required = "是" if getattr(snapshot, "restore_required", False) else "否"
+        icons_hidden = "是" if getattr(snapshot, "explorer_icons_hidden", False) else "否"
+        recent_errors = list(getattr(snapshot, "recent_errors", []) or [])
+        error_text = "\n".join(f"- {entry}" for entry in recent_errors) or "无"
+        return "\n".join(
+            [
+                f"桌面路径：{getattr(snapshot, 'desktop_path', '')}",
+                f"配置路径：{getattr(snapshot, 'config_path', '')}",
+                f"日志路径：{getattr(snapshot, 'log_path', '')}",
+                f"程序路径：{getattr(snapshot, 'executable_path', '')}",
+                f"接管启用：{enabled}",
+                f"恢复标记：{restore_required}",
+                f"Explorer 图标隐藏标记：{icons_hidden}",
+                f"Explorer 图标可见：{visible_text}",
+                f"面板组/标签：{getattr(snapshot, 'group_count', 0)}组 / {getattr(snapshot, 'tab_count', 0)}标签",
+                f"面板窗口数：{getattr(snapshot, 'panel_window_count', 0)}",
+                f"当前屏幕：{getattr(snapshot, 'primary_screen_id', '')}",
+                f"进程 ID：{getattr(snapshot, 'process_id', '')}",
+                "最近错误：",
+                error_text,
+            ]
+        )
 
     def _update_takeover_status_label(self) -> None:
         if not hasattr(self, "_takeover_status_label"):

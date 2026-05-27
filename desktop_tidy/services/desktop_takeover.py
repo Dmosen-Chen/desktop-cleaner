@@ -164,6 +164,8 @@ class DesktopTakeoverService:
         api.GetSystemMetrics.restype = ctypes.c_int
         api.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
         api.ShowWindow.restype = ctypes.c_bool
+        api.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        api.IsWindowVisible.restype = ctypes.c_bool
         return api
 
     def _set_explorer_icons_visible(self, visible: bool) -> bool:
@@ -175,6 +177,18 @@ class DesktopTakeoverService:
             return False
         api.ShowWindow(list_view, SW_SHOW if visible else SW_HIDE)
         return True
+
+    def explorer_icons_visible(self) -> bool | None:
+        api = self._api()
+        if api is None:
+            return None
+        list_view = self._desktop_list_view(api)
+        if not list_view:
+            return None
+        try:
+            return bool(api.IsWindowVisible(list_view))
+        except AttributeError:
+            return None
 
     def _window_rect(self, api, hwnd: int) -> tuple[int, int, int, int] | None:
         try:

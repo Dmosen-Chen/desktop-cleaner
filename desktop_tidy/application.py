@@ -25,6 +25,7 @@ from desktop_tidy.services.desktop_takeover import (
     DesktopRecoveryGuard,
     DesktopTakeoverService,
 )
+from desktop_tidy.services.diagnostics import DiagnosticsService, RecoveryResult
 from desktop_tidy.services.activation import ActivationServer
 from desktop_tidy.services.item_launcher import open_item
 from desktop_tidy.services.logging_setup import (
@@ -133,6 +134,7 @@ class DesktopCleanerApplication:
         for group in self.config.panel_groups:
             self._ensure_panel_widget(group.id)
         self.panel = self._panels[self.config.panel_groups[0].id]
+        self.diagnostics_service = self._create_diagnostics_service()
         self._settings_window: SettingsWindow | None = None
         self.watcher = DesktopWatcher(self.index)
         self.watcher.changed.connect(self._on_desktop_changed)
@@ -461,12 +463,28 @@ class DesktopCleanerApplication:
             self._settings_window.history_restore_requested.connect(
                 self._on_history_restore_requested
             )
+            self._settings_window.diagnostics_refresh_requested.connect(
+                self._refresh_settings_diagnostics
+            )
+            self._settings_window.diagnostics_restore_icons_requested.connect(
+                self._on_diagnostics_restore_icons_requested
+            )
+            self._settings_window.diagnostics_refresh_takeover_requested.connect(
+                self._on_diagnostics_refresh_takeover_requested
+            )
+            self._settings_window.diagnostics_open_logs_requested.connect(
+                self._on_diagnostics_open_logs_requested
+            )
+            self._settings_window.diagnostics_export_requested.connect(
+                self._on_diagnostics_export_requested
+            )
         else:
             self._settings_window.set_configuration(
                 self.model.config,
                 group_id=group_id,
             )
         self._settings_window.set_history_snapshots(self.history_store.load())
+        self._refresh_settings_diagnostics()
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
@@ -522,6 +540,7 @@ class DesktopCleanerApplication:
     def _replace_configuration(self, config: Configuration) -> None:
         self.model = WorkspaceModel(config)
         self.config = self.model.config
+        self.diagnostics_service = self._create_diagnostics_service()
         try:
             self.watcher.changed.disconnect(self._on_desktop_changed)
         except RuntimeError:
@@ -541,6 +560,72 @@ class DesktopCleanerApplication:
         self._sync_panel_snap_targets()
         for panel in self._panels.values():
             panel.show()
+
+    def _create_diagnostics_service(self) -> DiagnosticsService:
+        return DiagnosticsService(
+            self.model.config,
+            config_path=self.store.path,
+            history_path=self.history_store.path,
+            takeover_service=self.takeover_service,
+            executable_path_provider=self._startup_executable_path,
+            panel_handles_provider=self._panel_native_handles,
+            panel_window_count_provider=lambda: len(self._panels),
+            config_saver=self.save,
+        )
+
+    def _refresh_settings_diagnostics(self) -> None:
+        if self._settings_window is None:
+            return
+        try:
+            snapshot = self.diagnostics_service.collect_snapshot()
+            logs = self.diagnostics_service.read_recent_logs(120)
+            self._settings_window.set_diagnostics(snapshot, logs)
+        except Exception as exc:
+            log_exception("refresh settings diagnostics", exc)
+            self._settings_window.show_diagnostics_message(f"诊断读取失败：{exc}")
+
+    def _on_diagnostics_restore_icons_requested(self) -> None:
+        result = self.diagnostics_service.restore_desktop_icons()
+        if result.success:
+            self._takeover_active = False
+        self._show_diagnostics_result(result)
+
+    def _on_diagnostics_refresh_takeover_requested(self) -> None:
+        result = self.diagnostics_service.refresh_takeover_if_enabled()
+        self._takeover_active = result.success
+        self._show_diagnostics_result(result)
+
+    def _on_diagnostics_open_logs_requested(self) -> None:
+        try:
+            self.diagnostics_service.log_dir.mkdir(parents=True, exist_ok=True)
+            open_item(self.diagnostics_service.log_dir)
+            self._show_diagnostics_result(
+                RecoveryResult(True, "已打开日志文件夹", str(self.diagnostics_service.log_dir))
+            )
+        except Exception as exc:
+            log_exception("open diagnostics log folder", exc)
+            self._show_diagnostics_result(
+                RecoveryResult(False, "打开日志文件夹失败", str(exc))
+            )
+
+    def _on_diagnostics_export_requested(self) -> None:
+        try:
+            bundle = self.diagnostics_service.export_bundle(self.store.path.parent)
+            self._show_diagnostics_result(
+                RecoveryResult(True, "已导出诊断包", str(bundle))
+            )
+        except Exception as exc:
+            log_exception("export diagnostics from settings", exc)
+            self._show_diagnostics_result(
+                RecoveryResult(False, "导出诊断包失败", str(exc))
+            )
+
+    def _show_diagnostics_result(self, result: RecoveryResult) -> None:
+        detail = f"\n{result.details}" if result.details else ""
+        if self._settings_window is not None:
+            self._refresh_settings_diagnostics()
+            self._settings_window.show_diagnostics_message(f"{result.message}{detail}")
+        self._notify_user(result.message, result.details or result.message)
 
     def _on_desktop_changed(self, _changes: IndexChanges) -> None:
         if _changes.added:
