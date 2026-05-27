@@ -109,6 +109,36 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(new_tab.group_id, "group-default")
         self.assertEqual(model.group("group-default").active_tab_id, new_tab.id)
 
+    def test_add_widget_tab_creates_active_function_tab_without_item_targets(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+
+        tab = model.add_widget_tab("group-default", "clock", name="时间")
+
+        self.assertEqual(tab.content_kind, "widget")
+        self.assertEqual(tab.widget_type, "clock")
+        self.assertEqual(tab.widget_settings, {})
+        self.assertEqual(model.group("group-default").active_tab_id, tab.id)
+        validate_configuration(model.config)
+
+    def test_add_widget_panel_creates_independent_single_clock_group(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+
+        group = model.add_widget_panel("clock", name="时间")
+
+        self.assertEqual(group.tab_ids, [group.active_tab_id])
+        tab = model.tab(group.active_tab_id)
+        self.assertEqual(tab.content_kind, "widget")
+        self.assertEqual(tab.widget_type, "clock")
+        self.assertEqual(tab.group_id, group.id)
+        validate_configuration(model.config)
+
+    def test_files_cannot_be_dropped_on_widget_tab(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        tab = model.add_widget_tab("group-default", "clock", name="时间")
+
+        with self.assertRaisesRegex(ValueError, "does not accept item entries"):
+            model.add_paths_to_tab([Path(r"D:\outside.txt")], tab.id)
+
     def test_rename_tab_uses_default_label_when_inline_name_is_blank(self) -> None:
         model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
         tab = model.add_tab("group-default", "临时")

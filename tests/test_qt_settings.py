@@ -4,6 +4,7 @@ import os
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -16,6 +17,9 @@ from desktop_tidy.ui.settings_window import SettingsWindow
 
 _SUPPORTED_SECTIONS = ["基础设置", "桌面分区", "桌面整理", "面板外观"]
 _FORBIDDEN_TERMS = ("壁纸", "归档", "移动", "搜索", "AI", "同步")
+
+
+_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "功能面板"]
 
 
 class SettingsWindowTests(unittest.TestCase):
@@ -50,6 +54,38 @@ class SettingsWindowTests(unittest.TestCase):
         window = self._make_window()
 
         self.assertEqual(window.visible_section_names(), _SUPPORTED_SECTIONS)
+
+    def test_recovery_history_and_widget_actions_are_exposed_as_signals(self) -> None:
+        window = self._make_window()
+        restore_spy = QSignalSpy(window.restore_desktop_requested)
+        add_panel_spy = QSignalSpy(window.add_widget_panel_requested)
+        add_tab_spy = QSignalSpy(window.add_widget_tab_requested)
+
+        window._restore_desktop_button.click()
+        window._add_clock_panel_button.click()
+        window._add_clock_tab_button.click()
+
+        self.assertEqual(restore_spy.count(), 1)
+        self.assertEqual(add_panel_spy.at(0)[0], "clock")
+        self.assertEqual(add_tab_spy.at(0)[0], "clock")
+
+    def test_history_page_lists_snapshots_and_emits_restore_request(self) -> None:
+        window = self._make_window()
+        restore_spy = QSignalSpy(window.history_restore_requested)
+        snapshot = SimpleNamespace(
+            id="layout-1",
+            created_at="2026-05-27T12:00:00",
+            reason="move",
+            group_count=2,
+            tab_count=7,
+        )
+
+        window.set_history_snapshots([snapshot])
+        window._history_list.setCurrentRow(0)
+        window._restore_history_button.click()
+
+        self.assertEqual(restore_spy.count(), 1)
+        self.assertEqual(restore_spy.at(0)[0], "layout-1")
 
     def test_unsupported_features_are_not_exposed_in_ui_text(self) -> None:
         window = self._make_window()

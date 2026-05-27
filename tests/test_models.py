@@ -22,7 +22,7 @@ class ModelTests(unittest.TestCase):
     def test_default_configuration_has_required_group_tabs_appearance_and_rules(self) -> None:
         config = build_default_configuration(r"C:\Users\Example\Desktop")
 
-        self.assertEqual(config.schema_version, 2)
+        self.assertEqual(config.schema_version, 3)
         self.assertEqual(config.desktop.path, r"C:\Users\Example\Desktop")
         self.assertEqual(config.desktop.primary_screen_id, "primary")
         self.assertEqual(len(config.panel_groups), 1)
@@ -88,6 +88,20 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(restored, config)
         self.assertEqual(restored.external_refs[0].source_kind, "external")
 
+    def test_widget_tab_dictionary_round_trip_preserves_plugin_metadata(self) -> None:
+        tab = PanelTab(
+            "tab-clock",
+            "group-a",
+            "时间",
+            2,
+            "custom",
+            content_kind="widget",
+            widget_type="clock",
+            widget_settings={"hour_24": True},
+        )
+
+        self.assertEqual(PanelTab.from_dict(tab.to_dict()), tab)
+
     def test_validate_configuration_requires_absolute_desktop_path(self) -> None:
         config = build_default_configuration(r"D:\Desktop")
         config.desktop.path = r"relative\desktop"
@@ -145,6 +159,33 @@ class ModelTests(unittest.TestCase):
         config.panel_groups[0].appearance.item_icon_size = 4
 
         with self.assertRaisesRegex(InvalidConfiguration, "icon size"):
+            validate_configuration(config)
+
+    def test_validate_configuration_rejects_enabled_rule_targeting_widget_tab(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        widget_tab = PanelTab(
+            "tab-clock",
+            "group-default",
+            "时间",
+            len(config.panel_groups[0].tab_ids),
+            content_kind="widget",
+            widget_type="clock",
+        )
+        config.panel_tabs.append(widget_tab)
+        config.panel_groups[0].tab_ids.append(widget_tab.id)
+        config.rules.append(
+            ClassificationRule(
+                "rule-clock",
+                "Broken",
+                "extension",
+                widget_tab.id,
+                [".broken"],
+                enabled=True,
+                order=999,
+            )
+        )
+
+        with self.assertRaisesRegex(InvalidConfiguration, "targets a widget tab"):
             validate_configuration(config)
 
 

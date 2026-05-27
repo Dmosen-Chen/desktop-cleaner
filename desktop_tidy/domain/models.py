@@ -98,6 +98,9 @@ class PanelTab:
     name: str
     order: int
     category_role: str = "custom"
+    content_kind: str = "items"
+    widget_type: str = ""
+    widget_settings: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -106,6 +109,9 @@ class PanelTab:
             "name": self.name,
             "order": self.order,
             "category_role": self.category_role,
+            "content_kind": self.content_kind,
+            "widget_type": self.widget_type,
+            "widget_settings": dict(self.widget_settings),
         }
 
     @classmethod
@@ -116,6 +122,9 @@ class PanelTab:
             name=str(payload["name"]),
             order=int(payload.get("order", 0)),
             category_role=str(payload.get("category_role", "custom")),
+            content_kind=str(payload.get("content_kind", "items")),
+            widget_type=str(payload.get("widget_type", "")),
+            widget_settings=dict(payload.get("widget_settings", {})),
         )
 
 
@@ -277,7 +286,7 @@ class Configuration:
 
 
 class InvalidConfiguration(ValueError):
-    """Raised when a schema v2 configuration violates its structural contract."""
+    """Raised when a configuration violates its structural contract."""
 
 
 def _required_object(payload: dict[str, Any], key: str) -> dict[str, Any]:
@@ -370,10 +379,19 @@ def _validate_desktop_path_value(path: str) -> None:
         raise InvalidConfiguration("desktop.path must be an absolute path")
 
 
-def validate_configuration_payload(payload: dict[str, Any]) -> None:
-    """Validate the persisted schema v2 shape before any tolerant conversion."""
-    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 2:
-        raise InvalidConfiguration("schema_version must be the integer 2")
+def validate_configuration_payload(
+    payload: dict[str, Any],
+    *,
+    expected_schema_version: int = 3,
+) -> None:
+    """Validate the persisted schema shape before any tolerant conversion."""
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != expected_schema_version
+    ):
+        raise InvalidConfiguration(
+            f"schema_version must be the integer {expected_schema_version}"
+        )
 
     desktop = _required_object(payload, "desktop")
     _validate_desktop_path_value(_required_string(desktop, "path", "desktop.path"))
@@ -414,6 +432,16 @@ def validate_configuration_payload(payload: dict[str, Any]) -> None:
         for key in ("id", "group_id", "name", "category_role"):
             _required_text(raw_tab, key, f"{label}.{key}")
         _required_integer(raw_tab, "order", f"{label}.order")
+        if expected_schema_version >= 3:
+            content_kind = _required_string(raw_tab, "content_kind", f"{label}.content_kind")
+            if content_kind not in {"items", "widget"}:
+                raise InvalidConfiguration(f"{label}.content_kind is invalid")
+            _required_string(raw_tab, "widget_type", f"{label}.widget_type")
+            widget_settings = raw_tab.get("widget_settings")
+            if not isinstance(widget_settings, dict):
+                raise InvalidConfiguration(f"{label}.widget_settings must be an object")
+            if content_kind == "widget" and not str(raw_tab.get("widget_type", "")).strip():
+                raise InvalidConfiguration(f"{label}.widget_type must not be blank")
 
     rules = _required_list(payload, "rules")
     for index, raw_rule in enumerate(rules):
@@ -464,10 +492,16 @@ def _validate_geometry(group: PanelGroup) -> None:
         raise InvalidConfiguration(f"panel group {group.id} extends outside the desktop")
 
 
-def validate_configuration(config: Configuration) -> None:
-    """Validate the references and normalized values required by schema v2."""
-    if config.schema_version != 2:
-        raise InvalidConfiguration(f"schema version {config.schema_version} is not version 2")
+def validate_configuration(
+    config: Configuration,
+    *,
+    expected_schema_version: int = 3,
+) -> None:
+    """Validate the references and normalized values required by the current schema."""
+    if config.schema_version != expected_schema_version:
+        raise InvalidConfiguration(
+            f"schema version {config.schema_version} is not version {expected_schema_version}"
+        )
     _validate_desktop_path_value(config.desktop.path)
     if not config.panel_groups:
         raise InvalidConfiguration("configuration must contain at least one panel group")
@@ -480,6 +514,17 @@ def validate_configuration(config: Configuration) -> None:
         raise InvalidConfiguration("panel tab ids must be unique")
 
     tabs_by_id = {tab.id: tab for tab in config.panel_tabs}
+    item_tab_ids: set[str] = set()
+    for tab in config.panel_tabs:
+        if tab.content_kind not in {"items", "widget"}:
+            raise InvalidConfiguration(f"panel tab {tab.id} has an invalid content kind")
+        if tab.content_kind == "widget":
+            if not tab.widget_type.strip():
+                raise InvalidConfiguration(f"panel tab {tab.id} widget type must not be blank")
+            if not isinstance(tab.widget_settings, dict):
+                raise InvalidConfiguration(f"panel tab {tab.id} widget settings must be a dict")
+        else:
+            item_tab_ids.add(tab.id)
     _validate_appearance("default appearance", config.appearance_defaults)
     listed_tab_ids: set[str] = set()
     for group in config.panel_groups:
@@ -502,18 +547,23 @@ def validate_configuration(config: Configuration) -> None:
     if listed_tab_ids != tab_ids:
         raise InvalidConfiguration("configuration contains tabs outside panel groups")
     for rule in config.rules:
-        if rule.target_tab_id in tab_ids:
+        valid_rule_targets = item_tab_ids if expected_schema_version >= 3 else tab_ids
+        if rule.target_tab_id in valid_rule_targets:
             continue
         if not rule.enabled and rule.target_tab_id == "":
             continue
+        if expected_schema_version >= 3 and rule.target_tab_id in tab_ids:
+            raise InvalidConfiguration(f"classification rule {rule.id} targets a widget tab")
         raise InvalidConfiguration(f"classification rule {rule.id} targets an unknown tab")
     for override in config.manual_overrides:
-        if override.target_tab_id not in tab_ids:
+        valid_item_targets = item_tab_ids if expected_schema_version >= 3 else tab_ids
+        if override.target_tab_id not in valid_item_targets:
             raise InvalidConfiguration("manual override targets an unknown tab")
     for reference in config.external_refs:
         if reference.source_kind != "external":
             raise InvalidConfiguration(f"external reference {reference.id} has an invalid source kind")
-        if reference.target_tab_id not in tab_ids:
+        valid_item_targets = item_tab_ids if expected_schema_version >= 3 else tab_ids
+        if reference.target_tab_id not in valid_item_targets:
             raise InvalidConfiguration(f"external reference {reference.id} targets an unknown tab")
         if not _is_absolute_desktop_path(reference.canonical_path):
             raise InvalidConfiguration(

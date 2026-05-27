@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushButton, QWidget
 
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.models import Configuration, PanelGeometry
@@ -77,6 +77,10 @@ def tab_buttons(widget: PanelGroupWidget) -> list[QPushButton]:
 
 def find_tab_button(widget: PanelGroupWidget, label: str) -> QPushButton:
     return next(button for button in tab_buttons(widget) if label in button.text())
+
+
+def visible_label_texts(widget: QWidget) -> list[str]:
+    return [label.text() for label in widget.findChildren(QLabel) if label.isVisible()]
 
 
 def simulate_tab_drag_release_at_local_point(
@@ -156,6 +160,24 @@ class PanelGroupWidgetTests(unittest.TestCase):
 
         self.assertEqual(widget.active_tab_id, "tab-images")
         self.assertIn("图片", widget.active_tab_title())
+
+    def test_widget_tab_shows_clock_content_and_hides_item_grid(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        tab = model.add_widget_tab("group-default", "clock", name="时间")
+        widget = PanelGroupWidget(
+            model.group("group-default"),
+            model.config.panel_tabs,
+            workspace=model,
+        )
+
+        widget.activate_tab(tab.id)
+        widget.show()
+        type(self).app.processEvents()
+
+        self.assertFalse(widget.item_grid.isVisible())
+        self.assertTrue(any(":" in text for text in visible_label_texts(widget)))
+        self.assertFalse(widget.organize_button.isEnabled())
 
     def test_tab_button_click_switches_active_tab_without_drag(self) -> None:
         """Plain tab click must switch content; drag-detection must not swallow clicks."""

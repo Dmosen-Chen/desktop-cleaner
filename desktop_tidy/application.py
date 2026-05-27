@@ -14,6 +14,7 @@ from desktop_tidy.domain.classification import canonical_key, classify_path
 from desktop_tidy.domain.models import AppearanceSettings, Configuration, PanelGeometry
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.config_store import ConfigurationStore
+from desktop_tidy.persistence.layout_history import LayoutHistoryStore
 from desktop_tidy.services.desktop_index import (
     DesktopIndex,
     DesktopWatcher,
@@ -26,6 +27,11 @@ from desktop_tidy.services.desktop_takeover import (
 )
 from desktop_tidy.services.activation import ActivationServer
 from desktop_tidy.services.item_launcher import open_item
+from desktop_tidy.services.logging_setup import (
+    configure_logging,
+    install_global_exception_hook,
+    log_exception,
+)
 from desktop_tidy.services.screens import available_screen_geometries, available_screen_options
 from desktop_tidy.services.startup import StartupService
 from desktop_tidy.ui.panel_group import PanelGroupWidget
@@ -43,6 +49,11 @@ def application_store() -> ConfigurationStore:
     return ConfigurationStore(base / APP_CONFIG_NAME)
 
 
+def application_history_store() -> LayoutHistoryStore:
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / APP_DIR_NAME
+    return LayoutHistoryStore(base / "layout-history.json")
+
+
 def apply_application_appearance_defaults(config: Configuration) -> None:
     config.appearance_defaults = deepcopy(APP_APPEARANCE_DEFAULTS)
     for group in config.panel_groups:
@@ -53,6 +64,7 @@ def ensure_application(argv: list[str] | None = None) -> QApplication:
     application = QApplication.instance()
     if application is None:
         application = QApplication(argv if argv is not None else sys.argv)
+        install_global_exception_hook()
     QApplication.setQuitOnLastWindowClosed(False)
     return application
 
@@ -89,7 +101,9 @@ class DesktopCleanerApplication:
         startup_service: StartupService | None = None,
         tray_controller: TrayController | None = None,
         activation_server: ActivationServer | None = None,
+        history_store: LayoutHistoryStore | None = None,
     ) -> None:
+        should_configure_logging = config is None or store is not None
         if config is None:
             self.store = store or application_store()
             is_new_config = not self.store.path.is_file()
@@ -105,6 +119,11 @@ class DesktopCleanerApplication:
         self.startup_service = startup_service or StartupService()
         self.tray = tray_controller or TrayController()
         self.activation_server = activation_server or ActivationServer()
+        if should_configure_logging:
+            configure_logging(self.store.path.parent)
+        self.history_store = history_store or LayoutHistoryStore(
+            self.store.path.with_name("layout-history.json")
+        )
         self._takeover_active = False
         self._shutdown_started = False
         if DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
@@ -169,6 +188,13 @@ class DesktopCleanerApplication:
     def save(self) -> None:
         self.store.save(self.model.config)
 
+    def save_with_history(self, reason: str) -> None:
+        try:
+            self.history_store.push(self.model.config, reason)
+        except Exception as exc:
+            log_exception(f"record layout history: {reason}", exc)
+        self.save()
+
     def _on_about_to_quit(self) -> None:
         if self._shutdown_started:
             return
@@ -176,7 +202,7 @@ class DesktopCleanerApplication:
         for panel in self._panels.values():
             panel._persist_geometry_from_widget(update_rh=not panel.is_collapsed)
         self._restore_desktop_takeover_if_needed()
-        self.save()
+        self.save_with_history("merge-group")
 
     def _connect_tray(self) -> None:
         self.tray.show_panels_requested.connect(self._show_panels_from_tray)
@@ -202,6 +228,16 @@ class DesktopCleanerApplication:
     def _restore_desktop_from_tray(self) -> None:
         self._restore_desktop_takeover_if_needed()
         self.save()
+        self._notify_user("桌面图标恢复", "已尝试恢复 Explorer 桌面图标。")
+
+    def _notify_user(self, title: str, message: str) -> None:
+        notifier = getattr(self.tray, "show_message", None)
+        if notifier is None:
+            return
+        try:
+            notifier(title, message)
+        except Exception as exc:
+            log_exception("show tray notification", exc)
 
     def _quit_from_tray(self) -> None:
         self._on_about_to_quit()
@@ -211,13 +247,16 @@ class DesktopCleanerApplication:
 
     def handle_paths_dropped(self, paths: list[Path], tab_id: str) -> None:
         self.model.add_paths_to_tab(paths, tab_id)
-        self.save()
+        self.save_with_history("item-reference-change")
         self.refresh()
 
     def refresh(self, _changes: IndexChanges | None = None) -> None:
         for panel in self._panels.values():
             active_tab_id = panel.active_tab_id
             panel.item_grid.set_active_tab_id(active_tab_id)
+            tab = self.model.tab(active_tab_id)
+            if tab.content_kind != "items":
+                continue
             entries = visible_entries_for_active_tab(
                 self.model.config,
                 self.index,
@@ -298,14 +337,14 @@ class DesktopCleanerApplication:
 
     def _on_panel_changed(self) -> None:
         self._sync_panel_widgets_with_model()
-        self.save()
+        self.save_with_history("panel-change")
         self.refresh()
 
     def _on_panel_geometry_changed(self) -> None:
-        self.save()
+        self.save_with_history("geometry-change")
 
     def _on_panel_appearance_changed(self) -> None:
-        self.save()
+        self.save_with_history("appearance-change")
 
     def _on_panel_layout_gesture_started(self, group_id: str) -> None:
         panel = self._panels.get(group_id)
@@ -386,8 +425,8 @@ class DesktopCleanerApplication:
     def _on_item_activated(self, path: Path) -> None:
         try:
             open_item(path)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_exception(f"open item {path}", exc)
 
     def _on_tab_detach_requested(self, tab_id: str, geometry: object) -> None:
         if not isinstance(geometry, PanelGeometry):
@@ -405,11 +444,24 @@ class DesktopCleanerApplication:
                 screen_options=available_screen_options(),
             )
             self._settings_window.config_saved.connect(self._on_settings_saved)
+            self._settings_window.restore_desktop_requested.connect(
+                self._restore_desktop_from_settings
+            )
+            self._settings_window.add_widget_panel_requested.connect(
+                self._on_add_widget_panel_requested
+            )
+            self._settings_window.add_widget_tab_requested.connect(
+                self._on_add_widget_tab_requested
+            )
+            self._settings_window.history_restore_requested.connect(
+                self._on_history_restore_requested
+            )
         else:
             self._settings_window.set_configuration(
                 self.model.config,
                 group_id=group_id,
             )
+        self._settings_window.set_history_snapshots(self.history_store.load())
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
@@ -427,11 +479,63 @@ class DesktopCleanerApplication:
             self.watcher.changed.connect(self._on_desktop_changed)
         self._apply_startup_preference()
         self._apply_desktop_takeover_preference()
-        self.save()
+        self.save_with_history("settings-save")
         for panel in self._panels.values():
             panel.reload_from_model()
         self._sync_panel_snap_targets()
         self.refresh()
+
+    def _restore_desktop_from_settings(self) -> None:
+        self._restore_desktop_from_tray()
+
+    def _on_add_widget_panel_requested(self, widget_type: str) -> None:
+        group = self.model.add_widget_panel(widget_type)
+        panel = self._ensure_panel_widget(group.id)
+        panel._apply_geometry_from_model()
+        panel.show()
+        self._sync_panel_geometries()
+        self._sync_panel_snap_targets()
+        self.save_with_history(f"add-widget-panel:{widget_type}")
+        self.refresh()
+
+    def _on_add_widget_tab_requested(self, widget_type: str) -> None:
+        group_id = self._settings_window._group_id if self._settings_window is not None else self.panel.group_id
+        tab = self.model.add_widget_tab(group_id, widget_type)
+        panel = self._ensure_panel_widget(group_id)
+        panel.reload_from_model()
+        panel.activate_tab(tab.id)
+        self._sync_panel_snap_targets()
+        self.save_with_history(f"add-widget-tab:{widget_type}")
+        self.refresh()
+
+    def _on_history_restore_requested(self, snapshot_id: str) -> None:
+        restored = self.history_store.restore(snapshot_id)
+        self._replace_configuration(restored)
+        self.save()
+        self.refresh()
+
+    def _replace_configuration(self, config: Configuration) -> None:
+        self.model = WorkspaceModel(config)
+        self.config = self.model.config
+        try:
+            self.watcher.changed.disconnect(self._on_desktop_changed)
+        except RuntimeError:
+            pass
+        self.watcher.deleteLater()
+        for panel in self._panels.values():
+            panel.hide()
+            panel.deleteLater()
+        self._panels.clear()
+        self.index = DesktopIndex(Path(self.config.desktop.path))
+        self.watcher = DesktopWatcher(self.index)
+        self.watcher.changed.connect(self._on_desktop_changed)
+        for group in self.config.panel_groups:
+            self._ensure_panel_widget(group.id)
+        self.panel = self._panels[self.config.panel_groups[0].id]
+        self._sync_panel_geometries()
+        self._sync_panel_snap_targets()
+        for panel in self._panels.values():
+            panel.show()
 
     def _on_desktop_changed(self, _changes: IndexChanges) -> None:
         if _changes.added:
@@ -484,13 +588,20 @@ class DesktopCleanerApplication:
             return
         result = self.takeover_service.attach_panels(self._panel_native_handles())
         if not result.success:
+            log_exception("desktop takeover attach failed", RuntimeError(str(result.message)))
             self._disable_desktop_takeover_after_failure(restore=False)
+            self._notify_user("桌面接管失败", "无法进入桌面层，已保持普通窗口模式。")
             return
         self.model.config.desktop.restore_required = True
         self.model.config.desktop.explorer_icons_hidden = False
         self.save()
         if not self.takeover_service.hide_explorer_icons():
+            log_exception(
+                "desktop takeover hide icons failed",
+                RuntimeError("hide_explorer_icons returned false"),
+            )
             self._disable_desktop_takeover_after_failure(restore=True)
+            self._notify_user("桌面接管失败", "隐藏 Explorer 桌面图标失败，已自动恢复。")
             return
         self._takeover_active = True
         self.model.config.desktop.explorer_icons_hidden = True

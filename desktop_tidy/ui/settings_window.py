@@ -41,11 +41,16 @@ _DEFAULT_RULE_ROLES = {
     "rule-apps": "apps",
     "rule-other": "other",
 }
+_SECTIONS = _SECTIONS + ["面板历史", "功能面板"]
 
 
 class SettingsWindow(QWidget):
     config_saved = Signal()
     validation_failed = Signal(str)
+    restore_desktop_requested = Signal()
+    add_widget_panel_requested = Signal(str)
+    add_widget_tab_requested = Signal(str)
+    history_restore_requested = Signal(str)
 
     def __init__(
         self,
@@ -74,6 +79,8 @@ class SettingsWindow(QWidget):
         self._pages.addWidget(self._build_partition_page())
         self._pages.addWidget(self._build_rules_page())
         self._pages.addWidget(self._build_appearance_page())
+        self._pages.addWidget(self._build_history_page())
+        self._pages.addWidget(self._build_widgets_page())
 
         self._section_list.currentRowChanged.connect(self._pages.setCurrentIndex)
         self._section_list.setCurrentRow(0)
@@ -112,6 +119,7 @@ class SettingsWindow(QWidget):
         self._desktop_path_edit.setText(config.desktop.path)
         self._takeover_checkbox.setChecked(config.desktop.takeover_enabled)
         self._startup_checkbox.setChecked(config.desktop.startup_enabled)
+        self._update_takeover_status_label()
         self._reload_screen_combo(config)
         self._reload_rules_table()
         group = self._target_group(config)
@@ -180,6 +188,12 @@ class SettingsWindow(QWidget):
         self._startup_checkbox = QCheckBox("开机启动", page)
         self._startup_checkbox.setChecked(self._config.desktop.startup_enabled)
         form.addRow(self._startup_checkbox)
+        self._takeover_status_label = QLabel("", page)
+        form.addRow("接管状态", self._takeover_status_label)
+        self._restore_desktop_button = QPushButton("恢复桌面图标", page)
+        self._restore_desktop_button.clicked.connect(self.restore_desktop_requested.emit)
+        form.addRow(self._restore_desktop_button)
+        self._update_takeover_status_label()
         return page
 
     def _reload_screen_combo(self, config: Configuration) -> None:
@@ -247,10 +261,71 @@ class SettingsWindow(QWidget):
         form.addRow("背景透明度", opacity_row)
         return page
 
+    def _build_history_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("面板历史", page))
+        self._history_list = QListWidget(page)
+        layout.addWidget(self._history_list, stretch=1)
+        self._restore_history_button = QPushButton("恢复选中历史", page)
+        self._restore_history_button.clicked.connect(self._emit_selected_history_restore)
+        layout.addWidget(self._restore_history_button, alignment=Qt.AlignmentFlag.AlignRight)
+        return page
+
+    def _build_widgets_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("功能面板", page))
+        self._add_clock_panel_button = QPushButton("添加时间面板", page)
+        self._add_clock_tab_button = QPushButton("添加时间标签", page)
+        self._add_clock_panel_button.clicked.connect(
+            lambda: self.add_widget_panel_requested.emit("clock")
+        )
+        self._add_clock_tab_button.clicked.connect(
+            lambda: self.add_widget_tab_requested.emit("clock")
+        )
+        layout.addWidget(self._add_clock_panel_button)
+        layout.addWidget(self._add_clock_tab_button)
+        layout.addStretch(1)
+        return page
+
+    def set_history_snapshots(self, snapshots: list[object]) -> None:
+        self._history_list.clear()
+        for snapshot in snapshots:
+            item = QListWidgetItem(
+                f"{snapshot.created_at}  {snapshot.reason}  "
+                f"{snapshot.group_count}组/{snapshot.tab_count}标签"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, snapshot.id)
+            self._history_list.addItem(item)
+
+    def _emit_selected_history_restore(self) -> None:
+        item = self._history_list.currentItem()
+        if item is None:
+            return
+        snapshot_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if snapshot_id:
+            self.history_restore_requested.emit(snapshot_id)
+
+    def _update_takeover_status_label(self) -> None:
+        if not hasattr(self, "_takeover_status_label"):
+            return
+        if self._config.desktop.explorer_icons_hidden:
+            text = "Explorer 图标已隐藏"
+        elif self._config.desktop.takeover_enabled:
+            text = "桌面接管已启用"
+        else:
+            text = "桌面接管未启用"
+        self._takeover_status_label.setText(text)
+
     def _reload_rules_table(self) -> None:
         rules = sorted(self._config.rules, key=lambda entry: entry.order)
         self._rules_table.setRowCount(len(rules))
-        tab_names = {tab.id: tab.name for tab in self._config.panel_tabs}
+        tab_names = {
+            tab.id: tab.name
+            for tab in self._config.panel_tabs
+            if tab.content_kind == "items"
+        }
         for row, rule in enumerate(rules):
             enabled = QTableWidgetItem()
             enabled.setFlags(
@@ -273,7 +348,7 @@ class SettingsWindow(QWidget):
             self._rules_table.setCellWidget(row, 3, target)
 
     def _suggested_target_for_rule(self, rule, config: Configuration) -> str:  # type: ignore[no-untyped-def]
-        tab_ids = {tab.id for tab in config.panel_tabs}
+        tab_ids = {tab.id for tab in config.panel_tabs if tab.content_kind == "items"}
         if rule.target_tab_id in tab_ids:
             return rule.target_tab_id
         role = _DEFAULT_RULE_ROLES.get(rule.id)
@@ -284,7 +359,7 @@ class SettingsWindow(QWidget):
         if role is None:
             return ""
         for tab in config.panel_tabs:
-            if tab.category_role == role:
+            if tab.content_kind == "items" and tab.category_role == role:
                 return tab.id
         return ""
 
@@ -359,7 +434,9 @@ class SettingsWindow(QWidget):
             else:
                 target_tab_id = rule.target_tab_id
             if enabled:
-                tab_ids = {tab.id for tab in config.panel_tabs}
+                tab_ids = {
+                    tab.id for tab in config.panel_tabs if tab.content_kind == "items"
+                }
                 if target_tab_id not in tab_ids:
                     target_tab_id = self._suggested_target_for_rule(rule, config)
             target = rules_by_id[rule.id]

@@ -23,6 +23,7 @@ from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.services.screens import available_screen_geometries, screen_id_containing_point
 from desktop_tidy.services.window_styles import hide_window_from_taskbar
 from desktop_tidy.ui.item_grid import ItemGridWidget
+from desktop_tidy.ui.widget_plugins import BuiltinWidgetRegistry
 
 _CORNER_RADIUS = 12
 _HEADER_DRAG_MARGIN = 40
@@ -181,6 +182,9 @@ class PanelGroupWidget(QWidget):
         self._suppress_click_tab_id = ""
         self._detach_preview = _TabDetachPreview(self)
         self._detach_preview.hide()
+        self._widget_registry = BuiltinWidgetRegistry()
+        self._widget_content: QWidget | None = None
+        self._widget_content_type = ""
 
         self.setWindowFlags(
             Qt.WindowType.Window
@@ -245,14 +249,18 @@ class PanelGroupWidget(QWidget):
         )
         self._item_grid.item_icon_size_changed.connect(self._on_item_icon_size_changed)
         self._item_grid.cells_rebuilt.connect(self._install_content_resize_filters)
-        self._install_content_resize_filters()
+        self._content_host = QWidget(self)
+        self._content_host.setStyleSheet("background: transparent;")
+        self._content_layout = QVBoxLayout(self._content_host)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.addWidget(self._item_grid)
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(16, 14, 16, 16)
         self._layout.setSpacing(10)
         self._layout.addLayout(header_row)
         self._layout.addWidget(self.inline_title_editor)
-        self._layout.addWidget(self._item_grid, stretch=1)
+        self._layout.addWidget(self._content_host, stretch=1)
 
         self.add_button.clicked.connect(self._on_add_clicked)
         self.organize_button.clicked.connect(
@@ -266,6 +274,8 @@ class PanelGroupWidget(QWidget):
         self.lock_button.clicked.connect(self._on_lock_clicked)
 
         self._rebuild_tab_buttons()
+        self._render_active_content()
+        self._install_content_resize_filters()
         self._apply_geometry_from_model()
         self._apply_collapsed_state()
         self._render_titlebar_control_states()
@@ -309,6 +319,43 @@ class PanelGroupWidget(QWidget):
         tab = self._tabs_by_id.get(self._group.active_tab_id)
         return tab.name if tab is not None else ""
 
+    def active_tab_content_kind(self) -> str:
+        tab = self._tabs_by_id.get(self._group.active_tab_id)
+        return tab.content_kind if tab is not None else "items"
+
+    def _render_active_content(self) -> None:
+        tab = self._tabs_by_id.get(self._group.active_tab_id)
+        if tab is not None and tab.content_kind == "widget":
+            self._show_widget_content(tab.widget_type, tab.widget_settings)
+            self.organize_button.setEnabled(False)
+            return
+        self._show_item_content()
+        self.organize_button.setEnabled(True)
+
+    def _show_item_content(self) -> None:
+        if self._widget_content is not None:
+            self._widget_content.hide()
+        self._item_grid.show()
+
+    def _show_widget_content(
+        self,
+        widget_type: str,
+        settings: dict[str, object],
+    ) -> None:
+        if self._widget_content is None or self._widget_content_type != widget_type:
+            if self._widget_content is not None:
+                self._content_layout.removeWidget(self._widget_content)
+                self._widget_content.deleteLater()
+            plugin = self._widget_registry.get(widget_type)
+            self._widget_content = plugin.create_widget(settings)
+            self._widget_content_type = widget_type
+            self._widget_content.setParent(self._content_host)
+            self._widget_content.setStyleSheet("background: transparent;")
+            self._content_layout.addWidget(self._widget_content)
+        self._item_grid.hide()
+        if self._widget_content is not None:
+            self._widget_content.show()
+
     def detach_preview_visible(self) -> bool:
         return self._detach_preview.isVisible()
 
@@ -332,6 +379,7 @@ class PanelGroupWidget(QWidget):
             return
         self._group.active_tab_id = tab_id
         self._item_grid.set_active_tab_id(tab_id)
+        self._render_active_content()
         self._rebuild_tab_buttons()
         self.changed.emit()
 
@@ -350,6 +398,7 @@ class PanelGroupWidget(QWidget):
             self._rebuild_tab_buttons()
         else:
             self._sync_tab_button_states()
+        self._render_active_content()
         self._apply_geometry_from_model()
         self._apply_collapsed_state()
         self._render_titlebar_control_states()
@@ -575,7 +624,7 @@ class PanelGroupWidget(QWidget):
 
     def _apply_collapsed_state(self) -> None:
         show_content = not self._collapsed
-        self._item_grid.setVisible(show_content)
+        self._content_host.setVisible(show_content)
         self.inline_title_editor.setVisible(show_content and self.inline_title_editor.isVisible())
         for button in self._tab_buttons.values():
             button.setVisible(True)
@@ -1046,14 +1095,22 @@ class PanelGroupWidget(QWidget):
 
     def _install_content_resize_filters(self) -> None:
         for widget in (
+            self._content_host,
             self._item_grid,
             self._item_grid._scroll_area,
             self._item_grid._scroll_area.viewport(),
             self._item_grid._grid_host,
             self._item_grid._empty_label,
+            *([self._widget_content] if self._widget_content is not None else []),
+            *(
+                self._widget_content.findChildren(QWidget)
+                if self._widget_content is not None
+                else []
+            ),
             *self._item_grid.findChildren(QWidget),
         ):
-            widget.installEventFilter(self)
+            if widget is not None:
+                widget.installEventFilter(self)
 
     def _content_edge_resize_region(
         self, child: QWidget, child_point: QPoint
@@ -1168,7 +1225,7 @@ class PanelGroupWidget(QWidget):
             return False
         widget: QWidget | None = watched
         while widget is not None:
-            if widget is self._item_grid:
+            if widget is self._content_host:
                 return True
             widget = widget.parentWidget()
         return False

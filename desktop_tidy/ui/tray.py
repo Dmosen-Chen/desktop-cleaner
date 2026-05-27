@@ -39,6 +39,9 @@ class TrayController(QObject):
     def hide(self) -> None:
         self._tray.hide()
 
+    def show_message(self, title: str, message: str) -> None:
+        self._tray.showMessage(title, message)
+
     def action_texts(self) -> list[str]:
         return [action.text() for action in self._actions.values()]
 

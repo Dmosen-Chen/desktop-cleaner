@@ -25,6 +25,7 @@ from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.classification import canonical_key
 from desktop_tidy.domain.models import ItemRef, ManualOverride, PanelGeometry
 from desktop_tidy.persistence.config_store import ConfigurationStore
+from desktop_tidy.persistence.layout_history import LayoutHistoryStore
 from desktop_tidy.services.desktop_index import DesktopIndex
 from desktop_tidy.ui.settings_window import SettingsWindow
 from tests.test_qt_item_grid import send_ctrl_wheel
@@ -92,6 +93,9 @@ class FakeTrayController(QObject):
 
     def hide(self) -> None:
         self.hidden = True
+
+    def show_message(self, title: str, message: str) -> None:
+        self.last_message = (title, message)
 
 
 class FakeActivationServer(QObject):
@@ -1454,6 +1458,65 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             app.quitOnLastWindowClosed(),
             "preview must disable quit-on-last-window-closed via ensure_application",
         )
+
+    def test_settings_can_add_clock_widget_panel_and_clock_tab(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                history_store=LayoutHistoryStore(Path(tmp) / "layout-history.json"),
+            )
+            app._show_settings(app.panel.group_id)
+            settings = app._settings_window
+            self.assertIsNotNone(settings)
+
+            settings.add_widget_tab_requested.emit("clock")
+            settings.add_widget_panel_requested.emit("clock")
+            type(self).app.processEvents()
+
+            widget_tabs = [
+                tab for tab in app.model.config.panel_tabs if tab.content_kind == "widget"
+            ]
+            self.assertEqual([tab.widget_type for tab in widget_tabs], ["clock", "clock"])
+            widget_tab_ids = {tab.id for tab in widget_tabs}
+            self.assertTrue(
+                any(
+                    len(group.tab_ids) == 1 and group.active_tab_id in widget_tab_ids
+                    for group in app.model.config.panel_groups
+                )
+            )
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], 3)
+
+    def test_layout_history_restore_replaces_panel_layout_without_touching_sources(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            source = desktop / "note.txt"
+            source.write_text("original", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            history = LayoutHistoryStore(Path(tmp) / "layout-history.json")
+            config = build_default_configuration(desktop)
+            config.panel_groups[0].geometry.rw = 0.44
+            snapshot = history.push(config, "before-resize")
+            self.assertIsNotNone(snapshot)
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                history_store=history,
+            )
+
+            app._on_history_restore_requested(snapshot.id)
+
+            self.assertAlmostEqual(app.model.config.panel_groups[0].geometry.rw, 0.44)
+            self.assertEqual(source.read_text(encoding="utf-8"), "original")
+            self.assertEqual(
+                json.loads(store.path.read_text(encoding="utf-8"))["schema_version"],
+                3,
+            )
 
     def test_settings_window_close_does_not_quit_or_hide_panel(self) -> None:
         """Closing settings must not exit the app or hide the panel."""

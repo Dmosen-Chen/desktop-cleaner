@@ -28,8 +28,14 @@ class WorkspaceModel:
                 return tab
         raise KeyError(f"unknown panel tab: {tab_id}")
 
+    def _require_item_tab(self, tab_id: str) -> PanelTab:
+        tab = self.tab(tab_id)
+        if tab.content_kind != "items":
+            raise ValueError(f"tab {tab_id} does not accept item entries")
+        return tab
+
     def set_manual_override(self, path: Path, tab_id: str) -> None:
-        self.tab(tab_id)
+        self._require_item_tab(tab_id)
         key = canonical_key(path)
         self.config.manual_overrides = [
             entry for entry in self.config.manual_overrides if entry.canonical_path != key
@@ -37,7 +43,7 @@ class WorkspaceModel:
         self.config.manual_overrides.append(ManualOverride(key, tab_id))
 
     def add_external_reference(self, path: Path, tab_id: str) -> ItemRef:
-        self.tab(tab_id)
+        self._require_item_tab(tab_id)
         resolved = Path(path).resolve()
         key = canonical_key(resolved)
         existing = next(
@@ -62,7 +68,7 @@ class WorkspaceModel:
         return reference
 
     def add_paths_to_tab(self, paths: list[Path], tab_id: str) -> None:
-        self.tab(tab_id)
+        self._require_item_tab(tab_id)
         desktop = Path(self.config.desktop.path)
         for path in paths:
             resolved = Path(path).resolve()
@@ -119,6 +125,72 @@ class WorkspaceModel:
         group.tab_ids.append(tab.id)
         group.active_tab_id = tab.id
         return tab
+
+    def add_widget_tab(
+        self,
+        group_id: str,
+        widget_type: str,
+        *,
+        name: str | None = None,
+        widget_settings: dict[str, object] | None = None,
+    ) -> PanelTab:
+        group = self.group(group_id)
+        label = (name or self._default_widget_name(widget_type)).strip()
+        if not label:
+            raise ValueError("tab name must not be empty")
+        tab = PanelTab(
+            id=f"tab-{uuid.uuid4().hex}",
+            group_id=group_id,
+            name=label,
+            order=len(group.tab_ids),
+            category_role="custom",
+            content_kind="widget",
+            widget_type=widget_type,
+            widget_settings=dict(widget_settings or {}),
+        )
+        self.config.panel_tabs.append(tab)
+        group.tab_ids.append(tab.id)
+        group.active_tab_id = tab.id
+        return tab
+
+    def add_widget_panel(
+        self,
+        widget_type: str,
+        *,
+        name: str | None = None,
+        widget_settings: dict[str, object] | None = None,
+    ) -> PanelGroup:
+        group_id = f"group-{uuid.uuid4().hex}"
+        tab_id = f"tab-{uuid.uuid4().hex}"
+        label = (name or self._default_widget_name(widget_type)).strip()
+        group = PanelGroup(
+            id=group_id,
+            screen_id=self.config.desktop.primary_screen_id or "primary",
+            geometry=PanelGeometry(0.08, 0.08, 0.24, 0.22),
+            tab_ids=[tab_id],
+            active_tab_id=tab_id,
+            appearance=deepcopy(self.config.appearance_defaults),
+            locked=False,
+            collapsed=False,
+        )
+        tab = PanelTab(
+            id=tab_id,
+            group_id=group_id,
+            name=label or self._default_widget_name(widget_type),
+            order=0,
+            category_role="custom",
+            content_kind="widget",
+            widget_type=widget_type,
+            widget_settings=dict(widget_settings or {}),
+        )
+        self.config.panel_groups.append(group)
+        self.config.panel_tabs.append(tab)
+        return group
+
+    def _default_widget_name(self, widget_type: str) -> str:
+        if widget_type == "clock":
+            return "时间"
+        return widget_type or "功能"
 
     def rename_tab(self, tab_id: str, name: str) -> None:
         label = name.strip() or "未命名面板"

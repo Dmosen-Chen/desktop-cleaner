@@ -65,24 +65,28 @@ class ActivationServer(QObject):
             if socket is None:
                 continue
             self._sockets.append(socket)
+            self.activated.emit()
             socket.readyRead.connect(lambda socket=socket: self._read_command(socket))
             socket.disconnected.connect(lambda socket=socket: self._read_if_available(socket))
             socket.disconnected.connect(lambda socket=socket: self._forget_socket(socket))
             socket.disconnected.connect(socket.deleteLater)
+            if not socket.bytesAvailable():
+                socket.waitForReadyRead(50)
             if socket.bytesAvailable():
                 self._read_command(socket)
             else:
-                QTimer.singleShot(0, lambda socket=socket: self._read_if_available(socket))
+                QTimer.singleShot(25, lambda socket=socket: self._read_if_available(socket))
 
     def _read_command(self, socket: QLocalSocket) -> None:
         command = bytes(socket.readAll())
-        if command.startswith(SHOW_COMMAND.rstrip()):
-            self.activated.emit()
         socket.disconnectFromServer()
 
     def _read_if_available(self, socket: QLocalSocket) -> None:
-        if socket.bytesAvailable():
-            self._read_command(socket)
+        try:
+            if socket.bytesAvailable():
+                self._read_command(socket)
+        except RuntimeError:
+            return
 
     def _forget_socket(self, socket: QLocalSocket) -> None:
         if socket in self._sockets:

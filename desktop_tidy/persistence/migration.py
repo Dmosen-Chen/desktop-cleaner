@@ -1,4 +1,4 @@
-"""Migration of the Tk configuration shape into schema version 2."""
+"""Migration of older configuration shapes into the current schema."""
 
 from __future__ import annotations
 
@@ -206,16 +206,34 @@ def load_or_migrate(path: Path) -> Configuration:
         _copy_aside(path, "corrupt")
         return build_default_configuration()
     if "schema_version" in payload:
-        if payload["schema_version"] != 2:
-            raise UnsupportedConfigurationVersion(payload["schema_version"])
-        try:
-            validate_configuration_payload(payload)
-            config = Configuration.from_dict(payload)
-            validate_configuration(config)
+        if payload["schema_version"] == 3:
+            try:
+                validate_configuration_payload(payload, expected_schema_version=3)
+                config = Configuration.from_dict(payload)
+                validate_configuration(config, expected_schema_version=3)
+                return config
+            except (KeyError, TypeError, ValueError, InvalidConfiguration):
+                _copy_aside(path, "corrupt")
+                return build_default_configuration()
+        if payload["schema_version"] == 2:
+            try:
+                validate_configuration_payload(payload, expected_schema_version=2)
+                config = Configuration.from_dict(payload)
+                validate_configuration(config, expected_schema_version=2)
+            except (KeyError, TypeError, ValueError, InvalidConfiguration):
+                _copy_aside(path, "corrupt")
+                return build_default_configuration()
+            _copy_aside(path, "pre-schema-v3")
+            config.schema_version = 3
+            for tab in config.panel_tabs:
+                tab.content_kind = "items"
+                tab.widget_type = ""
+                tab.widget_settings = {}
+            validate_configuration(config, expected_schema_version=3)
+            _atomic_save(path, config)
             return config
-        except (KeyError, TypeError, ValueError, InvalidConfiguration):
-            _copy_aside(path, "corrupt")
-            return build_default_configuration()
+        else:
+            raise UnsupportedConfigurationVersion(payload["schema_version"])
     _copy_aside(path, "pre-qt-v1")
     config = _migrate_legacy(payload)
     _atomic_save(path, config)
