@@ -21,17 +21,19 @@ class FakeLock:
 
 
 class MainEntryTests(unittest.TestCase):
-    def test_duplicate_instance_exits_without_creating_qt_application(self) -> None:
+    def test_duplicate_instance_notifies_existing_instance_without_creating_qt_application(self) -> None:
         lock = FakeLock(False)
 
         with (
             patch.object(entrypoint, "SingleInstanceLock", return_value=lock),
+            patch.object(entrypoint, "notify_existing_instance") as notify_existing_instance,
             patch.object(entrypoint, "ensure_application") as ensure_application,
             patch.object(entrypoint, "DesktopCleanerApplication") as application_type,
         ):
             exit_code = entrypoint.main()
 
         self.assertEqual(exit_code, 0)
+        notify_existing_instance.assert_called_once_with()
         ensure_application.assert_not_called()
         application_type.assert_not_called()
         self.assertFalse(lock.released)

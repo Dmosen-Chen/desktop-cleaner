@@ -94,6 +94,10 @@ class FakeTrayController(QObject):
         self.hidden = True
 
 
+class FakeActivationServer(QObject):
+    activated = Signal()
+
+
 def assert_application_wires_panel_signals(app: DesktopCleanerApplication) -> None:
     panel = app.panel
     for signal_name in ("tab_detach_requested", "group_merge_requested"):
@@ -287,6 +291,30 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertFalse(app.panel.isVisible())
 
             tray.show_panels_requested.emit()
+            type(self).app.processEvents()
+
+            self.assertTrue(app.panel.isVisible())
+
+    def test_second_launch_activation_shows_hidden_panels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            tray = FakeTrayController()
+            activation_server = FakeActivationServer()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                tray_controller=tray,
+                activation_server=activation_server,
+            )
+            app.show()
+            type(self).app.processEvents()
+            tray.hide_panels_requested.emit()
+            type(self).app.processEvents()
+            self.assertFalse(app.panel.isVisible())
+
+            activation_server.activated.emit()
             type(self).app.processEvents()
 
             self.assertTrue(app.panel.isVisible())

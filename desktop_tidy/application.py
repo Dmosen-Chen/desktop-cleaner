@@ -24,6 +24,7 @@ from desktop_tidy.services.desktop_takeover import (
     DesktopRecoveryGuard,
     DesktopTakeoverService,
 )
+from desktop_tidy.services.activation import ActivationServer
 from desktop_tidy.services.item_launcher import open_item
 from desktop_tidy.services.screens import available_screen_geometries, available_screen_options
 from desktop_tidy.services.startup import StartupService
@@ -87,6 +88,7 @@ class DesktopCleanerApplication:
         takeover_service: DesktopTakeoverService | None = None,
         startup_service: StartupService | None = None,
         tray_controller: TrayController | None = None,
+        activation_server: ActivationServer | None = None,
     ) -> None:
         if config is None:
             self.store = store or application_store()
@@ -102,6 +104,7 @@ class DesktopCleanerApplication:
         self.takeover_service = takeover_service or DesktopTakeoverService()
         self.startup_service = startup_service or StartupService()
         self.tray = tray_controller or TrayController()
+        self.activation_server = activation_server or ActivationServer()
         self._takeover_active = False
         self._shutdown_started = False
         if DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
@@ -119,6 +122,7 @@ class DesktopCleanerApplication:
         if application is not None:
             application.aboutToQuit.connect(self._on_about_to_quit)
         self._connect_tray()
+        self.activation_server.activated.connect(self._show_panels_from_tray)
 
     def panel_widgets(self) -> list[PanelGroupWidget]:
         return list(self._panels.values())
