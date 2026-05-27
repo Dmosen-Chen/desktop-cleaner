@@ -29,6 +29,7 @@ from desktop_tidy.services.screens import available_screen_geometries, available
 from desktop_tidy.services.startup import StartupService
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
+from desktop_tidy.ui.tray import TrayController
 
 
 APP_DIR_NAME = "DesktopCleaner"
@@ -85,6 +86,7 @@ class DesktopCleanerApplication:
         store: ConfigurationStore | None = None,
         takeover_service: DesktopTakeoverService | None = None,
         startup_service: StartupService | None = None,
+        tray_controller: TrayController | None = None,
     ) -> None:
         if config is None:
             self.store = store or application_store()
@@ -99,7 +101,9 @@ class DesktopCleanerApplication:
         self.config = self.model.config
         self.takeover_service = takeover_service or DesktopTakeoverService()
         self.startup_service = startup_service or StartupService()
+        self.tray = tray_controller or TrayController()
         self._takeover_active = False
+        self._shutdown_started = False
         if DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
             self.save()
         self.index = DesktopIndex(Path(self.config.desktop.path))
@@ -114,6 +118,7 @@ class DesktopCleanerApplication:
         application = QApplication.instance()
         if application is not None:
             application.aboutToQuit.connect(self._on_about_to_quit)
+        self._connect_tray()
 
     def panel_widgets(self) -> list[PanelGroupWidget]:
         return list(self._panels.values())
@@ -161,10 +166,44 @@ class DesktopCleanerApplication:
         self.store.save(self.model.config)
 
     def _on_about_to_quit(self) -> None:
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
         for panel in self._panels.values():
             panel._persist_geometry_from_widget(update_rh=not panel.is_collapsed)
         self._restore_desktop_takeover_if_needed()
         self.save()
+
+    def _connect_tray(self) -> None:
+        self.tray.show_panels_requested.connect(self._show_panels_from_tray)
+        self.tray.hide_panels_requested.connect(self._hide_panels_from_tray)
+        self.tray.settings_requested.connect(self._show_settings_from_tray)
+        self.tray.restore_desktop_requested.connect(self._restore_desktop_from_tray)
+        self.tray.quit_requested.connect(self._quit_from_tray)
+        self.tray.show()
+
+    def _show_panels_from_tray(self) -> None:
+        for panel in self._panels.values():
+            panel.show()
+        self._sync_panel_snap_targets()
+        self.refresh()
+
+    def _hide_panels_from_tray(self) -> None:
+        for panel in self._panels.values():
+            panel.hide()
+
+    def _show_settings_from_tray(self) -> None:
+        self._show_settings(self.panel.group_id)
+
+    def _restore_desktop_from_tray(self) -> None:
+        self._restore_desktop_takeover_if_needed()
+        self.save()
+
+    def _quit_from_tray(self) -> None:
+        self._on_about_to_quit()
+        application = QApplication.instance()
+        if application is not None:
+            application.quit()
 
     def handle_paths_dropped(self, paths: list[Path], tab_id: str) -> None:
         self.model.add_paths_to_tab(paths, tab_id)

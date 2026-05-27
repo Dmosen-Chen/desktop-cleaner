@@ -27,7 +27,6 @@ class SingleInstanceLock:
         self._name = name
         self._platform_name = platform_name or sys.platform
         self._kernel32 = kernel32
-        self._kernel32_is_injected = kernel32 is not None
         self._handle: int | None = None
 
     def acquire(self) -> bool:
@@ -72,6 +71,7 @@ class SingleInstanceLock:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
         kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.GetLastError.restype = ctypes.c_ulong
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle.restype = ctypes.c_bool
         self._kernel32 = kernel32
@@ -79,6 +79,6 @@ class SingleInstanceLock:
 
     def _last_error(self, kernel32: _Kernel32) -> int:
         get_last_error = getattr(kernel32, "GetLastError", None)
-        if self._kernel32_is_injected and get_last_error is not None:
+        if get_last_error is not None:
             return int(get_last_error())
         return int(ctypes.get_last_error())

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
@@ -73,6 +73,25 @@ class FakeStartupService:
     def set_enabled(self, enabled: bool, exe_path: Path) -> bool:
         self.calls.append((enabled, exe_path))
         return self.result
+
+
+class FakeTrayController(QObject):
+    show_panels_requested = Signal()
+    hide_panels_requested = Signal()
+    settings_requested = Signal()
+    restore_desktop_requested = Signal()
+    quit_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shown = False
+        self.hidden = False
+
+    def show(self) -> None:
+        self.shown = True
+
+    def hide(self) -> None:
+        self.hidden = True
 
 
 def assert_application_wires_panel_signals(app: DesktopCleanerApplication) -> None:
@@ -245,6 +264,89 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             )
             self.assertFalse(config.desktop.restore_required)
             self.assertFalse(config.desktop.explorer_icons_hidden)
+
+    def test_tray_hide_and_show_toggle_panel_visibility_without_quitting(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            tray = FakeTrayController()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                tray_controller=tray,
+            )
+            app.show()
+            type(self).app.processEvents()
+
+            self.assertTrue(app.panel.isVisible())
+
+            tray.hide_panels_requested.emit()
+            type(self).app.processEvents()
+
+            self.assertFalse(app.panel.isVisible())
+
+            tray.show_panels_requested.emit()
+            type(self).app.processEvents()
+
+            self.assertTrue(app.panel.isVisible())
+
+    def test_tray_restore_desktop_uses_existing_takeover_shutdown_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            takeover = FakeTakeoverService()
+            tray = FakeTrayController()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                config,
+                store=store,
+                takeover_service=takeover,
+                tray_controller=tray,
+            )
+            app._takeover_active = True
+            config.desktop.restore_required = True
+            config.desktop.explorer_icons_hidden = True
+
+            tray.restore_desktop_requested.emit()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["restore", "detach"],
+            )
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["desktop"]["restore_required"])
+
+    def test_tray_quit_saves_and_restores_before_requesting_application_quit(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            takeover = FakeTakeoverService()
+            tray = FakeTrayController()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                config,
+                store=store,
+                takeover_service=takeover,
+                tray_controller=tray,
+            )
+            app._takeover_active = True
+            config.desktop.restore_required = True
+            config.desktop.explorer_icons_hidden = True
+
+            tray.quit_requested.emit()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["restore", "detach"],
+            )
+            self.assertFalse(config.desktop.restore_required)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+            self.assertTrue(store.path.is_file())
 
     def test_settings_saved_applies_startup_preference_without_real_registry_access(self) -> None:
         with TemporaryDirectory() as tmp:

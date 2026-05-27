@@ -67,6 +67,40 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(window._takeover_checkbox.text(), "启用桌面接管")
         self.assertTrue(window._takeover_checkbox.isEnabled())
 
+    def test_enabling_desktop_takeover_requires_confirmation(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config, takeover_confirmation=lambda: False)
+        window._takeover_checkbox.setChecked(True)
+
+        saved_spy = QSignalSpy(window.config_saved)
+        window._save()
+
+        self.assertEqual(saved_spy.count(), 1)
+        self.assertFalse(config.desktop.takeover_enabled)
+        self.assertFalse(window._takeover_checkbox.isChecked())
+
+    def test_confirmed_desktop_takeover_enable_is_saved(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config, takeover_confirmation=lambda: True)
+        window._takeover_checkbox.setChecked(True)
+
+        window._save()
+
+        self.assertTrue(config.desktop.takeover_enabled)
+
+    def test_already_enabled_takeover_does_not_confirm_again(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        config.desktop.takeover_enabled = True
+
+        def fail_if_called() -> bool:
+            raise AssertionError("already-enabled takeover should not ask again")
+
+        window = SettingsWindow(config, takeover_confirmation=fail_if_called)
+
+        window._save()
+
+        self.assertTrue(config.desktop.takeover_enabled)
+
     def test_panel_appearance_controls_reflect_configuration(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         config.panel_groups[0].appearance.background_color = "#336699"

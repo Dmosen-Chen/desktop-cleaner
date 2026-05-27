@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSlider,
     QStackedWidget,
@@ -50,12 +53,14 @@ class SettingsWindow(QWidget):
         *,
         group_id: str | None = None,
         screen_options: list[tuple[str, str]] | None = None,
+        takeover_confirmation: Callable[[], bool] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
         self._group_id = group_id or config.panel_groups[0].id
         self._screen_options = screen_options or available_screen_options()
+        self._takeover_confirmation = takeover_confirmation
         self.setWindowTitle("设置")
         self.resize(720, 520)
 
@@ -300,9 +305,30 @@ class SettingsWindow(QWidget):
         except InvalidConfiguration as exc:
             self.validation_failed.emit(str(exc))
             return
+        if self._requires_takeover_confirmation(candidate) and not self._confirm_takeover_enable():
+            candidate.desktop.takeover_enabled = False
+            self._takeover_checkbox.setChecked(False)
         self._copy_configuration_state(candidate, self._config)
         self.config_saved.emit()
         self.hide()
+
+    def _requires_takeover_confirmation(self, candidate: Configuration) -> bool:
+        return (
+            not self._config.desktop.takeover_enabled
+            and candidate.desktop.takeover_enabled
+        )
+
+    def _confirm_takeover_enable(self) -> bool:
+        if self._takeover_confirmation is not None:
+            return self._takeover_confirmation()
+        result = QMessageBox.question(
+            self,
+            "启用桌面接管",
+            "启用后会隐藏 Explorer 原生桌面图标，并由 Desktop Cleaner 面板显示桌面入口。退出程序、关闭接管或异常恢复时会尝试恢复原桌面图标。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
 
     def _apply_editor_values_to_configuration(self, config: Configuration) -> None:
         config.desktop.path = self._desktop_path_edit.text().strip()
