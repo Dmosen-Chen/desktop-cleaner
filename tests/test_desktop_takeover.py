@@ -130,8 +130,81 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
         service.detach_panels()
 
         self.assertEqual(user32.parents, [(123, 40), (123, 0)])
-        self.assertEqual(user32.positions, [(123, 4800, 0, 1062, 1548)])
+        self.assertEqual(
+            user32.positions,
+            [
+                (123, 4800, 0, 1062, 1548),
+                (123, -2880, 0, 1062, 1548),
+            ],
+        )
         self.assertEqual(user32.show_calls, [(30, 0), (30, 5)])
+
+    def test_attach_fails_and_restores_when_panel_lands_offscreen(self) -> None:
+        class FakeUser32:
+            def __init__(self) -> None:
+                self.parents: list[tuple[int, int]] = []
+                self.positions: list[tuple[int, int, int, int, int]] = []
+                self._panel_rect = (-708, 0, 0, 1032)
+
+            def FindWindowW(self, class_name, _title):
+                return 10 if class_name == "Progman" else 0
+
+            def SendMessageTimeoutW(self, *_args):
+                return 1
+
+            def EnumWindows(self, callback, lparam):
+                callback(10, lparam)
+                return 1
+
+            def FindWindowExW(self, parent, after, class_name, _title):
+                if class_name == "SHELLDLL_DefView" and int(parent) == 10:
+                    return 20
+                if class_name == "WorkerW" and int(parent) == 0 and int(after) == 10:
+                    return 40
+                return 0
+
+            def GetSystemMetrics(self, metric):
+                values = {76: -1920, 77: 0, 78: 3627, 79: 1032}
+                return values[metric]
+
+            def SetParent(self, hwnd, parent):
+                self.parents.append((int(hwnd), int(parent)))
+                return 1
+
+            def GetWindowRect(self, hwnd, rect):
+                rects = {
+                    40: (-1920, 0, 2560, 1600),
+                    123: self._panel_rect,
+                }
+                left, top, right, bottom = rects[int(hwnd)]
+                rect.contents.left = left
+                rect.contents.top = top
+                rect.contents.right = right
+                rect.contents.bottom = bottom
+                return 1
+
+            def SetWindowPos(self, hwnd, _after, x, y, width, height, _flags):
+                self.positions.append((int(hwnd), int(x), int(y), int(width), int(height)))
+                if len(self.positions) == 1:
+                    self._panel_rect = (-2628, 0, -1920, 1032)
+                else:
+                    self._panel_rect = (int(x), int(y), int(x) + int(width), int(y) + int(height))
+                return 1
+
+        user32 = FakeUser32()
+        service = DesktopTakeoverService(platform_name="win32", user32=user32)
+
+        result = service.attach_panels([123])
+
+        self.assertEqual(result, TakeoverResult(False, "attached-panel-offscreen"))
+        self.assertEqual(user32.parents, [(123, 40), (123, 0)])
+        self.assertEqual(
+            user32.positions,
+            [
+                (123, 1212, 0, 708, 1032),
+                (123, -708, 0, 708, 1032),
+            ],
+        )
 
 
 if __name__ == "__main__":

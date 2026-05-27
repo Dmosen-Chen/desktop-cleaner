@@ -21,6 +21,10 @@ SW_SHOW = 5
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 _CALLBACK_FACTORY = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 
 
@@ -76,6 +80,7 @@ class DesktopTakeoverService:
         self._platform = platform_name or sys.platform
         self._user32 = user32
         self._attached_hwnds: list[int] = []
+        self._attached_original_rects: dict[int, tuple[int, int, int, int]] = {}
 
     def attach_panels(self, panel_hwnds: list[int]) -> TakeoverResult:
         api = self._api()
@@ -85,17 +90,25 @@ class DesktopTakeoverService:
         if not workerw:
             return TakeoverResult(False, "desktop-layer-unavailable")
         attached: list[int] = []
+        originals: dict[int, tuple[int, int, int, int]] = {}
         for hwnd in panel_hwnds:
             if not hwnd:
                 continue
-            original = self._window_rect(api, int(hwnd))
-            api.SetParent(int(hwnd), workerw)
+            panel_hwnd = int(hwnd)
+            original = self._window_rect(api, panel_hwnd)
             if original is not None:
-                self._set_child_rect(api, int(hwnd), workerw, original)
-            attached.append(int(hwnd))
+                originals[panel_hwnd] = original
+            api.SetParent(panel_hwnd, workerw)
+            if original is not None:
+                self._set_child_rect(api, panel_hwnd, workerw, original)
+            attached.append(panel_hwnd)
         if not attached and panel_hwnds:
             return TakeoverResult(False, "no-valid-panel-handles")
+        if not self._attached_panels_intersect_virtual_screen(api, attached):
+            self._restore_panel_windows(api, attached, originals)
+            return TakeoverResult(False, "attached-panel-offscreen")
         self._attached_hwnds = attached
+        self._attached_original_rects = originals
         return TakeoverResult(True, "")
 
     def hide_explorer_icons(self) -> bool:
@@ -108,18 +121,47 @@ class DesktopTakeoverService:
         api = self._api()
         if api is None:
             self._attached_hwnds = []
+            self._attached_original_rects = {}
             return
-        for hwnd in list(self._attached_hwnds):
-            if hwnd:
-                api.SetParent(int(hwnd), 0)
+        self._restore_panel_windows(
+            api,
+            list(self._attached_hwnds),
+            dict(self._attached_original_rects),
+        )
         self._attached_hwnds = []
+        self._attached_original_rects = {}
 
     def _api(self):
         if self._platform != "win32":
             return None
         if self._user32 is not None:
             return self._user32
-        return ctypes.windll.user32  # type: ignore[attr-defined]
+        return self._real_user32()
+
+    @staticmethod
+    def _real_user32():
+        api = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+        api.FindWindowW.restype = ctypes.c_void_p
+        api.FindWindowExW.restype = ctypes.c_void_p
+        api.SetParent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        api.SetParent.restype = ctypes.c_void_p
+        api.SetWindowPos.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        api.SetWindowPos.restype = ctypes.c_bool
+        api.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        api.GetWindowRect.restype = ctypes.c_bool
+        api.GetSystemMetrics.argtypes = [ctypes.c_int]
+        api.GetSystemMetrics.restype = ctypes.c_int
+        api.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        api.ShowWindow.restype = ctypes.c_bool
+        return api
 
     def _set_explorer_icons_visible(self, visible: bool) -> bool:
         api = self._api()
@@ -164,6 +206,68 @@ class DesktopTakeoverService:
             max(1, bottom - top),
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
+
+    def _restore_panel_windows(
+        self,
+        api,
+        hwnds: list[int],
+        originals: dict[int, tuple[int, int, int, int]],
+    ) -> None:
+        for hwnd in hwnds:
+            if not hwnd:
+                continue
+            api.SetParent(int(hwnd), 0)
+            original = originals.get(int(hwnd))
+            if original is None:
+                continue
+            left, top, right, bottom = original
+            try:
+                api.SetWindowPos(
+                    int(hwnd),
+                    0,
+                    left,
+                    top,
+                    max(1, right - left),
+                    max(1, bottom - top),
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            except AttributeError:
+                pass
+
+    def _attached_panels_intersect_virtual_screen(self, api, hwnds: list[int]) -> bool:
+        virtual_screen = self._virtual_screen_rect(api)
+        if virtual_screen is None:
+            return True
+        for hwnd in hwnds:
+            rect = self._window_rect(api, int(hwnd))
+            if rect is None:
+                return False
+            if not self._rects_intersect(rect, virtual_screen):
+                return False
+        return True
+
+    def _virtual_screen_rect(self, api) -> tuple[int, int, int, int] | None:
+        try:
+            left = int(api.GetSystemMetrics(SM_XVIRTUALSCREEN))
+            top = int(api.GetSystemMetrics(SM_YVIRTUALSCREEN))
+            width = int(api.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+            height = int(api.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        except (AttributeError, KeyError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return (left, top, left + width, top + height)
+
+    @staticmethod
+    def _rects_intersect(
+        first: tuple[int, int, int, int],
+        second: tuple[int, int, int, int],
+    ) -> bool:
+        left = max(first[0], second[0])
+        top = max(first[1], second[1])
+        right = min(first[2], second[2])
+        bottom = min(first[3], second[3])
+        return right > left and bottom > top
 
     def _desktop_parent_window(self, api) -> int:
         progman = int(api.FindWindowW("Progman", None))
