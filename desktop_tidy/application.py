@@ -226,7 +226,12 @@ class DesktopCleanerApplication:
         self._show_settings(self.panel.group_id)
 
     def _restore_desktop_from_tray(self) -> None:
-        self._restore_desktop_takeover_if_needed()
+        takeover_should_stay_enabled = self.model.config.desktop.takeover_enabled
+        restored = self._restore_desktop_takeover_if_needed()
+        if takeover_should_stay_enabled and restored:
+            self._apply_desktop_takeover_preference()
+            self._notify_user("桌面接管刷新", "已尝试恢复并重新接管桌面。")
+            return
         self.save()
         self._notify_user("桌面图标恢复", "已尝试恢复 Explorer 桌面图标。")
 
@@ -622,13 +627,13 @@ class DesktopCleanerApplication:
             self.model.config.desktop.restore_required = True
         self.save()
 
-    def _restore_desktop_takeover_if_needed(self) -> None:
+    def _restore_desktop_takeover_if_needed(self) -> bool:
         if not (
             self._takeover_active
             or self.model.config.desktop.restore_required
             or self.model.config.desktop.explorer_icons_hidden
         ):
-            return
+            return True
         restored = self.takeover_service.restore_explorer_icons()
         self.takeover_service.detach_panels()
         self._takeover_active = False
@@ -637,3 +642,4 @@ class DesktopCleanerApplication:
             self.model.config.desktop.explorer_icons_hidden = False
         else:
             self.model.config.desktop.restore_required = True
+        return restored

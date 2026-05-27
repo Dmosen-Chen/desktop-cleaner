@@ -352,6 +352,38 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertFalse(payload["desktop"]["restore_required"])
 
+    def test_tray_restore_refreshes_takeover_when_preference_stays_enabled(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            config.desktop.restore_required = True
+            config.desktop.explorer_icons_hidden = True
+            takeover = FakeTakeoverService()
+            tray = FakeTrayController()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                config,
+                store=store,
+                takeover_service=takeover,
+                tray_controller=tray,
+            )
+            app._takeover_active = True
+            takeover.calls.clear()
+
+            tray.restore_desktop_requested.emit()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["restore", "detach", "attach", "hide"],
+            )
+            self.assertTrue(config.desktop.takeover_enabled)
+            self.assertTrue(config.desktop.restore_required)
+            self.assertTrue(config.desktop.explorer_icons_hidden)
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["desktop"]["explorer_icons_hidden"])
+
     def test_tray_quit_saves_and_restores_before_requesting_application_quit(self) -> None:
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "desktop"

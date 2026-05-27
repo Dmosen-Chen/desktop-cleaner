@@ -29,14 +29,20 @@ IMAGE_EXTENSIONS = frozenset(
 class WindowsShellIconProvider:
     """Best-effort Windows shell icon extraction for shortcuts and file types."""
 
+    def __init__(self, *, platform_name: str | None = None) -> None:
+        self._platform_name = platform_name or sys.platform
+
     def icon_for(self, path: Path, size: int = 64) -> QIcon | None:
-        if sys.platform != "win32":
+        if self._platform_name != "win32":
             return None
-        try:
-            if path.suffix.casefold() == ".lnk":
+        if path.suffix.casefold() == ".lnk":
+            try:
                 shortcut_icon = self._shortcut_icon(path, size)
                 if shortcut_icon is not None and not shortcut_icon.isNull():
                     return shortcut_icon
+            except Exception as exc:  # pragma: no cover - depends on local shell state.
+                log_exception(f"extract shortcut icon for {path}", exc)
+        try:
             shell_icon = self._shell_icon(path, size)
             if shell_icon is not None and not shell_icon.isNull():
                 return shell_icon

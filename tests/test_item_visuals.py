@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from desktop_tidy.services.item_visuals import ItemVisualProvider
+from desktop_tidy.services.item_visuals import ItemVisualProvider, WindowsShellIconProvider
 
 
 def sample_icon() -> QIcon:
@@ -56,6 +56,27 @@ class ItemVisualProviderTests(unittest.TestCase):
             icon = provider.icon_for(shortcut)
 
             self.assertFalse(icon.isNull())
+
+    def test_windows_shortcut_icon_failure_still_tries_shell_icon(self) -> None:
+        class RecoveringShellProvider(WindowsShellIconProvider):
+            def __init__(self) -> None:
+                super().__init__(platform_name="win32")
+                self.calls: list[str] = []
+
+            def _shortcut_icon(self, path: Path, size: int) -> QIcon | None:
+                self.calls.append("shortcut")
+                raise RuntimeError("shortcut target icon denied")
+
+            def _shell_icon(self, path: Path, size: int) -> QIcon | None:
+                self.calls.append("shell")
+                return sample_icon()
+
+        provider = RecoveringShellProvider()
+
+        icon = provider.icon_for(Path("Game.lnk"))
+
+        self.assertFalse(icon.isNull())
+        self.assertEqual(provider.calls, ["shortcut", "shell"])
 
 
 if __name__ == "__main__":
