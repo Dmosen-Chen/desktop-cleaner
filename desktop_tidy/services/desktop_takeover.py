@@ -21,6 +21,8 @@ SW_SHOW = 5
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
+HWND_TOP = 0
+HWND_BOTTOM = 1
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
@@ -69,7 +71,12 @@ class DesktopRecoveryGuard:
 
 
 class DesktopTakeoverService:
-    """Attach Qt panel windows to the Windows desktop layer and hide icons."""
+    """Coordinate safe Windows desktop takeover behavior.
+
+    Qt top-level windows are kept as bottom windows instead of being reparented
+    into Progman/WorkerW. Reparenting is fragile on multi-monitor, high-DPI
+    desktops and can leave visible HWNDs covered by Explorer's desktop layer.
+    """
 
     def __init__(
         self,
@@ -86,9 +93,6 @@ class DesktopTakeoverService:
         api = self._api()
         if api is None:
             return TakeoverResult(False, "unsupported-platform")
-        workerw = self._desktop_parent_window(api)
-        if not workerw:
-            return TakeoverResult(False, "desktop-layer-unavailable")
         attached: list[int] = []
         originals: dict[int, tuple[int, int, int, int]] = {}
         for hwnd in panel_hwnds:
@@ -98,9 +102,8 @@ class DesktopTakeoverService:
             original = self._window_rect(api, panel_hwnd)
             if original is not None:
                 originals[panel_hwnd] = original
-            api.SetParent(panel_hwnd, workerw)
             if original is not None:
-                self._set_child_rect(api, panel_hwnd, workerw, original)
+                self._set_bottom_rect(api, panel_hwnd, original)
             attached.append(panel_hwnd)
         if not attached and panel_hwnds:
             return TakeoverResult(False, "no-valid-panel-handles")
@@ -199,12 +202,29 @@ class DesktopTakeoverService:
         parent_left, parent_top, _parent_right, _parent_bottom = parent_rect
         api.SetWindowPos(
             hwnd,
-            0,
+            HWND_TOP,
             left - parent_left,
             top - parent_top,
             max(1, right - left),
             max(1, bottom - top),
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+
+    def _set_bottom_rect(
+        self,
+        api,
+        hwnd: int,
+        rect: tuple[int, int, int, int],
+    ) -> None:
+        left, top, right, bottom = rect
+        api.SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            left,
+            top,
+            max(1, right - left),
+            max(1, bottom - top),
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
 
     def _restore_panel_windows(

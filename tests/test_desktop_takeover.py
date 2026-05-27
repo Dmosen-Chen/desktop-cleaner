@@ -72,6 +72,8 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.parents: list[tuple[int, int]] = []
                 self.positions: list[tuple[int, int, int, int, int]] = []
+                self.insert_after: list[int] = []
+                self.flags: list[int] = []
                 self.show_calls: list[tuple[int, int]] = []
 
             def FindWindowW(self, class_name, _title):
@@ -115,6 +117,8 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
 
             def SetWindowPos(self, hwnd, _after, x, y, width, height, _flags):
                 self.positions.append((int(hwnd), int(x), int(y), int(width), int(height)))
+                self.insert_after.append(int(_after))
+                self.flags.append(int(_flags))
                 return 1
 
             def ShowWindow(self, hwnd, command):
@@ -129,14 +133,16 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
         self.assertTrue(service.restore_explorer_icons())
         service.detach_panels()
 
-        self.assertEqual(user32.parents, [(123, 40), (123, 0)])
+        self.assertEqual(user32.parents, [(123, 0)])
         self.assertEqual(
             user32.positions,
             [
-                (123, 4800, 0, 1062, 1548),
+                (123, -2880, 0, 1062, 1548),
                 (123, -2880, 0, 1062, 1548),
             ],
         )
+        self.assertEqual(user32.insert_after[0], 1)
+        self.assertFalse(user32.flags[0] & 0x0004)
         self.assertEqual(user32.show_calls, [(30, 0), (30, 5)])
 
     def test_attach_fails_and_restores_when_panel_lands_offscreen(self) -> None:
@@ -144,7 +150,7 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.parents: list[tuple[int, int]] = []
                 self.positions: list[tuple[int, int, int, int, int]] = []
-                self._panel_rect = (-708, 0, 0, 1032)
+                self._panel_rect = (-2628, 0, -1920, 1032)
 
             def FindWindowW(self, class_name, _title):
                 return 10 if class_name == "Progman" else 0
@@ -185,10 +191,7 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
 
             def SetWindowPos(self, hwnd, _after, x, y, width, height, _flags):
                 self.positions.append((int(hwnd), int(x), int(y), int(width), int(height)))
-                if len(self.positions) == 1:
-                    self._panel_rect = (-2628, 0, -1920, 1032)
-                else:
-                    self._panel_rect = (int(x), int(y), int(x) + int(width), int(y) + int(height))
+                self._panel_rect = (int(x), int(y), int(x) + int(width), int(y) + int(height))
                 return 1
 
         user32 = FakeUser32()
@@ -197,12 +200,12 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
         result = service.attach_panels([123])
 
         self.assertEqual(result, TakeoverResult(False, "attached-panel-offscreen"))
-        self.assertEqual(user32.parents, [(123, 40), (123, 0)])
+        self.assertEqual(user32.parents, [(123, 0)])
         self.assertEqual(
             user32.positions,
             [
-                (123, 1212, 0, 708, 1032),
-                (123, -708, 0, 708, 1032),
+                (123, -2628, 0, 708, 1032),
+                (123, -2628, 0, 708, 1032),
             ],
         )
 
