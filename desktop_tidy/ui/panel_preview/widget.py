@@ -31,6 +31,8 @@ class PanelPreviewWidget(QWidget):
         self,
         config: Configuration,
         screens: list[ScreenInfo],
+        *,
+        show_detail: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -39,6 +41,7 @@ class PanelPreviewWidget(QWidget):
         self._selected_group_id = config.panel_groups[0].id if config.panel_groups else ""
         self._selected_tab_id = ""
         self._focused_screen_id = config.desktop.primary_screen_id or "primary"
+        self._show_detail = show_detail
         self._drag_group_id = ""
         self._drag_tab_id = ""
         self._drag_start = QPoint()
@@ -70,7 +73,12 @@ class PanelPreviewWidget(QWidget):
         return screen_z_order(self._screens, self._focused_screen_id)
 
     def screen_rect(self, screen_id: str) -> QRect:
-        return screen_preview_rects(self._screens, self.rect(), self._focused_screen_id).get(screen_id, QRect())
+        return screen_preview_rects(
+            self._screens,
+            self.rect(),
+            self._focused_screen_id,
+            show_detail=self._show_detail,
+        ).get(screen_id, QRect())
 
     def map_rect(self) -> QRect:
         return self._renderer().map_rect()
@@ -91,6 +99,7 @@ class PanelPreviewWidget(QWidget):
             selected_group_id=self._selected_group_id,
             selected_tab_id=self._selected_tab_id,
             focused_screen_id=self._focused_screen_id,
+            show_detail=self._show_detail,
             interaction_mode="drag-panel" if self._drag_group_id else "drag-tab" if self._drag_tab_id else "idle",
         )
 
@@ -247,7 +256,12 @@ class PanelPreviewWidget(QWidget):
         return ""
 
     def _hit_screen(self, point: QPoint) -> str:
-        rects = screen_preview_rects(self._screens, self.rect(), self._focused_screen_id)
+        rects = screen_preview_rects(
+            self._screens,
+            self.rect(),
+            self._focused_screen_id,
+            show_detail=self._show_detail,
+        )
         for screen_id in reversed(self.screen_z_order()):
             if rects.get(screen_id, QRect()).contains(point):
                 return screen_id

@@ -633,13 +633,15 @@ class DesktopCleanerApplication:
     ) -> None:
         self.model.config.appearance_defaults.background_color = color
         self.model.config.appearance_defaults.background_opacity = opacity
-        for group in self.model.config.panel_groups:
-            group.appearance.background_color = color
-            group.appearance.background_opacity = opacity
-        for panel in self._panels.values():
-            panel.reload_from_model()
+        try:
+            group = self.model.group(group_id)
+        except KeyError:
+            return
+        group.appearance.background_color = color
+        group.appearance.background_opacity = opacity
         panel = self._panels.get(group_id)
         if panel is not None:
+            panel.reload_from_model()
             panel.update()
 
     def _on_settings_appearance_live_save_requested(self, group_id: str) -> None:

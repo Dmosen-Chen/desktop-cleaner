@@ -21,6 +21,7 @@ class PanelPreviewModel:
     selected_tab_id: str = ""
     interaction_mode: PreviewInteractionMode = "idle"
     focused_screen_id: str = ""
+    show_detail: bool = True
     groups: list[PanelGroup] = field(default_factory=list)
     tabs: list[PanelTab] = field(default_factory=list)
 

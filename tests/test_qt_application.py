@@ -971,7 +971,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 {detached_group_id},
             )
 
-    def test_settings_appearance_applies_to_all_panel_groups(self) -> None:
+    def test_settings_appearance_applies_to_selected_panel_group(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
@@ -1005,12 +1005,8 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             self.assertEqual(
                 app.model.group("group-default").appearance.background_color,
-                saved_color,
-                "appearance settings are now global across panel groups",
-            )
-            self.assertAlmostEqual(
-                app.model.group("group-default").appearance.background_opacity,
-                0.33,
+                primary_color,
+                "appearance settings are scoped to the selected panel group",
             )
             self.assertEqual(
                 app.model.group(secondary_group_id).appearance.background_color,
@@ -1045,17 +1041,31 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             group = app.model.group("group-default")
             self.assertEqual(group.appearance.background_color, "#4B5563")
             self.assertAlmostEqual(group.appearance.background_opacity, 0.70)
-            for panel_group in app.model.config.panel_groups:
-                self.assertEqual(panel_group.appearance.background_color, "#4B5563")
-                self.assertAlmostEqual(panel_group.appearance.background_opacity, 0.70)
+            secondary_group_id = app.model.tab("tab-documents").group_id
+            self.assertNotEqual(secondary_group_id, "group-default")
+            secondary_group = app.model.group(secondary_group_id)
+            self.assertNotEqual(secondary_group.appearance.background_color, "#4B5563")
+            self.assertNotAlmostEqual(
+                secondary_group.appearance.background_opacity,
+                0.70,
+            )
             self.assertAlmostEqual(app.panel.background_opacity, 0.70)
 
             QTest.qWait(350)
             payload = json.loads(store.path.read_text(encoding="utf-8"))
-            for panel_group in payload["panel_groups"]:
-                appearance = panel_group["appearance"]
-                self.assertEqual(appearance["background_color"], "#4B5563")
-                self.assertAlmostEqual(appearance["background_opacity"], 0.70)
+            appearances = {
+                panel_group["id"]: panel_group["appearance"]
+                for panel_group in payload["panel_groups"]
+            }
+            self.assertEqual(appearances["group-default"]["background_color"], "#4B5563")
+            self.assertAlmostEqual(
+                appearances["group-default"]["background_opacity"],
+                0.70,
+            )
+            self.assertNotEqual(
+                appearances[secondary_group_id]["background_color"],
+                "#4B5563",
+            )
 
     def test_constructor_with_explicit_config_does_not_access_real_application_store(
         self,

@@ -61,10 +61,12 @@ def screen_preview_rects(
     screens: list[ScreenInfo],
     bounds: QRect,
     focused_screen_id: str = "",
+    *,
+    show_detail: bool = True,
 ) -> dict[str, QRect]:
     valid = safe_screen_infos(screens)
     desktop = _desktop_union(valid)
-    inner = map_preview_rect(bounds).adjusted(12, 12, -12, -12)
+    inner = map_preview_rect(bounds, show_detail=show_detail).adjusted(12, 12, -12, -12)
     if inner.width() <= 0 or inner.height() <= 0:
         return {}
     scale = min(
@@ -87,9 +89,9 @@ def screen_preview_rects(
     return rects
 
 
-def map_preview_rect(bounds: QRect) -> QRect:
+def map_preview_rect(bounds: QRect, *, show_detail: bool = True) -> QRect:
     inner = bounds.adjusted(_OUTER_MARGIN, _OUTER_MARGIN, -_OUTER_MARGIN, -_OUTER_MARGIN)
-    if inner.height() < 180:
+    if not show_detail or inner.height() < 180:
         return inner
     detail_height = min(_DETAIL_MAX_HEIGHT, max(_DETAIL_MIN_HEIGHT, int(inner.height() * 0.34)))
     return QRect(inner.x(), inner.y(), inner.width(), max(60, inner.height() - detail_height - _PREVIEW_GAP))
@@ -206,6 +208,7 @@ class PanelPreviewRenderer:
             self.model.screens,
             QRect(QPoint(0, 0), self.size),
             self.model.focused_screen_id,
+            show_detail=self.model.show_detail,
         )
 
     def group_rect(self, group_id: str) -> QRect:
@@ -233,9 +236,11 @@ class PanelPreviewRenderer:
         ).get(tab_id, QRect())
 
     def map_rect(self) -> QRect:
-        return map_preview_rect(QRect(QPoint(0, 0), self.size))
+        return map_preview_rect(QRect(QPoint(0, 0), self.size), show_detail=self.model.show_detail)
 
     def selected_panel_detail_rect(self) -> QRect:
+        if not self.model.show_detail:
+            return QRect()
         return selected_panel_detail_rect(QRect(QPoint(0, 0), self.size))
 
     def selected_group(self) -> PanelGroup | None:
@@ -258,7 +263,8 @@ class PanelPreviewRenderer:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._paint_screens(painter)
         self._paint_groups(painter)
-        self._paint_selected_group_detail(painter)
+        if self.model.show_detail:
+            self._paint_selected_group_detail(painter)
 
     def _paint_screens(self, painter: QPainter) -> None:
         screen_rects = self.screen_rects()
@@ -374,6 +380,7 @@ def render_layout_preview_pixmap(
             selected_group_id=selected_group_id,
             selected_tab_id=selected_tab_id,
             focused_screen_id=focused_screen_id,
+            show_detail=True,
         ),
         size,
     ).render()

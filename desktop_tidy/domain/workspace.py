@@ -8,7 +8,15 @@ import uuid
 
 from .classification import canonical_key, is_inside
 from .defaults import build_default_configuration
-from .models import Configuration, ItemRef, ManualOverride, PanelGeometry, PanelGroup, PanelTab
+from .models import (
+    ClassificationRule,
+    Configuration,
+    ItemRef,
+    ManualOverride,
+    PanelGeometry,
+    PanelGroup,
+    PanelTab,
+)
 
 
 class WorkspaceModel:
@@ -125,6 +133,41 @@ class WorkspaceModel:
         group.tab_ids.append(tab.id)
         group.active_tab_id = tab.id
         return tab
+
+    def create_custom_classification_type(
+        self,
+        group_id: str,
+        name: str,
+        extensions: list[str] | None = None,
+    ) -> tuple[PanelTab, ClassificationRule]:
+        label = name.strip()
+        if not label:
+            raise ValueError("custom classification type name must not be empty")
+        tab = self.add_tab(group_id, label)
+        fallback_order = min(
+            (rule.order for rule in self.config.rules if rule.matcher_kind == "fallback"),
+            default=1000,
+        )
+        previous_order = max(
+            (rule.order for rule in self.config.rules if rule.order < fallback_order),
+            default=0,
+        )
+        rule = ClassificationRule(
+            id=f"rule-custom-{uuid.uuid4().hex}",
+            name=label,
+            matcher_kind="extension",
+            target_tab_id=tab.id,
+            extensions=list(extensions or []),
+            enabled=True,
+            order=min(fallback_order - 1, previous_order + 10),
+        )
+        self.config.rules.append(rule)
+        return tab, rule
+
+    def delete_classification_rule(self, rule_id: str) -> bool:
+        before = len(self.config.rules)
+        self.config.rules = [rule for rule in self.config.rules if rule.id != rule_id]
+        return len(self.config.rules) != before
 
     def add_widget_tab(
         self,
