@@ -22,12 +22,13 @@ class ModelTests(unittest.TestCase):
     def test_default_configuration_has_required_group_tabs_appearance_and_rules(self) -> None:
         config = build_default_configuration(r"C:\Users\Example\Desktop")
 
-        self.assertEqual(config.schema_version, 3)
+        self.assertEqual(config.schema_version, 4)
         self.assertEqual(config.desktop.path, r"C:\Users\Example\Desktop")
         self.assertEqual(config.desktop.primary_screen_id, "primary")
         self.assertEqual(len(config.panel_groups), 1)
         group = config.panel_groups[0]
         self.assertEqual(group.id, "group-default")
+        self.assertEqual(group.name, "面板 1")
         self.assertFalse(group.locked)
         self.assertEqual(group.appearance, AppearanceSettings("#111111", 0.60))
         self.assertEqual(
@@ -55,6 +56,7 @@ class ModelTests(unittest.TestCase):
             PanelGeometry(0.1, 0.2, 0.3, 0.4),
             PanelGroup(
                 id="group-a",
+                name="素材面板",
                 screen_id="primary",
                 geometry=PanelGeometry(0.1, 0.2, 0.3, 0.4),
                 tab_ids=["tab-a"],

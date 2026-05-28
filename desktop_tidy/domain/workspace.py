@@ -172,6 +172,7 @@ class WorkspaceModel:
             appearance=deepcopy(self.config.appearance_defaults),
             locked=False,
             collapsed=False,
+            name=label or self._default_widget_name(widget_type),
         )
         tab = PanelTab(
             id=tab_id,
@@ -187,10 +188,10 @@ class WorkspaceModel:
         self.config.panel_tabs.append(tab)
         return group
 
-    def add_item_panel(self, name: str = "新面板") -> PanelGroup:
+    def add_item_panel(self, name: str = "") -> PanelGroup:
         group_id = f"group-{uuid.uuid4().hex}"
         tab_id = f"tab-{uuid.uuid4().hex}"
-        label = name.strip() or "新面板"
+        group_name = name.strip() or self._next_panel_name()
         group = PanelGroup(
             id=group_id,
             screen_id=self.config.desktop.primary_screen_id or "primary",
@@ -200,11 +201,12 @@ class WorkspaceModel:
             appearance=deepcopy(self.config.appearance_defaults),
             locked=False,
             collapsed=False,
+            name=group_name,
         )
         tab = PanelTab(
             id=tab_id,
             group_id=group_id,
-            name=label,
+            name="新标签",
             order=0,
             category_role="custom",
             content_kind="items",
@@ -217,6 +219,17 @@ class WorkspaceModel:
         if widget_type == "clock":
             return "时间"
         return widget_type or "功能"
+
+    def _next_panel_name(self) -> str:
+        used = {group.name for group in self.config.panel_groups}
+        index = len(self.config.panel_groups) + 1
+        while f"面板 {index}" in used:
+            index += 1
+        return f"面板 {index}"
+
+    def rename_group(self, group_id: str, name: str) -> None:
+        label = name.strip() or "未命名面板"
+        self.group(group_id).name = label
 
     def rename_tab(self, tab_id: str, name: str) -> None:
         label = name.strip() or "未命名面板"
@@ -303,6 +316,7 @@ class WorkspaceModel:
             tab_ids=[tab_id],
             active_tab_id=tab_id,
             appearance=deepcopy(self.config.appearance_defaults),
+            name=tab.name,
         )
         tab.group_id = detached.id
         self.config.panel_groups.append(detached)

@@ -479,9 +479,10 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             settings = app._settings_window
             assert settings is not None
 
-            settings._new_item_panel_button.click()
+            settings._management_add_button.click()
             type(self).app.processEvents()
-            settings._new_item_tab_button.click()
+            settings._panel_tab_list.itemClicked.emit(settings._panel_tab_list.item(0))
+            settings._management_add_button.click()
             type(self).app.processEvents()
 
             self.assertGreaterEqual(len(app.model.config.panel_groups), 2)
@@ -503,13 +504,14 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             settings = app._settings_window
             assert settings is not None
 
-            settings._new_item_panel_button.click()
+            settings._management_add_button.click()
             type(self).app.processEvents()
             new_group = app.model.config.panel_groups[-1]
 
             self.assertEqual(settings.selected_group_id(), new_group.id)
             self.assertIn("面板 2", settings._panel_management_page_text())
-            settings._new_item_tab_button.click()
+            settings._panel_tab_list.itemClicked.emit(settings._panel_tab_list.item(0))
+            settings._management_add_button.click()
             type(self).app.processEvents()
 
             self.assertEqual(len(app.model.group(new_group.id).tab_ids), 2)
@@ -530,7 +532,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             assert settings is not None
             settings._delete_confirmation = lambda _kind, _label: (True, False)
 
-            settings._delete_item_panel_button.click()
+            settings._management_delete_button.click()
             type(self).app.processEvents()
 
             self.assertTrue(real_file.is_file())
@@ -1650,7 +1652,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 )
             )
             payload = json.loads(store.path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 3)
+            self.assertEqual(payload["schema_version"], 4)
 
     def test_layout_history_restore_replaces_panel_layout_without_touching_sources(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1676,7 +1678,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertEqual(source.read_text(encoding="utf-8"), "original")
             self.assertEqual(
                 json.loads(store.path.read_text(encoding="utf-8"))["schema_version"],
-                3,
+                4,
             )
 
     def test_settings_window_close_does_not_quit_or_hide_panel(self) -> None:

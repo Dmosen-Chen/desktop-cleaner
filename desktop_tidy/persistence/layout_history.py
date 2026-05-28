@@ -56,7 +56,7 @@ class LayoutSnapshot:
 class LayoutHistoryStore:
     """Stores recent configuration snapshots without touching source files."""
 
-    def __init__(self, path: Path, *, limit: int = 30) -> None:
+    def __init__(self, path: Path, *, limit: int = 10) -> None:
         self.path = Path(path)
         self.limit = limit
 

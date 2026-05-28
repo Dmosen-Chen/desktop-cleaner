@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from desktop_tidy.domain.defaults import build_default_configuration
+from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.migration import load_or_migrate
 
 
@@ -15,7 +16,7 @@ class MigrationTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for schema_version in (1, 4):
+            for schema_version in (1, 5):
                 with self.subTest(schema_version=schema_version):
                     path = root / f"config-{schema_version}.json"
                     content = json.dumps(
@@ -32,7 +33,7 @@ class MigrationTests(unittest.TestCase):
                     self.assertEqual(path.read_text(encoding="utf-8"), content)
                     self.assertEqual(list(root.glob(f"config-{schema_version}.*-*.json")), [])
 
-    def test_invalid_schema_v3_is_backed_up_and_returns_clean_defaults(self) -> None:
+    def test_invalid_schema_v4_is_backed_up_and_returns_clean_defaults(self) -> None:
         invalid_cases = {
             "no-groups": lambda payload: payload.__setitem__("panel_groups", []),
             "missing-desktop-path": lambda payload: payload["desktop"].pop("path"),
@@ -190,14 +191,14 @@ class MigrationTests(unittest.TestCase):
 
                 config = load_or_migrate(path)
 
-                self.assertEqual(config.schema_version, 3)
+                self.assertEqual(config.schema_version, 4)
                 self.assertEqual(config.panel_groups[0].id, "group-default")
                 backups = list(root.glob("config.corrupt-*.json"))
                 self.assertEqual(len(backups), 1)
                 self.assertEqual(backups[0].read_text(encoding="utf-8"), content)
                 self.assertEqual(path.read_text(encoding="utf-8"), content)
 
-    def test_schema_v2_is_migrated_to_v3_and_allows_disabled_rule_with_cleared_target(self) -> None:
+    def test_schema_v2_is_migrated_to_v4_and_allows_disabled_rule_with_cleared_target(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "config.json"
@@ -217,8 +218,26 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(config, expected)
             self.assertEqual(list(root.glob("config.corrupt-*.json")), [])
             self.assertEqual(len(list(root.glob("config.pre-schema-v3-*.json"))), 1)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 3)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 4)
             self.assertTrue(all(tab.content_kind == "items" for tab in config.panel_tabs))
+
+    def test_schema_v3_is_migrated_to_v4_with_generated_panel_names(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "config.json"
+            expected = build_default_configuration(r"D:\Desktop")
+            WorkspaceModel(expected).add_item_panel("资料")
+            payload = expected.to_dict()
+            payload["schema_version"] = 3
+            for group in payload["panel_groups"]:
+                group.pop("name", None)
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            config = load_or_migrate(path)
+
+            self.assertEqual(config.schema_version, 4)
+            self.assertEqual([group.name for group in config.panel_groups], ["面板 1", "面板 2"])
+            self.assertEqual(len(list(root.glob("config.pre-schema-v4-*.json"))), 1)
 
     def test_referenced_legacy_desktop_url_resolves_external_target_and_deduplicates(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -265,7 +284,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual([ref.canonical_path for ref in config.external_refs], [str(external.resolve())])
             self.assertEqual(config.external_refs[0].target_tab_id, "tab-other")
             self.assertEqual(len(list(root.glob("config.pre-qt-v1-*.json"))), 1)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 3)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 4)
             self.assertTrue(internal.exists())
             self.assertTrue(external.exists())
             self.assertTrue(shortcut.exists())
@@ -342,7 +361,7 @@ class MigrationTests(unittest.TestCase):
 
             config = load_or_migrate(path)
 
-            self.assertEqual(config.schema_version, 3)
+            self.assertEqual(config.schema_version, 4)
             self.assertEqual(config.panel_groups[0].id, "group-default")
             backups = list(Path(tmp).glob("config.corrupt-*.json"))
             self.assertEqual(len(backups), 1)

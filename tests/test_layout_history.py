@@ -96,6 +96,19 @@ class LayoutHistoryStoreTests(unittest.TestCase):
             self.assertEqual(new.preview_kind, "screenshot")
             self.assertEqual(new.preview_path, r"D:\previews\new.png")
 
+    def test_default_history_limit_keeps_ten_snapshots(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = LayoutHistoryStore(Path(tmp) / "layout-history.json")
+            config = build_default_configuration(r"D:\Desktop")
+
+            for index in range(12):
+                config.panel_groups[0].geometry.rx = 0.01 * index
+                store.push(config, reason=f"move-{index}")
+
+            snapshots = store.load()
+            self.assertEqual(len(snapshots), 10)
+            self.assertEqual(snapshots[0].reason, "move-2")
+
 
 if __name__ == "__main__":
     unittest.main()

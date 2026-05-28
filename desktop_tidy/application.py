@@ -481,6 +481,9 @@ class DesktopCleanerApplication:
             self._settings_window.ui_preferences_changed.connect(
                 self._save_ui_preferences
             )
+            self._settings_window.management_metadata_changed.connect(
+                self._on_settings_metadata_changed
+            )
             self._settings_window.identify_screens_requested.connect(
                 self._on_identify_screens_requested
             )
@@ -555,6 +558,12 @@ class DesktopCleanerApplication:
         self.save_with_history("add-item-panel")
         if self._settings_window is not None:
             self._settings_window.set_configuration(self.model.config, group_id=group.id)
+        self.refresh()
+
+    def _on_settings_metadata_changed(self) -> None:
+        for panel in self._panels.values():
+            panel.reload_from_model()
+        self.save_with_history("settings-rename")
         self.refresh()
 
     def _on_add_item_tab_requested(self) -> None:

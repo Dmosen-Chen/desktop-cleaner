@@ -64,10 +64,12 @@ class PanelGroup:
     appearance: AppearanceSettings
     locked: bool = False
     collapsed: bool = False
+    name: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.id,
+            "name": self.name,
             "screen_id": self.screen_id,
             "geometry": self.geometry.to_dict(),
             "tab_ids": list(self.tab_ids),
@@ -81,6 +83,7 @@ class PanelGroup:
     def from_dict(cls, payload: dict[str, Any]) -> PanelGroup:
         return cls(
             id=str(payload["id"]),
+            name=str(payload.get("name", "")),
             screen_id=str(payload.get("screen_id", "primary")),
             geometry=PanelGeometry.from_dict(dict(payload.get("geometry", {}))),
             tab_ids=[str(tab_id) for tab_id in payload.get("tab_ids", [])],
@@ -382,7 +385,7 @@ def _validate_desktop_path_value(path: str) -> None:
 def validate_configuration_payload(
     payload: dict[str, Any],
     *,
-    expected_schema_version: int = 3,
+    expected_schema_version: int = 4,
 ) -> None:
     """Validate the persisted schema shape before any tolerant conversion."""
     if (
@@ -413,6 +416,8 @@ def validate_configuration_payload(
             raise InvalidConfiguration(f"panel_groups[{index}] must be an object")
         label = f"panel_groups[{index}]"
         _required_text(raw_group, "id", f"{label}.id")
+        if expected_schema_version >= 4:
+            _required_text(raw_group, "name", f"{label}.name")
         _required_text(raw_group, "screen_id", f"{label}.screen_id")
         geometry = _required_object(raw_group, "geometry")
         for key in ("rx", "ry", "rw", "rh"):
@@ -495,7 +500,7 @@ def _validate_geometry(group: PanelGroup) -> None:
 def validate_configuration(
     config: Configuration,
     *,
-    expected_schema_version: int = 3,
+    expected_schema_version: int = 4,
 ) -> None:
     """Validate the references and normalized values required by the current schema."""
     if config.schema_version != expected_schema_version:
@@ -528,6 +533,8 @@ def validate_configuration(
     _validate_appearance("default appearance", config.appearance_defaults)
     listed_tab_ids: set[str] = set()
     for group in config.panel_groups:
+        if expected_schema_version >= 4 and not group.name.strip():
+            raise InvalidConfiguration(f"panel group {group.id} name must not be blank")
         if not group.tab_ids:
             raise InvalidConfiguration(f"panel group {group.id} must contain at least one tab")
         if len(set(group.tab_ids)) != len(group.tab_ids):

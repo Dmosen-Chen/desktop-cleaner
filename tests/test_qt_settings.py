@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRect, QSize
+from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QComboBox
 
@@ -74,7 +74,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(add_panel_spy.at(0)[0], "clock")
 
-    def test_panel_management_hides_group_ids_and_exposes_delete_actions(self) -> None:
+    def test_panel_management_uses_compact_panel_rows_and_contextual_actions(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         model = WorkspaceModel(config)
         second_group = model.add_item_panel("资料")
@@ -88,13 +88,20 @@ class SettingsWindowTests(unittest.TestCase):
         delete_tab_spy = QSignalSpy(window.delete_item_tab_requested)
 
         self.assertNotIn("group-", window._panel_management_page_text())
-        self.assertIn("面板 1", window._panel_management_page_text())
+        self.assertEqual(window._management_add_button.text(), "+")
+        self.assertEqual(window._panel_group_list.item(0).text(), "面板 1")
+        self.assertEqual(window._panel_group_count_labels[config.panel_groups[0].id].text(), "6")
+        self.assertIn("位置：主屏", window._panel_summary_label.text())
+        self.assertNotIn("大小", window._panel_summary_label.text())
+        self.assertNotIn("0.", window._panel_summary_label.text())
+
         window._panel_group_list.setCurrentRow(1)
         self.assertEqual(window.selected_group_id(), second_group.id)
-        window._new_item_panel_button.click()
-        window._new_item_tab_button.click()
-        window._delete_item_panel_button.click()
-        window._delete_item_tab_button.click()
+        window._management_add_button.click()
+        window._management_delete_button.click()
+        window._panel_tab_list.itemClicked.emit(window._panel_tab_list.item(0))
+        window._management_add_button.click()
+        window._management_delete_button.click()
 
         self.assertEqual(add_panel_spy.count(), 1)
         self.assertEqual(add_tab_spy.count(), 1)
@@ -103,17 +110,54 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(delete_tab_spy.count(), 1)
         self.assertEqual(delete_tab_spy.at(0)[0], second_group.active_tab_id)
 
+    def test_panel_management_double_click_renames_panel_and_tab(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(
+            config,
+            rename_prompt=lambda _kind, current: f"{current}-改",
+        )
+        changed_spy = QSignalSpy(window.management_metadata_changed)
+
+        window._panel_group_list.itemDoubleClicked.emit(window._panel_group_list.item(0))
+        window._panel_tab_list.itemDoubleClicked.emit(window._panel_tab_list.item(0))
+
+        self.assertEqual(config.panel_groups[0].name, "面板 1-改")
+        self.assertTrue(config.panel_tabs[0].name.endswith("-改"))
+        self.assertEqual(changed_spy.count(), 2)
+
+    def test_panel_preview_click_switches_selected_panel_and_tab(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        second_group = model.add_item_panel("资料")
+        second_tab = model.add_tab(second_group.id, "发票")
+        window = SettingsWindow(config)
+
+        window._panel_preview_group_buttons[second_group.id].click()
+        self.assertEqual(window.selected_group_id(), second_group.id)
+
+        window._panel_preview_tab_buttons[second_tab.id].click()
+        self.assertEqual(window.selected_group_id(), second_group.id)
+        self.assertEqual(
+            window._panel_tab_list.currentItem().data(Qt.ItemDataRole.UserRole),
+            second_tab.id,
+        )
+
     def test_rules_page_uses_master_detail_extension_editor(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
 
         self.assertIsNone(getattr(window, "_rules_table", None))
+        self.assertIn("桌面整理只编辑", window._rules_page_text())
         self.assertIn("整理到", window._rules_page_text())
-        self.assertIn("新建面板", window.all_text())
-        self.assertIn("新建标签", window.all_text())
+        self.assertIn("规则类型", window._rules_page_text())
+        self.assertIn("当前预设", window._rules_page_text())
+        self.assertIn("后缀列表", window._rules_page_text())
+        self.assertNotIn("新建面板", window._rules_page_text())
+        self.assertNotIn("新建标签", window._rules_page_text())
+        self.assertIn("图片", window._rule_preset_buttons)
         window._rule_list.setCurrentRow(2)
         editor = window._rule_extension_editor
-        editor.apply_preset("代码")
+        window._rule_preset_buttons["代码"].click()
         editor.add_extension(".webp")
         editor.remove_extension(".png")
         window._save()
@@ -122,6 +166,17 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertIn(".py", image_rule.extensions)
         self.assertIn(".webp", image_rule.extensions)
         self.assertNotIn(".png", image_rule.extensions)
+
+    def test_selecting_folder_rule_does_not_open_extra_windows(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config)
+        before = set(QApplication.topLevelWidgets())
+
+        window._rule_list.setCurrentRow(0)
+        type(self).app.processEvents()
+
+        after = set(QApplication.topLevelWidgets())
+        self.assertEqual(after - before, set())
 
     def test_appearance_page_uses_swatch_slider_and_percent_spinbox(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
@@ -203,12 +258,12 @@ class SettingsWindowTests(unittest.TestCase):
         )
 
         window.set_history_snapshots([snapshot])
-        window._history_list.setCurrentRow(0)
-        self.assertGreaterEqual(window._history_list.iconSize().width(), 180)
-        self.assertGreaterEqual(window._history_list.iconSize().height(), 100)
-        self.assertFalse(window._history_list.item(0).icon().isNull())
-        window._restore_history_button.click()
-        window._capture_history_preview_button.click()
+        self.assertGreaterEqual(window._history_card_preview_size.width(), 260)
+        self.assertGreaterEqual(window._history_card_preview_size.height(), 145)
+        self.assertIn(window._history_grid_columns, (2, 3))
+        self.assertEqual(len(window._history_cards), 1)
+        window._history_cards[0].restore_button.click()
+        window._history_cards[0].capture_button.click()
 
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(restore_spy.at(0)[0], "layout-1")
@@ -231,12 +286,19 @@ class SettingsWindowTests(unittest.TestCase):
             ui_preferences=preferences,
         )
         changed_spy = QSignalSpy(window.ui_preferences_changed)
+        window._section_list.setCurrentRow(window.visible_section_names().index("其他"))
+        window.show()
+        type(self).app.processEvents()
 
         window._reset_delete_confirmations_button.click()
 
         self.assertTrue(preferences.confirm_delete_panel)
         self.assertTrue(preferences.confirm_delete_tab)
         self.assertEqual(changed_spy.count(), 1)
+        self.assertGreater(
+            window._reset_delete_confirmations_button.geometry().x(),
+            window.width() // 2,
+        )
 
     def test_unsupported_features_are_not_exposed_in_ui_text(self) -> None:
         window = self._make_window()
