@@ -5,21 +5,41 @@ from __future__ import annotations
 from PySide6.QtCore import QDateTime, QTimer, Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from desktop_tidy.widgets.models import WidgetDefinition
+from desktop_tidy.widgets.models import WidgetDefinition, WidgetVisualPreset
+
+CLOCK_VISUAL = WidgetVisualPreset(
+    preset_id="quiet-clock",
+    accent_color="#d99abd",
+    background="#51344a",
+    foreground="#ffffff",
+    secondary_foreground="rgba(255,255,255,0.82)",
+    card_background="rgba(34,31,40,0.90)",
+    recommended_width=320,
+    recommended_height=190,
+    min_width=260,
+    min_height=130,
+    max_width=340,
+    max_height=190,
+)
 
 
 class ClockWidget(QWidget):
     def __init__(self, settings: dict[str, object], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = dict(settings)
-        self.setMinimumSize(260, 130)
-        self.setMaximumSize(340, 190)
+        self.setObjectName("ClockWidgetRoot")
+        self.setMinimumSize(CLOCK_VISUAL.min_width, CLOCK_VISUAL.min_height)
+        self.setMaximumSize(CLOCK_VISUAL.max_width, CLOCK_VISUAL.max_height)
         self._time_label = QLabel(self)
         self._date_label = QLabel(self)
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._date_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._time_label.setStyleSheet("color: white; font-size: 42px; font-weight: 600;")
-        self._date_label.setStyleSheet("color: rgba(255,255,255,0.82); font-size: 15px;")
+        self._time_label.setStyleSheet(
+            f"color: {CLOCK_VISUAL.foreground}; font-size: 42px; font-weight: 600;"
+        )
+        self._date_label.setStyleSheet(
+            f"color: {CLOCK_VISUAL.secondary_foreground}; font-size: 15px;"
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.addStretch(1)
@@ -49,7 +69,7 @@ class ClockWidgetPlugin:
             description="显示本地时间和日期",
             preview_title="12:34",
             preview_body="2026-05-28",
-            accent_color="#d99abd",
+            visual=CLOCK_VISUAL,
         )
 
     def default_settings(self) -> dict[str, object]:

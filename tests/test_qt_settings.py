@@ -19,8 +19,10 @@ from desktop_tidy.domain.models import PanelGeometry
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.ui_preferences import UiPreferences
 from desktop_tidy.services.screens import ScreenInfo
+from desktop_tidy.version import APP_VERSION
 from desktop_tidy.ui.panel_preview import PanelPreviewWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
+from desktop_tidy.widgets.registry import BuiltinWidgetRegistry as ModularWidgetRegistry
 
 _SUPPORTED_SECTIONS = ["面板", "分类规则"]
 _FORBIDDEN_TERMS = ("壁纸", "归档", "移动", "搜索", "AI", "同步")
@@ -100,6 +102,36 @@ class SettingsWindowTests(unittest.TestCase):
 
         self.assertEqual(window.visible_section_names(), _SUPPORTED_SECTIONS)
 
+    def test_settings_window_uses_translucent_console_shell(self) -> None:
+        window = self._make_window()
+
+        self.assertEqual(window.objectName(), "DesktopCleanerSettings")
+        self.assertTrue(window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        self.assertTrue(bool(window.windowFlags() & Qt.WindowType.FramelessWindowHint))
+        self.assertEqual(window.windowOpacity(), 1.0)
+        self.assertIn("rgba", window.styleSheet())
+        self.assertIn("background: rgba(9, 11, 15, 214)", window.styleSheet())
+        self.assertIn("background: rgba(28, 31, 37, 236)", window.styleSheet())
+        self.assertIn("QGroupBox", window.styleSheet())
+        self.assertIn("selection-color: #F8FAFC", window.styleSheet())
+        self.assertIn("QListWidget::item:selected", window.styleSheet())
+        self.assertIn("color: #F8FAFC", window.styleSheet())
+        self.assertIn("QWidget#SettingsTitleBar", window.styleSheet())
+        self.assertIn("SettingsTitleIcon", window.styleSheet())
+        self.assertEqual(window._title_label.text(), "设置")
+
+    def test_custom_titlebar_close_hides_settings_without_quitting(self) -> None:
+        window = self._make_window()
+        window.show()
+        type(self).app.processEvents()
+
+        self.assertTrue(window.isVisible())
+        window._title_close_button.click()
+        type(self).app.processEvents()
+
+        self.assertFalse(window.isVisible())
+        self.assertFalse(QApplication.quitOnLastWindowClosed())
+
     def test_recovery_history_and_widget_actions_are_exposed_as_signals(self) -> None:
         window = self._make_window()
         restore_spy = QSignalSpy(window.restore_desktop_requested)
@@ -111,6 +143,63 @@ class SettingsWindowTests(unittest.TestCase):
 
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(add_panel_spy.at(0)[0], "clock")
+
+    def test_other_page_exposes_manual_update_controls(self) -> None:
+        window = self._make_window()
+        check_spy = QSignalSpy(window.update_check_requested)
+        download_spy = QSignalSpy(window.update_download_requested)
+        open_folder_spy = QSignalSpy(window.update_open_folder_requested)
+        replace_spy = QSignalSpy(window.update_replace_requested)
+
+        text = window._other_page_text()
+        self.assertEqual(window._update_group.title(), "软件更新")
+        self.assertIn(f"当前版本：{APP_VERSION}", text)
+        self.assertIn("检查更新", text)
+        self.assertIn("下载更新", text)
+        self.assertIn("打开更新文件夹", text)
+        self.assertIn("替换并重启", text)
+        self.assertFalse(window._update_download_button.isEnabled())
+        self.assertFalse(window._update_replace_button.isEnabled())
+
+        window._update_check_button.click()
+        window._update_download_button.setEnabled(True)
+        window._update_download_button.click()
+        window._update_open_folder_button.click()
+        window._update_replace_button.setEnabled(True)
+        window._update_replace_button.click()
+
+        self.assertEqual(check_spy.count(), 1)
+        self.assertEqual(download_spy.count(), 1)
+        self.assertEqual(open_folder_spy.count(), 1)
+        self.assertEqual(replace_spy.count(), 1)
+
+    def test_update_status_controls_download_and_dev_mode_replace(self) -> None:
+        window = self._make_window()
+
+        window.set_update_state(
+            latest_version="1.0.13",
+            message="发现新版本 1.0.13",
+            update_available=True,
+            download_ready=False,
+            can_replace=False,
+        )
+
+        self.assertIn("最新版本：1.0.13", window._other_page_text())
+        self.assertTrue(window._update_download_button.isEnabled())
+        self.assertFalse(window._update_replace_button.isEnabled())
+        self.assertIn("发现新版本", window._update_status_label.text())
+
+        window.set_update_state(
+            latest_version="1.0.13",
+            message="下载完成。开发模式下请手动替换。",
+            update_available=True,
+            download_ready=True,
+            can_replace=False,
+        )
+
+        self.assertTrue(window._update_download_button.isEnabled())
+        self.assertFalse(window._update_replace_button.isEnabled())
+        self.assertIn("开发模式", window._update_status_label.text())
 
     def test_panel_management_uses_compact_panel_rows_and_contextual_actions(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
@@ -559,12 +648,15 @@ class SettingsWindowTests(unittest.TestCase):
 
     def test_widget_page_shows_preview_card_for_clock_panel(self) -> None:
         window = self._make_window()
+        clock_definition = ModularWidgetRegistry().get("clock").definition()
 
         text = window.all_text()
 
         self.assertIn("时间面板", text)
         self.assertNotIn("时间面板预览", text)
         self.assertIn("#", window._clock_widget_card.styleSheet())
+        self.assertIn(clock_definition.preview_background, window._clock_widget_preview.styleSheet())
+        self.assertIn(clock_definition.preview_foreground, window._clock_widget_preview.styleSheet())
         self.assertEqual(window._add_clock_panel_button.text(), "+")
         self.assertNotIn("添加到当前面板组", text)
         self.assertEqual(window._clock_widget_card.width(), 320)

@@ -352,7 +352,6 @@ class PanelGroupWidget(QWidget):
             self._widget_content = plugin.create_widget(settings)
             self._widget_content_type = widget_type
             self._widget_content.setParent(self._content_host)
-            self._widget_content.setStyleSheet("background: transparent;")
             self._content_layout.addWidget(
                 self._widget_content,
                 alignment=Qt.AlignmentFlag.AlignCenter,

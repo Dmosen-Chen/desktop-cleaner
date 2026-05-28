@@ -4,6 +4,7 @@ import json
 import os
 import unittest
 from copy import deepcopy
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
@@ -27,6 +28,7 @@ from desktop_tidy.domain.models import ItemRef, ManualOverride, PanelGeometry
 from desktop_tidy.persistence.config_store import ConfigurationStore
 from desktop_tidy.persistence.layout_history import LayoutHistoryStore
 from desktop_tidy.services.desktop_index import DesktopIndex
+from desktop_tidy.services.updates import DownloadResult, UpdateInfo
 from desktop_tidy.ui.settings_window import SettingsWindow
 from tests.test_qt_item_grid import send_ctrl_wheel
 from tests.test_qt_panel_group import (
@@ -78,6 +80,39 @@ class FakeStartupService:
     def set_enabled(self, enabled: bool, exe_path: Path):
         self.calls.append((enabled, exe_path))
         return SimpleNamespace(success=self.result, message="fake startup failure")
+
+
+class FakeUpdateService:
+    def __init__(self, updates_dir: Path) -> None:
+        self.updates_dir = updates_dir
+        self.info = UpdateInfo(
+            current_version="1.0.12",
+            latest_version="1.0.13",
+            release_url="https://release",
+            asset_url="https://asset/DesktopCleaner.exe",
+            available=True,
+        )
+        self.download_result = DownloadResult(
+            version="1.0.13",
+            path=updates_dir / "DesktopCleaner-v1.0.13.exe",
+        )
+        self.calls: list[str] = []
+
+    def check_latest(self) -> UpdateInfo:
+        self.calls.append("check")
+        return self.info
+
+    def download(self, update: UpdateInfo) -> DownloadResult:
+        self.calls.append(f"download:{update.latest_version}")
+        self.download_result.path.parent.mkdir(parents=True, exist_ok=True)
+        self.download_result.path.write_bytes(b"exe")
+        return self.download_result
+
+    def prepare_replace(self, downloaded_exe: Path, current_exe: Path) -> Path:
+        self.calls.append(f"replace:{downloaded_exe.name}:{current_exe.name}")
+        script = self.updates_dir / "replace-and-restart.cmd"
+        script.write_text("echo replace", encoding="utf-8")
+        return script
 
 
 class FakeTrayController(QObject):
@@ -137,6 +172,29 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 app.store.path,
                 Path(tmp) / "DesktopCleaner" / "config.json",
             )
+
+    def test_update_check_and_download_are_exposed_through_settings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            update_service = FakeUpdateService(Path(tmp) / "updates")
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                update_service=update_service,
+            )
+
+            app._show_settings(app.panel.group_id)
+            assert app._settings_window is not None
+            window = app._settings_window
+            window._update_check_button.click()
+            window._update_download_button.click()
+
+            self.assertEqual(update_service.calls, ["check", "download:1.0.13"])
+            self.assertIn("1.0.13", window._other_page_text())
+            self.assertIn("下载完成", window._update_status_label.text())
+            self.assertFalse(window._update_replace_button.isEnabled())
 
     def test_constructor_restores_leftover_hidden_desktop_icons_before_showing_panels(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -582,6 +640,51 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             app.handle_paths_dropped([source], "tab-images")
 
             self.assertEqual(history_store.load(), [])
+
+    def test_continuous_layout_changes_share_one_history_entry_within_five_minutes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(root / "DesktopCleaner" / "config.json")
+            now = datetime(2026, 5, 28, 12, 0, 0)
+
+            def clock() -> datetime:
+                return now
+
+            history_store = LayoutHistoryStore(
+                root / "DesktopCleaner" / "layout-history.json",
+                clock=clock,
+            )
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                history_store=history_store,
+            )
+
+            app.model.config.panel_groups[0].appearance.background_opacity = 0.72
+            app.save_with_history("appearance-change")
+            first_snapshot = history_store.load()[0]
+
+            now = now + timedelta(minutes=2)
+            app.model.config.panel_groups[0].geometry.rx = 0.18
+            app.save_with_history("geometry-change")
+
+            now = now + timedelta(minutes=2)
+            group = app.model.config.panel_groups[0]
+            group.tab_ids = [group.tab_ids[1], group.tab_ids[0], *group.tab_ids[2:]]
+            app.save_with_history("tab-reorder")
+
+            snapshots = history_store.load()
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].id, first_snapshot.id)
+            self.assertEqual(snapshots[0].reason, "layout-adjustment")
+
+            now = now + timedelta(minutes=6)
+            app.model.config.panel_groups[0].geometry.rx = 0.26
+            app.save_with_history("geometry-change")
+
+            self.assertEqual(len(history_store.load()), 2)
 
     def test_external_drop_is_saved_only_as_external_refs(self) -> None:
         with TemporaryDirectory() as tmp:

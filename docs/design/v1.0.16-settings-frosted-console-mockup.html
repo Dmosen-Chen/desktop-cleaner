@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Desktop Cleaner v1.0.16 磨砂控制台视觉稿</title>
+  <style>
+    :root {
+      --bg: #090b0f;
+      --shell: rgba(11, 13, 18, .65);
+      --card: rgba(31, 34, 40, .79);
+      --card-soft: rgba(36, 39, 46, .72);
+      --line: rgba(255, 255, 255, .12);
+      --line-strong: rgba(255, 255, 255, .22);
+      --text: #f8fafc;
+      --muted: #b8c0cc;
+      --subtle: #7d8796;
+      --accent: #f0a8cf;
+      --accent-soft: rgba(240, 168, 207, .22);
+      --cyan: #7fd5d9;
+      --amber: #d9bc76;
+      --shadow: 0 28px 100px rgba(0, 0, 0, .48);
+      font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        linear-gradient(rgba(7, 8, 11, .28), rgba(7, 8, 11, .28)),
+        linear-gradient(180deg, rgba(215, 114, 160, .40) 0 13%, transparent 13%),
+        radial-gradient(circle at 18% 4%, rgba(240, 168, 207, .22), transparent 26%),
+        radial-gradient(circle at 86% 12%, rgba(127, 213, 217, .12), transparent 28%),
+        linear-gradient(180deg, #1a1720, #101319 58%, #080b0f);
+    }
+
+    .skyline {
+      position: fixed;
+      inset: auto 0 0 0;
+      height: 34vh;
+      opacity: .72;
+      background:
+        linear-gradient(90deg, transparent 0 6%, #09151a 6% 12%, transparent 12% 18%, #101923 18% 29%, transparent 29% 35%, #0c151d 35% 45%, transparent 45% 52%, #121721 52% 62%, transparent 62% 69%, #09151a 69% 80%, transparent 80% 86%, #111923 86% 100%),
+        repeating-linear-gradient(90deg, transparent 0 20px, rgba(240,168,207,.16) 20px 26px, transparent 26px 42px);
+      pointer-events: none;
+    }
+
+    .window {
+      position: relative;
+      z-index: 1;
+      width: min(1440px, calc(100vw - 48px));
+      min-height: 820px;
+      margin: 24px auto;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .16);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.022)),
+        var(--shell);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px) saturate(125%);
+      -webkit-backdrop-filter: blur(22px) saturate(125%);
+    }
+
+    .titlebar {
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: linear-gradient(135deg, rgba(38, 42, 50, .79), rgba(23, 25, 31, .76) 56%, rgba(54, 40, 55, .78));
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: var(--accent);
+      background: rgba(240, 168, 207, .14);
+      border: 1px solid rgba(240, 168, 207, .32);
+    }
+
+    .window-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    .window-actions button,
+    .add-button {
+      height: 34px;
+      min-width: 42px;
+      color: var(--text);
+      background: rgba(255, 255, 255, .08);
+      border: 1px solid rgba(255, 255, 255, .14);
+      border-radius: 11px;
+      font: inherit;
+    }
+
+    .window-actions button:hover,
+    .add-button:hover {
+      background: rgba(255, 255, 255, .15);
+      border-color: rgba(255, 255, 255, .26);
+    }
+
+    .content {
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      gap: 14px;
+      padding: 14px;
+    }
+
+    .nav,
+    .page {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(30, 33, 39, .72);
+    }
+
+    .nav {
+      padding: 10px;
+    }
+
+    .nav button {
+      width: 100%;
+      height: 42px;
+      margin: 3px 0;
+      text-align: left;
+      color: var(--text);
+      background: transparent;
+      border: 0;
+      border-radius: 12px;
+      padding: 0 14px;
+      font: inherit;
+    }
+
+    .nav button.active {
+      color: var(--text);
+      background: linear-gradient(90deg, var(--accent-soft), rgba(255,255,255,.05));
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .nav button:hover {
+      background: rgba(255,255,255,.07);
+    }
+
+    .page {
+      padding: 18px;
+      min-height: 720px;
+      display: none;
+    }
+
+    .page.active {
+      display: block;
+    }
+
+    .page-title {
+      margin: 0 0 14px;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 14px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+      padding: 14px;
+    }
+
+    .card.soft {
+      background: var(--card-soft);
+    }
+
+    .panel-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .panel-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      height: 52px;
+      padding: 0 14px;
+      border-radius: 13px;
+      color: var(--text);
+      background: rgba(255, 255, 255, .045);
+    }
+
+    .panel-row.active {
+      background: rgba(240, 168, 207, .14);
+      box-shadow: inset 4px 0 0 var(--accent);
+    }
+
+    .map {
+      position: relative;
+      height: 260px;
+      overflow: hidden;
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 70% 30%, rgba(240, 168, 207, .06), transparent 34%),
+        rgba(9, 10, 13, .86);
+      border: 1px solid rgba(255, 255, 255, .10);
+    }
+
+    .screen {
+      position: absolute;
+      border: 1px solid rgba(255,255,255,.20);
+      border-radius: 18px;
+      color: var(--muted);
+      padding: 12px;
+      background: rgba(255, 255, 255, .025);
+    }
+
+    .screen.main { left: 38%; top: 28%; width: 46%; height: 48%; }
+    .screen.sub { left: 11%; top: 33%; width: 36%; height: 38%; }
+
+    .mini-panel {
+      position: absolute;
+      border-radius: 14px;
+      border: 2px solid var(--accent);
+      background: rgba(0, 0, 0, .48);
+      display: grid;
+      place-items: center;
+      font-size: 22px;
+    }
+
+    .p1 { right: 7%; top: 20%; width: 24%; height: 58%; }
+    .p2 { right: 23%; top: 17%; width: 24%; height: 34%; }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .chip {
+      padding: 7px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.075);
+      color: var(--text);
+    }
+
+    .chip.active {
+      background: var(--accent-soft);
+      border-color: rgba(240, 168, 207, .45);
+    }
+
+    .swatches {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .swatch {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      border: 2px solid rgba(255,255,255,.20);
+    }
+
+    .slider {
+      height: 6px;
+      border-radius: 999px;
+      flex: 1;
+      background: linear-gradient(90deg, var(--accent) 0 60%, rgba(255,255,255,.24) 60%);
+    }
+
+    .rules-layout {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 14px;
+    }
+
+    .rule-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .rule-item {
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,.04);
+    }
+
+    .rule-item.active {
+      background: rgba(240,168,207,.14);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .field {
+      margin: 12px 0;
+      color: var(--muted);
+    }
+
+    .fake-input {
+      margin-top: 7px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+
+    .history-grid,
+    .widget-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .history-preview {
+      height: 170px;
+      border-radius: 14px;
+      background: rgba(9, 10, 13, .86);
+      border: 1px solid rgba(255,255,255,.10);
+      position: relative;
+      margin-bottom: 10px;
+    }
+
+    .widget-card {
+      max-width: 360px;
+      min-height: 220px;
+      background: linear-gradient(135deg, rgba(28,33,48,.96), rgba(83,54,75,.96));
+      border-color: rgba(240,168,207,.45);
+    }
+
+    .clock-preview {
+      height: 130px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #1c2130, #2b2332 58%, #53364b);
+    }
+
+    .clock-preview strong {
+      display: block;
+      font-size: 44px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+
+    .section-cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    @media (max-width: 960px) {
+      .content,
+      .grid,
+      .rules-layout,
+      .history-grid,
+      .section-cards {
+        grid-template-columns: 1fr;
+      }
+      .nav { display: flex; overflow-x: auto; }
+      .nav button { min-width: 120px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="skyline"></div>
+  <main class="window">
+    <header class="titlebar">
+      <div class="brand"><div class="brand-icon">▣</div><span>设置</span></div>
+      <div class="window-actions"><button>−</button><button>□</button><button>×</button></div>
+    </header>
+    <section class="content">
+      <nav class="nav">
+        <button class="active" data-page="panel">面板</button>
+        <button data-page="rules">分类规则</button>
+        <button data-page="history">面板历史</button>
+        <button data-page="widgets">功能面板</button>
+        <button data-page="diagnostics">诊断与恢复</button>
+        <button data-page="other">其他</button>
+      </nav>
+
+      <article id="panel" class="page active">
+        <h1 class="page-title">面板</h1>
+        <div class="grid">
+          <div class="card panel-list">
+            <div class="panel-row active"><span>面板 1</span><span>3</span></div>
+            <div class="panel-row"><span>面板 2</span><span>7</span></div>
+          </div>
+          <div class="card">
+            <div class="map">
+              <div class="screen sub">副屏 1</div>
+              <div class="screen main">主屏<div class="mini-panel p2">2</div><div class="mini-panel p1">1</div></div>
+            </div>
+            <div class="tags">
+              <span class="chip active">当前：文件夹</span><span class="chip">应用</span><span class="chip">新标签</span>
+            </div>
+            <div class="swatches">
+              <span>背景颜色</span>
+              <div class="swatch" style="background:#000"></div>
+              <div class="swatch" style="background:#111827"></div>
+              <div class="swatch" style="background:#4b5563"></div>
+              <div class="swatch" style="background:#6d4c7d"></div>
+              <div class="swatch" style="background:#8b3a5d"></div>
+            </div>
+            <div class="swatches">
+              <span>背景透明度</span><div class="slider"></div><span class="fake-input">60%</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article id="rules" class="page">
+        <h1 class="page-title">分类规则</h1>
+        <div class="rules-layout">
+          <div class="card rule-list">
+            <div class="rule-item active">文档</div><div class="rule-item">图片</div><div class="rule-item">压缩包</div>
+            <div class="rule-item">应用</div><div class="rule-item">其它</div>
+          </div>
+          <div class="card">
+            <div class="field">规则类型<div class="fake-input">后缀匹配</div></div>
+            <div class="field">整理到<div class="fake-input">文档</div></div>
+            <div class="field">当前预设：文档</div>
+            <div class="tags">
+              <span class="chip active">图片</span><span class="chip active">文档</span><span class="chip">压缩包</span>
+              <span class="chip">应用</span><span class="chip">代码</span>
+            </div>
+            <div class="tags">
+              <span class="chip">.pdf</span><span class="chip">.docx</span><span class="chip">.xlsx</span>
+              <span class="chip">.pptx</span><span class="chip">.txt</span><span class="chip">.md</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article id="history" class="page">
+        <h1 class="page-title">面板历史</h1>
+        <div class="history-grid">
+          <div class="card"><div class="history-preview"><div class="mini-panel p2">2</div><div class="mini-panel p1">1</div></div><strong>调整外观</strong><p>2 个面板 · 10 个标签 · 60% 透明度</p></div>
+          <div class="card"><div class="history-preview"><div class="mini-panel p2" style="border-color:var(--cyan)">2</div><div class="mini-panel p1">1</div></div><strong>移动面板</strong><p>2 个面板 · 10 个标签 · 深色背景</p></div>
+        </div>
+      </article>
+
+      <article id="widgets" class="page">
+        <h1 class="page-title">功能面板</h1>
+        <div class="widget-grid">
+          <div class="card widget-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;"><strong>时间面板</strong><button class="add-button">+</button></div>
+            <div class="clock-preview"><div><strong>11:24</strong><span>2026-05-28 Thursday</span></div></div>
+          </div>
+        </div>
+      </article>
+
+      <article id="diagnostics" class="page">
+        <h1 class="page-title">诊断与恢复</h1>
+        <div class="section-cards">
+          <div class="card"><strong>运行状态</strong><p>桌面图标正常 · 接管未启用 · 日志可写</p></div>
+          <div class="card"><strong>恢复工具</strong><p>恢复桌面图标、刷新接管、导出诊断包。</p></div>
+        </div>
+      </article>
+
+      <article id="other" class="page">
+        <h1 class="page-title">其他</h1>
+        <div class="section-cards">
+          <div class="card"><strong>系统位置</strong><p>桌面路径、当前屏幕和显示器目标。</p></div>
+          <div class="card"><strong>启动与接管</strong><p>开机启动、桌面接管、软件更新。</p></div>
+          <div class="card"><strong>恢复工具</strong><p>恢复删除确认提示、恢复桌面图标。</p></div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <script>
+    const buttons = document.querySelectorAll('.nav button');
+    const pages = document.querySelectorAll('.page');
+    buttons.forEach((button) => button.addEventListener('click', () => {
+      buttons.forEach((item) => item.classList.remove('active'));
+      pages.forEach((page) => page.classList.remove('active'));
+      button.classList.add('active');
+      document.getElementById(button.dataset.page).classList.add('active');
+    }));
+  </script>
+</body>
+</html>

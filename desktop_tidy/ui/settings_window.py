@@ -6,8 +6,19 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCloseEvent, QFontMetrics, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QCloseEvent,
+    QFontMetrics,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -43,6 +54,7 @@ from desktop_tidy.domain.models import (
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.ui_preferences import UiPreferences
 from desktop_tidy.services.screens import ScreenInfo, available_screens
+from desktop_tidy.version import APP_VERSION
 from desktop_tidy.ui.panel_preview import (
     PanelPreviewWidget,
     layout_preview_tab_names as shared_layout_preview_tab_names,
@@ -97,6 +109,212 @@ _DEFAULT_RULE_ROLES = {
 }
 _SECTIONS = _SECTIONS + ["面板历史", "功能面板", "诊断与恢复", "其他"]
 _PANEL_COUNT_ROLE = Qt.ItemDataRole.UserRole.value + 64
+_SETTINGS_WINDOW_STYLE = """
+QWidget#DesktopCleanerSettings {
+    background: rgba(9, 11, 15, 214);
+    color: #F8FAFC;
+}
+QWidget#SettingsTitleBar {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 rgba(35, 39, 47, 232),
+        stop:0.55 rgba(22, 25, 31, 226),
+        stop:1 rgba(49, 36, 49, 230));
+    border: 1px solid rgba(255, 255, 255, 54);
+    border-radius: 15px;
+}
+QLabel#SettingsTitleIcon {
+    background: rgba(217, 154, 189, 66);
+    border: 1px solid rgba(217, 154, 189, 126);
+    border-radius: 10px;
+    padding: 5px;
+}
+QLabel#SettingsTitleText {
+    color: #F8FAFC;
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0px;
+}
+QPushButton#SettingsTitleButton {
+    background: rgba(255, 255, 255, 28);
+    color: #F8FAFC;
+    border: 1px solid rgba(255, 255, 255, 26);
+    border-radius: 10px;
+    font-size: 15px;
+    padding: 0;
+}
+QPushButton#SettingsCloseButton {
+    background: rgba(255, 255, 255, 28);
+    color: #F8FAFC;
+    border: 1px solid rgba(255, 255, 255, 26);
+    border-radius: 10px;
+    font-size: 15px;
+    padding: 0;
+}
+QPushButton#SettingsTitleButton:hover {
+    background: rgba(255, 255, 255, 44);
+    border-color: rgba(255, 255, 255, 70);
+}
+QPushButton#SettingsTitleButton:pressed {
+    background: rgba(217, 154, 189, 150);
+    color: #FFFFFF;
+}
+QPushButton#SettingsCloseButton:pressed {
+    background: rgba(232, 93, 117, 220);
+    color: #FFFFFF;
+}
+QPushButton#SettingsCloseButton:hover {
+    background: rgba(232, 93, 117, 190);
+    color: #FFFFFF;
+}
+QWidget#DesktopCleanerSettings QListWidget,
+QWidget#DesktopCleanerSettings QStackedWidget,
+QWidget#DesktopCleanerSettings QPlainTextEdit {
+    background: rgba(28, 31, 37, 236);
+    color: #F8FAFC;
+    border: 1px solid rgba(255, 255, 255, 34);
+    border-radius: 11px;
+    selection-color: #F8FAFC;
+    selection-background-color: rgba(217, 154, 189, 78);
+}
+QWidget#DesktopCleanerSettings QListWidget::item {
+    color: #F8FAFC;
+    min-height: 30px;
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+QWidget#DesktopCleanerSettings QListWidget::item:hover {
+    background: rgba(255, 255, 255, 20);
+    color: #F8FAFC;
+}
+QWidget#DesktopCleanerSettings QListWidget::item:selected {
+    background: rgba(217, 154, 189, 36);
+    border-left: 3px solid #d99abd;
+    color: #F8FAFC;
+}
+QWidget#DesktopCleanerSettings QListWidget::item:selected:!active,
+QWidget#DesktopCleanerSettings QListWidget::item:selected:active {
+    color: #F8FAFC;
+}
+QWidget#DesktopCleanerSettings QGroupBox,
+QWidget#DesktopCleanerSettings QFrame {
+    background: rgba(31, 34, 40, 238);
+    color: #F8FAFC;
+    border: 1px solid rgba(255, 255, 255, 36);
+    border-radius: 12px;
+}
+QWidget#DesktopCleanerSettings QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+}
+QWidget#DesktopCleanerSettings QLabel,
+QWidget#DesktopCleanerSettings QCheckBox {
+    color: #F8FAFC;
+    background: transparent;
+}
+QWidget#DesktopCleanerSettings QPushButton,
+QWidget#DesktopCleanerSettings QComboBox,
+QWidget#DesktopCleanerSettings QLineEdit,
+QWidget#DesktopCleanerSettings QSpinBox {
+    background: rgba(43, 47, 55, 236);
+    color: #F8FAFC;
+    border: 1px solid rgba(255, 255, 255, 42);
+    border-radius: 8px;
+    padding: 4px 8px;
+}
+QWidget#DesktopCleanerSettings QPushButton:hover {
+    background: rgba(61, 66, 76, 242);
+    border-color: rgba(255, 255, 255, 74);
+}
+QWidget#DesktopCleanerSettings QPushButton:pressed {
+    background: rgba(217, 154, 189, 220);
+    color: #111318;
+}
+QWidget#DesktopCleanerSettings QPushButton:checked {
+    background: rgba(217, 154, 189, 120);
+    color: #F8FAFC;
+    border-color: rgba(217, 154, 189, 220);
+}
+QWidget#DesktopCleanerSettings QLineEdit:focus,
+QWidget#DesktopCleanerSettings QComboBox:focus,
+QWidget#DesktopCleanerSettings QSpinBox:focus {
+    border-color: rgba(248, 250, 252, 170);
+    color: #F8FAFC;
+}
+"""
+
+
+class SettingsTitleBar(QWidget):
+    def __init__(self, window: QWidget) -> None:
+        super().__init__(window)
+        self._window = window
+        self._drag_start = QPoint()
+        self._window_start = QPoint()
+        self.setObjectName("SettingsTitleBar")
+        self.setFixedHeight(48)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 10, 0)
+        layout.setSpacing(10)
+
+        icon_label = QLabel(self)
+        icon_label.setObjectName("SettingsTitleIcon")
+        icon_label.setFixedSize(32, 32)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon).pixmap(18, 18))
+        self.title_label = QLabel("设置", self)
+        self.title_label.setObjectName("SettingsTitleText")
+        layout.addWidget(icon_label)
+        layout.addWidget(self.title_label)
+        layout.addStretch(1)
+
+        self.minimize_button = self._make_button("−", "最小化")
+        self.maximize_button = self._make_button("□", "最大化")
+        self.close_button = self._make_button("×", "关闭设置")
+        self.close_button.setObjectName("SettingsCloseButton")
+        self.minimize_button.clicked.connect(window.showMinimized)
+        self.maximize_button.clicked.connect(self._toggle_maximized)
+        self.close_button.clicked.connect(window.close)
+        layout.addWidget(self.minimize_button)
+        layout.addWidget(self.maximize_button)
+        layout.addWidget(self.close_button)
+
+    def _make_button(self, text: str, tooltip: str) -> QPushButton:
+        button = QPushButton(text, self)
+        button.setObjectName("SettingsTitleButton")
+        button.setToolTip(tooltip)
+        button.setFixedSize(38, 32)
+        return button
+
+    def _toggle_maximized(self) -> None:
+        if self._window.isMaximized():
+            self._window.showNormal()
+            self.maximize_button.setText("□")
+        else:
+            self._window.showMaximized()
+            self.maximize_button.setText("❐")
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.globalPosition().toPoint()
+            self._window_start = self._window.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton and not self._window.isMaximized():
+            self._window.move(self._window_start + event.globalPosition().toPoint() - self._drag_start)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
 
 class ScreenLayoutWidget(QWidget):
@@ -550,6 +768,7 @@ def _history_reason_label(reason: str) -> str:
         "delete-item-tab": "删除标签",
         "detach-tab": "拆出标签",
         "geometry-change": "移动或缩放",
+        "layout-adjustment": "调整面板",
         "merge-group": "合并面板",
         "move": "移动或缩放",
         "panel-change": "面板调整",
@@ -585,6 +804,10 @@ class SettingsWindow(QWidget):
     diagnostics_refresh_takeover_requested = Signal()
     diagnostics_open_logs_requested = Signal()
     diagnostics_export_requested = Signal()
+    update_check_requested = Signal()
+    update_download_requested = Signal()
+    update_open_folder_requested = Signal()
+    update_replace_requested = Signal()
 
     def __init__(
         self,
@@ -599,6 +822,10 @@ class SettingsWindow(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        app = QApplication.instance()
+        if app is not None:
+            app.setQuitOnLastWindowClosed(False)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self._config = config
         self._group_id = group_id or config.panel_groups[0].id
         if screen_infos is None and screen_options is not None:
@@ -624,6 +851,9 @@ class SettingsWindow(QWidget):
         self._appearance_save_timer.setSingleShot(True)
         self._appearance_save_timer.setInterval(250)
         self._appearance_save_timer.timeout.connect(self._emit_appearance_save_requested)
+        self.setObjectName("DesktopCleanerSettings")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(_SETTINGS_WINDOW_STYLE)
         self.setWindowTitle("设置")
         self.resize(820, 600)
 
@@ -650,13 +880,38 @@ class SettingsWindow(QWidget):
         body.addWidget(self._section_list)
         body.addWidget(self._pages, stretch=1)
 
+        self._title_bar = SettingsTitleBar(self)
+        self._title_label = self._title_bar.title_label
+        self._title_minimize_button = self._title_bar.minimize_button
+        self._title_maximize_button = self._title_bar.maximize_button
+        self._title_close_button = self._title_bar.close_button
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._title_bar)
         layout.addLayout(body)
         layout.addWidget(save_button, alignment=Qt.AlignmentFlag.AlignRight)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.hide()
         event.ignore()
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        # 顶级 QWidget 不会自动绘制 QSS 的 background,
+        # 叠加 WA_TranslucentBackground 后整窗透明,这里手动画磨砂底 + 圆角边框。
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 18, 18)
+        painter.fillPath(path, QColor(9, 11, 15, 214))
+        pen = QPen(QColor(255, 255, 255, 40))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        super().paintEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -1140,13 +1395,16 @@ class SettingsWindow(QWidget):
         definition: WidgetDefinition,
         parent: QWidget,
     ) -> QFrame:
+        visual = definition.visual
         card = QFrame(parent)
         card.setFixedSize(definition.default_width, definition.default_height)
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
-            f"QFrame {{ background: #2f2538; border: 1px solid {definition.accent_color}; border-radius: 10px; }}"
+            "QFrame { "
+            f"background: {visual.card_background}; border: 1px solid {visual.accent_color}; "
+            "border-radius: 12px; }"
             "QLabel { color: #ffffff; background: transparent; }"
-            f"QPushButton {{ background: {definition.accent_color}; color: #111111; border-radius: 8px; font-weight: 700; }}"
+            f"QPushButton {{ background: {visual.accent_color}; color: #111111; border-radius: 8px; font-weight: 700; }}"
         )
         card_layout = QVBoxLayout(card)
         header = QHBoxLayout()
@@ -1166,9 +1424,12 @@ class SettingsWindow(QWidget):
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview.setFixedHeight(108)
         preview.setStyleSheet(
-            "font-size: 24px; font-weight: 700; color: #ffe4f0; "
-            "background: #51344a; border-radius: 10px; padding: 12px;"
+            f"font-size: 24px; font-weight: 700; color: {visual.foreground}; "
+            f"background: {visual.background}; "
+            "border-radius: 12px; padding: 12px;"
         )
+        if definition.id == "clock":
+            self._clock_widget_preview = preview
         card_layout.addWidget(preview)
         return card
 
@@ -1271,6 +1532,39 @@ class SettingsWindow(QWidget):
         takeover_layout.addWidget(self._takeover_status_label)
         layout.addWidget(takeover_group)
 
+        update_group = QGroupBox("软件更新", page)
+        self._update_group = update_group
+        update_layout = QVBoxLayout(update_group)
+        self._update_current_version_label = QLabel(
+            f"当前版本：{APP_VERSION}",
+            update_group,
+        )
+        self._update_latest_version_label = QLabel("最新版本：未检查", update_group)
+        self._update_status_label = QLabel("点击检查更新。", update_group)
+        self._update_check_button = QPushButton("检查更新", update_group)
+        self._update_download_button = QPushButton("下载更新", update_group)
+        self._update_open_folder_button = QPushButton("打开更新文件夹", update_group)
+        self._update_replace_button = QPushButton("替换并重启", update_group)
+        self._update_download_button.setEnabled(False)
+        self._update_replace_button.setEnabled(False)
+        self._update_check_button.clicked.connect(self.update_check_requested.emit)
+        self._update_download_button.clicked.connect(self.update_download_requested.emit)
+        self._update_open_folder_button.clicked.connect(
+            self.update_open_folder_requested.emit
+        )
+        self._update_replace_button.clicked.connect(self.update_replace_requested.emit)
+        update_button_row = QHBoxLayout()
+        update_button_row.addWidget(self._update_check_button)
+        update_button_row.addWidget(self._update_download_button)
+        update_button_row.addWidget(self._update_open_folder_button)
+        update_button_row.addWidget(self._update_replace_button)
+        update_button_row.addStretch(1)
+        update_layout.addWidget(self._update_current_version_label)
+        update_layout.addWidget(self._update_latest_version_label)
+        update_layout.addWidget(self._update_status_label)
+        update_layout.addLayout(update_button_row)
+        layout.addWidget(update_group)
+
         recovery_group = QGroupBox("恢复工具", page)
         recovery_layout = QHBoxLayout(recovery_group)
         recovery_layout.addStretch(1)
@@ -1291,6 +1585,31 @@ class SettingsWindow(QWidget):
         layout.addStretch(1)
         self._update_takeover_status_label()
         return page
+
+    def set_update_state(
+        self,
+        *,
+        current_version: str = APP_VERSION,
+        latest_version: str = "",
+        message: str = "",
+        update_available: bool = False,
+        download_ready: bool = False,
+        can_replace: bool = False,
+        checking: bool = False,
+        downloading: bool = False,
+    ) -> None:
+        if not hasattr(self, "_update_current_version_label"):
+            return
+        busy = checking or downloading
+        self._update_current_version_label.setText(f"当前版本：{current_version}")
+        self._update_latest_version_label.setText(
+            f"最新版本：{latest_version or '未检查'}"
+        )
+        self._update_status_label.setText(message or "点击检查更新。")
+        self._update_check_button.setEnabled(not busy)
+        self._update_download_button.setEnabled(update_available and not busy)
+        self._update_open_folder_button.setEnabled(not busy)
+        self._update_replace_button.setEnabled(download_ready and can_replace and not busy)
 
     def set_history_snapshots(self, snapshots: list[object]) -> None:
         self._history_snapshots = list(snapshots)

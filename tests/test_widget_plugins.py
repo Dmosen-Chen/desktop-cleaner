@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel
 
-from desktop_tidy.widgets.models import WidgetDefinition
+from desktop_tidy.widgets.models import WidgetDefinition, WidgetVisualPreset
 from desktop_tidy.widgets.registry import BuiltinWidgetRegistry as ModularWidgetRegistry
 from desktop_tidy.ui.widget_plugins import BuiltinWidgetRegistry, UnknownWidgetPlugin
 
@@ -53,6 +53,34 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(clock.default_height, 190)
         self.assertEqual(clock.max_width, 340)
         self.assertEqual(clock.max_height, 190)
+
+    def test_clock_definition_exposes_reusable_visual_metadata(self) -> None:
+        registry = ModularWidgetRegistry()
+
+        clock = registry.get("clock").definition()
+
+        self.assertIsInstance(clock.visual, WidgetVisualPreset)
+        self.assertEqual(clock.visual.preset_id, "quiet-clock")
+        self.assertEqual(clock.visual_preset, "quiet-clock")
+        self.assertEqual(clock.accent_color, clock.visual.accent_color)
+        self.assertEqual(clock.preview_background, clock.visual.background)
+        self.assertEqual(clock.default_width, clock.visual.recommended_width)
+        self.assertEqual(clock.default_height, clock.visual.recommended_height)
+        self.assertTrue(clock.preview_background)
+        self.assertTrue(clock.preview_foreground)
+        self.assertTrue(clock.preview_secondary_foreground)
+        self.assertIn("#", clock.preview_background)
+
+    def test_clock_widget_keeps_transparent_desktop_style(self) -> None:
+        registry = ModularWidgetRegistry()
+        plugin = registry.get("clock")
+        definition = plugin.definition()
+
+        widget = plugin.create_widget(plugin.default_settings())
+
+        self.assertNotIn(definition.visual.background, widget.styleSheet())
+        self.assertEqual(widget.minimumWidth(), definition.visual.min_width)
+        self.assertEqual(widget.maximumWidth(), definition.visual.max_width)
 
 
 if __name__ == "__main__":

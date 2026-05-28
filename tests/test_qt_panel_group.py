@@ -178,6 +178,10 @@ class PanelGroupWidgetTests(unittest.TestCase):
         self.assertFalse(widget.item_grid.isVisible())
         self.assertTrue(any(":" in text for text in visible_label_texts(widget)))
         self.assertFalse(widget.organize_button.isEnabled())
+        clock_widget = widget.findChild(QWidget, "ClockWidgetRoot")
+        self.assertIsNotNone(clock_widget)
+        self.assertNotIn("qlineargradient", clock_widget.styleSheet())
+        self.assertNotIn("border-radius: 16px", clock_widget.styleSheet())
 
     def test_tab_button_click_switches_active_tab_without_drag(self) -> None:
         """Plain tab click must switch content; drag-detection must not swallow clicks."""

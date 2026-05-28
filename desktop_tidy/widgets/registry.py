@@ -6,7 +6,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from desktop_tidy.widgets.clock import ClockWidgetPlugin
-from desktop_tidy.widgets.models import WidgetDefinition, WidgetPlugin
+from desktop_tidy.widgets.models import WidgetDefinition, WidgetPlugin, WidgetVisualPreset
+
+_UNKNOWN_VISUAL = WidgetVisualPreset(
+    preset_id="unknown",
+    accent_color="#6b7280",
+    background="#2f343b",
+    foreground="#eef2f7",
+    secondary_foreground="rgba(255,255,255,0.70)",
+    card_background="rgba(36,40,46,0.90)",
+)
 
 
 class UnknownWidgetPlugin:
@@ -21,7 +30,7 @@ class UnknownWidgetPlugin:
             description="此功能面板当前不可用",
             preview_title="未知",
             preview_body=self.id,
-            accent_color="#6b7280",
+            visual=_UNKNOWN_VISUAL,
         )
 
     def default_settings(self) -> dict[str, object]:

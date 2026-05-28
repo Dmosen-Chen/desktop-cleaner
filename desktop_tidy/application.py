@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -36,9 +37,11 @@ from desktop_tidy.services.logging_setup import (
 )
 from desktop_tidy.services.screens import available_screen_geometries, available_screens
 from desktop_tidy.services.startup import StartupService
+from desktop_tidy.services.updates import DownloadResult, UpdateInfo, UpdateService
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 from desktop_tidy.ui.tray import TrayController
+from desktop_tidy.version import APP_VERSION
 
 
 APP_DIR_NAME = "DesktopCleaner"
@@ -104,6 +107,7 @@ class DesktopCleanerApplication:
         tray_controller: TrayController | None = None,
         activation_server: ActivationServer | None = None,
         history_store: LayoutHistoryStore | None = None,
+        update_service: UpdateService | None = None,
     ) -> None:
         should_configure_logging = config is None or store is not None
         if config is None:
@@ -143,6 +147,12 @@ class DesktopCleanerApplication:
             self.model.config
         )
         self.diagnostics_service = self._create_diagnostics_service()
+        self.update_service = update_service or UpdateService(
+            updates_dir=self.store.path.parent / "updates"
+        )
+        self._latest_update_info: UpdateInfo | None = None
+        self._downloaded_update: DownloadResult | None = None
+        self._update_status_message = "点击检查更新。"
         self._settings_window: SettingsWindow | None = None
         self.watcher = DesktopWatcher(self.index)
         self.watcher.changed.connect(self._on_desktop_changed)
@@ -219,8 +229,9 @@ class DesktopCleanerApplication:
             "settings-preview-move",
             "tab-reorder",
             "panel-change",
+            "settings-save",
         }:
-            return reason
+            return "layout-adjustment"
         return ""
 
     def _on_about_to_quit(self) -> None:
@@ -540,6 +551,18 @@ class DesktopCleanerApplication:
             self._settings_window.diagnostics_export_requested.connect(
                 self._on_diagnostics_export_requested
             )
+            self._settings_window.update_check_requested.connect(
+                self._on_update_check_requested
+            )
+            self._settings_window.update_download_requested.connect(
+                self._on_update_download_requested
+            )
+            self._settings_window.update_open_folder_requested.connect(
+                self._on_update_open_folder_requested
+            )
+            self._settings_window.update_replace_requested.connect(
+                self._on_update_replace_requested
+            )
         else:
             self._settings_window.set_configuration(
                 self.model.config,
@@ -547,6 +570,7 @@ class DesktopCleanerApplication:
             )
         self._settings_window.set_history_snapshots(self.history_store.load())
         self._refresh_settings_diagnostics()
+        self._refresh_settings_update_state()
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
@@ -822,6 +846,123 @@ class DesktopCleanerApplication:
             self._refresh_settings_diagnostics()
             self._settings_window.show_diagnostics_message(f"{result.message}{detail}")
         self._notify_user(result.message, result.details or result.message)
+
+    def _refresh_settings_update_state(self) -> None:
+        if self._settings_window is None:
+            return
+        info = self._latest_update_info
+        downloaded_path = (
+            self._downloaded_update.path
+            if self._downloaded_update is not None
+            else None
+        )
+        download_ready = downloaded_path is not None and downloaded_path.is_file()
+        self._settings_window.set_update_state(
+            current_version=APP_VERSION,
+            latest_version=info.latest_version if info is not None else "",
+            message=self._update_status_message,
+            update_available=bool(info and info.available),
+            download_ready=download_ready,
+            can_replace=download_ready and self._is_frozen_executable(),
+        )
+
+    def _on_update_check_requested(self) -> None:
+        if self._settings_window is not None:
+            self._settings_window.set_update_state(
+                current_version=APP_VERSION,
+                message="正在检查更新...",
+                checking=True,
+            )
+        try:
+            self._latest_update_info = self.update_service.check_latest()
+            self._downloaded_update = None
+            if self._latest_update_info.available:
+                self._update_status_message = (
+                    f"发现新版本 {self._latest_update_info.latest_version}。"
+                )
+            else:
+                self._update_status_message = "已经是最新版本。"
+        except Exception as exc:
+            self._latest_update_info = None
+            self._downloaded_update = None
+            log_exception("check application update", exc)
+            self._update_status_message = f"检查更新失败：{exc}"
+            self._notify_user("检查更新失败", str(exc))
+        self._refresh_settings_update_state()
+
+    def _on_update_download_requested(self) -> None:
+        if self._latest_update_info is None:
+            self._on_update_check_requested()
+            if self._latest_update_info is None:
+                return
+        if self._settings_window is not None:
+            self._settings_window.set_update_state(
+                current_version=APP_VERSION,
+                latest_version=self._latest_update_info.latest_version,
+                message="正在下载更新...",
+                update_available=True,
+                downloading=True,
+            )
+        try:
+            self._downloaded_update = None
+            self._downloaded_update = self.update_service.download(
+                self._latest_update_info
+            )
+            if self._is_frozen_executable():
+                self._update_status_message = (
+                    f"下载完成：{self._downloaded_update.path}"
+                )
+            else:
+                self._update_status_message = (
+                    "下载完成。开发模式下请手动替换或打开更新文件夹。"
+                )
+        except Exception as exc:
+            self._downloaded_update = None
+            log_exception("download application update", exc)
+            self._update_status_message = f"下载更新失败：{exc}"
+            self._notify_user("下载更新失败", str(exc))
+        self._refresh_settings_update_state()
+
+    def _on_update_open_folder_requested(self) -> None:
+        try:
+            self.update_service.updates_dir.mkdir(parents=True, exist_ok=True)
+            open_item(self.update_service.updates_dir)
+            self._update_status_message = f"已打开：{self.update_service.updates_dir}"
+        except Exception as exc:
+            log_exception("open update folder", exc)
+            self._update_status_message = f"打开更新文件夹失败：{exc}"
+            self._notify_user("打开更新文件夹失败", str(exc))
+        self._refresh_settings_update_state()
+
+    def _on_update_replace_requested(self) -> None:
+        if not self._is_frozen_executable():
+            self._update_status_message = "当前是开发模式，不能自动替换。"
+            self._refresh_settings_update_state()
+            return
+        if self._downloaded_update is None or not self._downloaded_update.path.is_file():
+            self._update_status_message = "请先下载更新。"
+            self._refresh_settings_update_state()
+            return
+        try:
+            script = self.update_service.prepare_replace(
+                self._downloaded_update.path,
+                Path(sys.executable).resolve(),
+            )
+            subprocess.Popen(
+                ["cmd.exe", "/c", str(script)],
+                cwd=str(self.update_service.updates_dir),
+                close_fds=True,
+            )
+            self._update_status_message = "正在替换并重启..."
+            self._quit_from_tray()
+        except Exception as exc:
+            log_exception("prepare application update replacement", exc)
+            self._update_status_message = f"准备替换失败：{exc}"
+            self._notify_user("准备替换失败", str(exc))
+            self._refresh_settings_update_state()
+
+    def _is_frozen_executable(self) -> bool:
+        return bool(getattr(sys, "frozen", False))
 
     def _on_desktop_changed(self, _changes: IndexChanges) -> None:
         if _changes.added:
