@@ -9,6 +9,11 @@ from desktop_tidy.domain.models import Configuration, PanelGroup
 from desktop_tidy.services.screens import ScreenInfo
 from desktop_tidy.ui.panel_preview.model import PanelPreviewModel
 
+_OUTER_MARGIN = 12
+_PREVIEW_GAP = 10
+_DETAIL_MIN_HEIGHT = 96
+_DETAIL_MAX_HEIGHT = 138
+
 
 def safe_screen_infos(screens: list[ScreenInfo]) -> list[ScreenInfo]:
     valid = [
@@ -59,7 +64,7 @@ def screen_preview_rects(
 ) -> dict[str, QRect]:
     valid = safe_screen_infos(screens)
     desktop = _desktop_union(valid)
-    inner = bounds.adjusted(18, 18, -18, -18)
+    inner = map_preview_rect(bounds).adjusted(12, 12, -12, -12)
     if inner.width() <= 0 or inner.height() <= 0:
         return {}
     scale = min(
@@ -80,6 +85,22 @@ def screen_preview_rects(
             max(28, int(round(geometry.height() * scale))),
         )
     return rects
+
+
+def map_preview_rect(bounds: QRect) -> QRect:
+    inner = bounds.adjusted(_OUTER_MARGIN, _OUTER_MARGIN, -_OUTER_MARGIN, -_OUTER_MARGIN)
+    if inner.height() < 180:
+        return inner
+    detail_height = min(_DETAIL_MAX_HEIGHT, max(_DETAIL_MIN_HEIGHT, int(inner.height() * 0.34)))
+    return QRect(inner.x(), inner.y(), inner.width(), max(60, inner.height() - detail_height - _PREVIEW_GAP))
+
+
+def selected_panel_detail_rect(bounds: QRect) -> QRect:
+    inner = bounds.adjusted(_OUTER_MARGIN, _OUTER_MARGIN, -_OUTER_MARGIN, -_OUTER_MARGIN)
+    if inner.height() < 180:
+        return QRect()
+    top = map_preview_rect(bounds).bottom() + 1 + _PREVIEW_GAP
+    return QRect(inner.x(), top, inner.width(), max(0, inner.bottom() - top + 1))
 
 
 def group_preview_rect(group: PanelGroup, screen_rect: QRect) -> QRect:
@@ -148,6 +169,31 @@ def tab_preview_rects(
     return rects
 
 
+def detail_tab_preview_rects(
+    detail_rect: QRect,
+    tab_ids: list[str],
+    selected_tab_id: str = "",
+    active_tab_id: str = "",
+) -> dict[str, QRect]:
+    if detail_rect.isNull() or not tab_ids:
+        return {}
+    visible_ids = _summary_tab_ids_from_values(tab_ids, selected_tab_id, active_tab_id)
+    gap = 8
+    tab_height = 24
+    max_tabs_width = max(1, detail_rect.width() - 30)
+    usable_width = max(1, max_tabs_width - gap * (len(visible_ids) - 1))
+    tab_width = max(58, min(104, usable_width // max(1, len(visible_ids))))
+    rects: dict[str, QRect] = {}
+    x = detail_rect.x() + 14
+    y = detail_rect.y() + 50
+    for tab_id in visible_ids:
+        if x + tab_width > detail_rect.right() - 14:
+            break
+        rects[tab_id] = QRect(x, y, tab_width, tab_height)
+        x += tab_width + gap
+    return rects
+
+
 class PanelPreviewRenderer:
     """Paints desktop screens and translucent panels using one visual language."""
 
@@ -179,22 +225,40 @@ class PanelPreviewRenderer:
         group = next((entry for entry in self.model.groups if entry.id == tab.group_id), None)
         if group is None:
             return QRect()
-        return tab_preview_rects(
-            self.group_rect(group.id),
+        return detail_tab_preview_rects(
+            self.selected_panel_detail_rect(),
             group.tab_ids,
             self.model.selected_tab_id,
             group.active_tab_id,
         ).get(tab_id, QRect())
 
+    def map_rect(self) -> QRect:
+        return map_preview_rect(QRect(QPoint(0, 0), self.size))
+
+    def selected_panel_detail_rect(self) -> QRect:
+        return selected_panel_detail_rect(QRect(QPoint(0, 0), self.size))
+
+    def selected_group(self) -> PanelGroup | None:
+        if self.model.selected_group_id:
+            group = next((entry for entry in self.model.groups if entry.id == self.model.selected_group_id), None)
+            if group is not None:
+                return group
+        return self.model.groups[0] if self.model.groups else None
+
     def render(self) -> QPixmap:
         pixmap = QPixmap(self.size)
         pixmap.fill(QColor("#191919"))
         painter = QPainter(pixmap)
+        self.paint(painter)
+        painter.end()
+        return pixmap
+
+    def paint(self, painter: QPainter) -> None:
+        painter.fillRect(QRect(QPoint(0, 0), self.size), QColor("#191919"))
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._paint_screens(painter)
         self._paint_groups(painter)
-        painter.end()
-        return pixmap
+        self._paint_selected_group_detail(painter)
 
     def _paint_screens(self, painter: QPainter) -> None:
         screen_rects = self.screen_rects()
@@ -217,10 +281,9 @@ class PanelPreviewRenderer:
             )
 
     def _paint_groups(self, painter: QPainter) -> None:
-        tabs_by_id = {tab.id: tab for tab in self.model.tabs}
         group_order = list(self.model.groups)
         group_order.sort(key=lambda entry: entry.id == self.model.selected_group_id)
-        font_metrics = QFontMetrics(painter.font())
+        screens = {screen.screen_id: screen for screen in safe_screen_infos(self.model.screens)}
         for index, group in enumerate(group_order):
             rect = self.group_rect(group.id)
             if rect.isNull():
@@ -231,46 +294,68 @@ class PanelPreviewRenderer:
             selected = group.id == self.model.selected_group_id
             painter.setPen(QPen(QColor("#f0b7d5" if selected else "#9a9a9a"), 2 if selected else 1))
             painter.drawRoundedRect(rect, 10, 10)
-
             painter.setPen(QColor("#ffffff"))
-            title = group.name or f"Panel {index + 1}"
-            title = font_metrics.elidedText(title, Qt.TextElideMode.ElideRight, max(10, rect.width() - 20))
+            screen_label = screens.get(group.screen_id)
+            label = str(index + 1) if screen_label is None else str(index + 1)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _paint_selected_group_detail(self, painter: QPainter) -> None:
+        detail_rect = self.selected_panel_detail_rect()
+        group = self.selected_group()
+        if detail_rect.isNull() or group is None:
+            return
+        tabs_by_id = {tab.id: tab for tab in self.model.tabs}
+        base = QColor(group.appearance.background_color or "#4B5563")
+        base.setAlphaF(max(0.20, min(0.88, group.appearance.background_opacity)))
+        painter.setBrush(base)
+        painter.setPen(QPen(QColor("#f0b7d5"), 1))
+        painter.drawRoundedRect(detail_rect, 10, 10)
+
+        font = painter.font()
+        title_font = QFontMetrics(font)
+        painter.setPen(QColor("#ffffff"))
+        title = title_font.elidedText(group.name or "Panel", Qt.TextElideMode.ElideRight, detail_rect.width() - 28)
+        painter.drawText(
+            QRect(detail_rect.x() + 14, detail_rect.y() + 10, detail_rect.width() - 28, 24),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            title,
+        )
+        current = tabs_by_id.get(group.active_tab_id)
+        if current is not None:
+            painter.setPen(QColor("#d8d8d8"))
             painter.drawText(
-                QRect(rect.x() + 10, rect.y() + 7, max(10, rect.width() - 20), 18),
+                QRect(detail_rect.x() + 14, detail_rect.y() + 30, detail_rect.width() - 28, 18),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                title,
+                f"当前：{current.name}",
             )
-            rects = tab_preview_rects(
-                rect,
-                group.tab_ids,
-                self.model.selected_tab_id,
-                group.active_tab_id,
+        rects = detail_tab_preview_rects(
+            detail_rect,
+            group.tab_ids,
+            self.model.selected_tab_id,
+            group.active_tab_id,
+        )
+        metrics = QFontMetrics(painter.font())
+        for tab_id, tab_rect in rects.items():
+            tab = tabs_by_id.get(tab_id)
+            if tab is None:
+                continue
+            checked = tab_id == self.model.selected_tab_id or (
+                not self.model.selected_tab_id and tab_id == group.active_tab_id
             )
-            for tab_id, tab_rect in rects.items():
-                tab = tabs_by_id.get(tab_id)
-                if tab is None:
-                    continue
-                checked = tab_id == self.model.selected_tab_id or (
-                    not self.model.selected_tab_id and tab_id == group.active_tab_id
-                )
-                painter.setBrush(QColor("#d99abd" if checked else "#3a3a3a"))
-                painter.setPen(QPen(QColor("#ffffff" if checked else "#666666"), 1))
-                painter.drawRoundedRect(tab_rect, 5, 5)
-                painter.setPen(QColor("#111111" if checked else "#ffffff"))
-                label = font_metrics.elidedText(
-                    tab.name,
-                    Qt.TextElideMode.ElideRight,
-                    max(10, tab_rect.width() - 8),
-                )
-                painter.drawText(tab_rect.adjusted(4, 0, -4, 0), Qt.AlignmentFlag.AlignCenter, label)
-            overflow = len(group.tab_ids) - len(rects)
-            if overflow > 0:
-                painter.setPen(QColor("#ffffff"))
-                painter.drawText(
-                    rect.adjusted(8, 28, -8, -8),
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
-                    f"+{overflow}",
-                )
+            painter.setBrush(QColor("#d99abd" if checked else "#3a3a3a"))
+            painter.setPen(QPen(QColor("#ffffff" if checked else "#666666"), 1))
+            painter.drawRoundedRect(tab_rect, 6, 6)
+            painter.setPen(QColor("#111111" if checked else "#ffffff"))
+            label = metrics.elidedText(tab.name, Qt.TextElideMode.ElideRight, max(10, tab_rect.width() - 10))
+            painter.drawText(tab_rect.adjusted(5, 0, -5, 0), Qt.AlignmentFlag.AlignCenter, label)
+        overflow = len(group.tab_ids) - len(rects)
+        if overflow > 0:
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(
+                QRect(detail_rect.right() - 60, detail_rect.y() + 52, 46, 24),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                f"+{overflow}",
+            )
 
 
 def render_layout_preview_pixmap(

@@ -190,12 +190,15 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(preview.overflow_label_for_group(config.panel_groups[0].id), "+3")
         self.assertIn("图片", preview.visible_tab_labels(config.panel_groups[0].id))
         group_rect = preview.group_rect(second_group.id)
-        tab_rect = preview.tab_rect(second_tab.id)
         self.assertGreater(group_rect.width(), 0)
-        self.assertGreater(tab_rect.width(), 0)
 
         QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=group_rect.center())
         self.assertEqual(window.selected_group_id(), second_group.id)
+        tab_rect = preview.tab_rect(second_tab.id)
+        detail_rect = preview.selected_panel_detail_rect()
+        self.assertGreater(tab_rect.width(), 0)
+        self.assertTrue(detail_rect.contains(tab_rect.center()))
+        self.assertFalse(group_rect.contains(tab_rect.center()))
 
         QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=tab_rect.center())
         self.assertEqual(window.selected_group_id(), second_group.id)
@@ -242,6 +245,24 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertTrue(primary_screen.contains(primary_panel.center()))
         self.assertNotEqual(secondary_panel.center(), primary_panel.center())
 
+    def test_panel_preview_uses_map_for_positions_and_detail_card_for_labels(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        config.panel_groups[0].geometry = PanelGeometry(0.06, 0.12, 0.38, 0.36)
+        preview = PanelPreviewWidget(config, [ScreenInfo("primary", "主屏", QRect(0, 0, 1920, 1080))])
+        preview.resize(900, 360)
+        preview.show()
+        type(self).app.processEvents()
+
+        map_rect = preview.map_rect()
+        detail_rect = preview.selected_panel_detail_rect()
+        group_rect = preview.group_rect(config.panel_groups[0].id)
+        tab_rect = preview.tab_rect(config.panel_groups[0].active_tab_id)
+
+        self.assertTrue(map_rect.contains(group_rect.center()))
+        self.assertLess(group_rect.bottom(), detail_rect.top())
+        self.assertTrue(detail_rect.contains(tab_rect.center()))
+        self.assertGreater(detail_rect.width(), group_rect.width())
+
     def test_panel_layout_preview_reorders_tabs_live_and_final(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
@@ -276,6 +297,9 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertNotIn("新建面板", window._rules_page_text())
         self.assertNotIn("新建标签", window._rules_page_text())
         self.assertIn("图片", window._rule_preset_buttons)
+        self.assertLessEqual(window._rule_detail_layout.spacing(), 8)
+        self.assertLessEqual(window._rule_detail_card.maximumHeight(), 520)
+        self.assertGreaterEqual(window._rule_preset_flow.row_count_for_width(260), 2)
         window._rule_list.setCurrentRow(2)
         editor = window._rule_extension_editor
         window._rule_preset_buttons["代码"].click()
@@ -313,6 +337,10 @@ class SettingsWindowTests(unittest.TestCase):
         type(self).app.processEvents()
         self.assertTrue(window._rule_extension_editor.is_flow_layout_enabled())
         self.assertGreaterEqual(window._rule_extension_editor.chip_row_count_for_width(360), 2)
+        self.assertEqual(
+            window._rule_extension_editor.scroll_height_range(),
+            (112, 112),
+        )
         stable_top_levels = set(QApplication.topLevelWidgets())
         for row in range(window._rule_list.count()):
             window._rule_list.setCurrentRow(row)
@@ -417,9 +445,9 @@ class SettingsWindowTests(unittest.TestCase):
         )
 
         window.set_history_snapshots([snapshot])
-        self.assertGreaterEqual(window._history_card_preview_size.width(), 260)
-        self.assertGreaterEqual(window._history_card_preview_size.height(), 145)
-        self.assertIn(window._history_grid_columns, (2, 3))
+        self.assertGreaterEqual(window._history_card_preview_size.width(), 420)
+        self.assertGreaterEqual(window._history_card_preview_size.height(), 240)
+        self.assertIn(window._history_grid_columns, (1, 2))
         self.assertEqual(len(window._history_cards), 1)
         self.assertIn("文件夹", window._history_cards[0].preview_tab_names)
         self.assertIn("文档", window._history_cards[0].preview_tab_names)

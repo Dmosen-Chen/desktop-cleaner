@@ -11,10 +11,10 @@ from desktop_tidy.services.screens import ScreenInfo
 from desktop_tidy.ui.panel_preview.model import PanelPreviewModel
 from desktop_tidy.ui.panel_preview.renderer import (
     PanelPreviewRenderer,
+    detail_tab_preview_rects,
     safe_screen_infos,
     screen_preview_rects,
     screen_z_order,
-    tab_preview_rects,
 )
 
 
@@ -72,6 +72,12 @@ class PanelPreviewWidget(QWidget):
     def screen_rect(self, screen_id: str) -> QRect:
         return screen_preview_rects(self._screens, self.rect(), self._focused_screen_id).get(screen_id, QRect())
 
+    def map_rect(self) -> QRect:
+        return self._renderer().map_rect()
+
+    def selected_panel_detail_rect(self) -> QRect:
+        return self._renderer().selected_panel_detail_rect()
+
     def set_selected_screen(self, screen_id: str) -> None:
         valid_ids = {screen.screen_id for screen in self._screens}
         if screen_id in valid_ids:
@@ -103,8 +109,8 @@ class PanelPreviewWidget(QWidget):
             return []
         tabs_by_id = {tab.id: tab for tab in self._config.panel_tabs}
         visible_ids = list(
-            tab_preview_rects(
-                self.group_rect(group_id),
+            detail_tab_preview_rects(
+                self.selected_panel_detail_rect(),
                 group.tab_ids,
                 self._selected_tab_id,
                 group.active_tab_id,
@@ -117,8 +123,8 @@ class PanelPreviewWidget(QWidget):
         if group is None:
             return ""
         visible_count = len(
-            tab_preview_rects(
-                self.group_rect(group_id),
+            detail_tab_preview_rects(
+                self.selected_panel_detail_rect(),
                 group.tab_ids,
                 self._selected_tab_id,
                 group.active_tab_id,
@@ -129,7 +135,7 @@ class PanelPreviewWidget(QWidget):
 
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         painter = QPainter(self)
-        painter.drawPixmap(self.rect(), self._renderer().render())
+        self._renderer().paint(painter)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -251,8 +257,8 @@ class PanelPreviewWidget(QWidget):
         group = next((entry for entry in self._config.panel_groups if entry.id == group_id), None)
         if group is None:
             return -1
-        rects = tab_preview_rects(
-            self.group_rect(group_id),
+        rects = detail_tab_preview_rects(
+            self.selected_panel_detail_rect(),
             group.tab_ids,
             self._selected_tab_id,
             group.active_tab_id,
