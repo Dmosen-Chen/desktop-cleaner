@@ -971,7 +971,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 {detached_group_id},
             )
 
-    def test_secondary_panel_settings_scope_appearance_to_that_group_only(self) -> None:
+    def test_settings_appearance_applies_to_all_panel_groups(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
@@ -1005,12 +1005,12 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             self.assertEqual(
                 app.model.group("group-default").appearance.background_color,
-                primary_color,
-                "settings opened from a secondary panel must not mutate panel_groups[0]",
+                saved_color,
+                "appearance settings are now global across panel groups",
             )
             self.assertAlmostEqual(
                 app.model.group("group-default").appearance.background_opacity,
-                0.60,
+                0.33,
             )
             self.assertEqual(
                 app.model.group(secondary_group_id).appearance.background_color,
@@ -1020,6 +1020,42 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 app.model.group(secondary_group_id).appearance.background_opacity,
                 0.33,
             )
+
+    def test_settings_appearance_live_change_updates_panel_and_saves_debounced(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            app.show()
+            type(self).app.processEvents()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(0.45, 0.20, 0.30, 0.35),
+            )
+            type(self).app.processEvents()
+            app._show_settings(app.panel.group_id)
+            settings = app._settings_window
+            self.assertIsNotNone(settings)
+
+            settings._select_color("#4B5563")
+            settings._opacity_slider.setValue(70)
+            type(self).app.processEvents()
+
+            group = app.model.group("group-default")
+            self.assertEqual(group.appearance.background_color, "#4B5563")
+            self.assertAlmostEqual(group.appearance.background_opacity, 0.70)
+            for panel_group in app.model.config.panel_groups:
+                self.assertEqual(panel_group.appearance.background_color, "#4B5563")
+                self.assertAlmostEqual(panel_group.appearance.background_opacity, 0.70)
+            self.assertAlmostEqual(app.panel.background_opacity, 0.70)
+
+            QTest.qWait(350)
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            for panel_group in payload["panel_groups"]:
+                appearance = panel_group["appearance"]
+                self.assertEqual(appearance["background_color"], "#4B5563")
+                self.assertAlmostEqual(appearance["background_opacity"], 0.70)
 
     def test_constructor_with_explicit_config_does_not_access_real_application_store(
         self,

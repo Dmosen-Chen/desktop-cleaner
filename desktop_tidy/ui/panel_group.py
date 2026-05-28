@@ -149,6 +149,7 @@ class PanelGroupWidget(QWidget):
     settings_requested = Signal(str)
     organize_requested = Signal(str)
     tab_detach_requested = Signal(str, object)
+    tab_reordered = Signal(str)
     group_merge_requested = Signal(str, int, int)
 
     def __init__(
@@ -171,6 +172,7 @@ class PanelGroupWidget(QWidget):
         self._tab_buttons: dict[str, QPushButton] = {}
         self._drag_tab_id = ""
         self._tab_drag_active = False
+        self._tab_reorder_dirty = False
         self._header_drag_active = False
         self._resize_active = False
         self._resize_region = _ResizeRegion.NONE
@@ -351,7 +353,10 @@ class PanelGroupWidget(QWidget):
             self._widget_content_type = widget_type
             self._widget_content.setParent(self._content_host)
             self._widget_content.setStyleSheet("background: transparent;")
-            self._content_layout.addWidget(self._widget_content)
+            self._content_layout.addWidget(
+                self._widget_content,
+                alignment=Qt.AlignmentFlag.AlignCenter,
+            )
         self._item_grid.hide()
         if self._widget_content is not None:
             self._widget_content.show()
@@ -745,6 +750,8 @@ class PanelGroupWidget(QWidget):
                 self._drag_tab_id,
                 (global_point.x(), global_point.y()),
             )
+        elif self._tab_drag_active:
+            self._reorder_dragged_tab_at(local, final=True)
         if self._tab_drag_active:
             self._suppress_click_tab_id = self._drag_tab_id
         self._clear_tab_drag()
@@ -764,6 +771,7 @@ class PanelGroupWidget(QWidget):
         self._hide_tab_detach_preview()
         self._drag_tab_id = ""
         self._tab_drag_active = False
+        self._tab_reorder_dirty = False
 
     def _tab_title_for_id(self, tab_id: str) -> str:
         tab = self._tabs_by_id.get(tab_id)
@@ -792,8 +800,56 @@ class PanelGroupWidget(QWidget):
         local = self.mapFromGlobal(global_point)
         if self.rect().contains(local):
             self._hide_tab_detach_preview()
+            self._reorder_dragged_tab_at(local, final=False)
             return
         self._show_tab_detach_preview(self._drag_tab_id, global_point)
+
+    def _target_tab_index_for_local(self, local_point: QPoint) -> int:
+        dragged_button = self._tab_buttons.get(self._drag_tab_id)
+        if dragged_button is not None:
+            dragged_local = dragged_button.mapFrom(self, local_point)
+            if dragged_button.rect().adjusted(-4, -4, 4, 4).contains(dragged_local):
+                return self._group.tab_ids.index(self._drag_tab_id)
+        final_order = [tab_id for tab_id in self._group.tab_ids if tab_id != self._drag_tab_id]
+        visible = [
+            (index, self._tab_buttons.get(tab_id))
+            for index, tab_id in enumerate(final_order)
+            if self._tab_buttons.get(tab_id) is not None
+        ]
+        if not visible:
+            return -1
+        for index, button in visible:
+            assert button is not None
+            center_x = button.mapTo(self, button.rect().center()).x()
+            if local_point.x() < center_x:
+                return index
+        return len(final_order)
+
+    def _reorder_dragged_tab_at(self, local_point: QPoint, *, final: bool) -> None:
+        if not self._drag_tab_id or len(self._group.tab_ids) <= 1:
+            return
+        target_index = self._target_tab_index_for_local(local_point)
+        if target_index < 0:
+            return
+        changed = False
+        if self._workspace is not None:
+            changed = self._workspace.reorder_tab(self._drag_tab_id, target_index)
+            self._group = self._workspace.group(self._group.id)
+            self._tabs_by_id = {tab.id: tab for tab in self._workspace.config.panel_tabs}
+        elif self._drag_tab_id in self._group.tab_ids:
+            current_index = self._group.tab_ids.index(self._drag_tab_id)
+            if current_index != target_index:
+                self._group.tab_ids.pop(current_index)
+                self._group.tab_ids.insert(target_index, self._drag_tab_id)
+                self._group.active_tab_id = self._drag_tab_id
+                changed = True
+        if changed:
+            self._tab_reorder_dirty = True
+            self._item_grid.set_active_tab_id(self._group.active_tab_id)
+            self._rebuild_tab_buttons()
+            self._render_active_content()
+        if final and self._tab_reorder_dirty:
+            self.tab_reordered.emit(self._group.id)
 
     def _resize_region_at(self, local_point: QPoint) -> _ResizeRegion:
         width = self.width()

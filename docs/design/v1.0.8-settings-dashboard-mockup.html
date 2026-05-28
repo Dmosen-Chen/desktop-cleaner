@@ -1,0 +1,833 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Desktop Cleaner v1.0.8 Settings Dashboard Mockup</title>
+  <style>
+    :root {
+      --bg: #141414;
+      --panel: #202020;
+      --panel-2: #292929;
+      --line: #3c3c3c;
+      --text: #f5f5f5;
+      --muted: #a7a7a7;
+      --accent: #e9a6c9;
+      --accent-2: #6fc6c8;
+      --amber: #e4bb68;
+      --green: #79c68b;
+      --danger: #d87373;
+      --shadow: 0 18px 48px rgba(0, 0, 0, .32);
+      font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0f0f0f;
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .window {
+      width: min(1480px, calc(100vw - 40px));
+      min-height: 900px;
+      margin: 20px auto;
+      border: 1px solid #3a3a3a;
+      background: var(--bg);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .titlebar {
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      background: #191919;
+      border-bottom: 1px solid #2f2f2f;
+    }
+
+    .title {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      font-weight: 700;
+    }
+
+    .app-mark {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      background:
+        linear-gradient(90deg, #6fc6c8 0 45%, transparent 45%),
+        linear-gradient(#e9a6c9 0 48%, #e4bb68 48%);
+      border: 1px solid rgba(255,255,255,.35);
+    }
+
+    .chrome { color: #9d9d9d; letter-spacing: 14px; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      min-height: 846px;
+    }
+
+    .sidebar {
+      background: #1c1c1c;
+      border-right: 1px solid #303030;
+      padding: 18px 14px;
+    }
+
+    .nav-title {
+      color: var(--muted);
+      font-size: 12px;
+      margin: 4px 10px 14px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+    }
+
+    .nav button {
+      height: 42px;
+      color: var(--text);
+      background: transparent;
+      border: 0;
+      border-radius: 7px;
+      text-align: left;
+      padding: 0 14px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .nav button.active,
+    .nav button:hover {
+      background: #303030;
+    }
+
+    .nav button.active {
+      box-shadow: inset 4px 0 0 var(--accent);
+    }
+
+    main {
+      padding: 24px;
+      overflow: auto;
+    }
+
+    section { display: none; }
+    section.active { display: block; }
+
+    .page-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 26px;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .icon-btn,
+    .btn {
+      height: 36px;
+      border: 1px solid #4a4a4a;
+      border-radius: 7px;
+      background: #2a2a2a;
+      color: var(--text);
+      padding: 0 14px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .icon-btn {
+      width: 40px;
+      padding: 0;
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .btn.primary,
+    .icon-btn.primary {
+      background: var(--accent);
+      border-color: #f4c2db;
+      color: #111;
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid.two {
+      grid-template-columns: minmax(260px, 360px) 1fr;
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+    }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      min-height: 42px;
+      padding: 0 12px;
+      border-radius: 7px;
+      background: #292929;
+      border: 1px solid transparent;
+    }
+
+    .row.active {
+      border-color: #8b6578;
+      box-shadow: inset 4px 0 0 var(--accent);
+      background: #343034;
+    }
+
+    .row small { color: var(--muted); }
+
+    .preview-stage {
+      height: 300px;
+      position: relative;
+      background:
+        linear-gradient(180deg, rgba(233,166,201,.08), rgba(111,198,200,.05)),
+        #121212;
+      border: 1px solid #343434;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .screen {
+      position: absolute;
+      border: 1px solid #555;
+      border-radius: 12px;
+      background:
+        radial-gradient(circle at 72% 28%, rgba(233,166,201,.16), transparent 34%),
+        linear-gradient(180deg, #181818, #101010);
+      box-shadow: 0 20px 44px rgba(0,0,0,.34);
+      transition: transform .18s ease, z-index .18s ease, border-color .18s ease;
+    }
+
+    .screen.primary {
+      border-color: #8b5d75;
+      background: #191519;
+      z-index: 2;
+    }
+
+    .screen.secondary {
+      z-index: 1;
+      opacity: .92;
+    }
+
+    .screen.secondary:hover,
+    .screen.secondary:focus-within {
+      z-index: 5;
+      transform: translate(22px, 18px) scale(1.04);
+      border-color: #6fc6c8;
+      opacity: 1;
+    }
+
+    .screen.primary:hover {
+      z-index: 6;
+    }
+
+    .screen-label {
+      position: absolute;
+      right: 10px;
+      bottom: 8px;
+      color: #777;
+      font-size: 12px;
+    }
+
+    .panel-mini {
+      position: absolute;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 2px solid rgba(255,255,255,.22);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.08), transparent 42%),
+        rgba(18, 18, 18, .64);
+      box-shadow: 0 6px 16px rgba(0,0,0,.28);
+      backdrop-filter: blur(2px);
+    }
+
+    .panel-mini.selected {
+      border-color: var(--accent);
+      background: rgba(60, 38, 50, .82);
+    }
+
+    .panel-mini .mini-head {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      border-bottom: 1px solid rgba(255,255,255,.12);
+    }
+
+    .tab-pill {
+      min-width: 42px;
+      max-width: 78px;
+      height: 22px;
+      padding: 0 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 5px;
+      background: #333;
+      color: #ddd;
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 0 0 auto;
+    }
+
+    .tab-pill.active {
+      color: #111;
+      background: var(--accent);
+      font-weight: 700;
+    }
+
+    .mini-body {
+      padding: 10px;
+      color: #ddd;
+      font-size: 13px;
+    }
+
+    .chip-area {
+      height: 150px;
+      overflow: auto;
+      padding: 12px;
+      background: #181818;
+      border: 1px solid #373737;
+      border-radius: 8px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-content: flex-start;
+    }
+
+    .chip {
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid #575757;
+      background: #303030;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    .chip.accent {
+      background: #47313d;
+      border-color: #a86b8a;
+      color: #ffddeb;
+    }
+
+    .rule-detail {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 12px 18px;
+      align-items: center;
+    }
+
+    .select,
+    .input {
+      height: 36px;
+      border: 1px solid #444;
+      border-radius: 7px;
+      background: #272727;
+      color: var(--text);
+      padding: 0 12px;
+    }
+
+    .swatches {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .swatch {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      border: 2px solid rgba(255,255,255,.35);
+    }
+
+    .range-row {
+      display: grid;
+      grid-template-columns: 1fr 84px;
+      gap: 14px;
+      align-items: center;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .history-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(240px, 1fr));
+      gap: 16px;
+    }
+
+    .history-card .preview-stage {
+      height: 180px;
+      margin-bottom: 12px;
+    }
+
+    .widget-card {
+      min-height: 210px;
+      background: #20282a;
+      border-color: #456164;
+    }
+
+    .clock-face {
+      height: 128px;
+      border-radius: 10px;
+      background: #263f42;
+      border: 1px solid #5b8589;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: #d8fbfb;
+      font-size: 30px;
+      font-weight: 800;
+      margin-top: 14px;
+    }
+
+    .clock-face small {
+      display: block;
+      color: #9fd7d7;
+      font-size: 13px;
+      font-weight: 500;
+      margin-top: 8px;
+    }
+
+    .muted-card {
+      opacity: .62;
+      background: #222;
+      border-style: dashed;
+    }
+
+    .other-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(240px, 1fr));
+      gap: 16px;
+    }
+
+    .setting-line {
+      min-height: 42px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      border-top: 1px solid #333;
+      padding: 10px 0;
+    }
+
+    .toggle {
+      width: 44px;
+      height: 24px;
+      border-radius: 999px;
+      background: #454545;
+      position: relative;
+    }
+
+    .toggle.on {
+      background: #a86b8a;
+    }
+
+    .toggle:after {
+      content: "";
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #eee;
+      top: 3px;
+      left: 3px;
+    }
+
+    .toggle.on:after {
+      left: 23px;
+    }
+
+    @media (max-width: 1100px) {
+      .grid.two,
+      .grid.three,
+      .history-grid,
+      .other-grid { grid-template-columns: 1fr; }
+      .shell { grid-template-columns: 180px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="titlebar">
+      <div class="title"><span class="app-mark"></span><span>设置中心 v1.0.8 视觉稿</span></div>
+      <div class="chrome">— □ ×</div>
+    </div>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="nav-title">基础设置已并入「其他」</div>
+        <nav class="nav">
+          <button class="active" data-page="panels">面板管理</button>
+          <button data-page="rules">桌面整理</button>
+          <button data-page="appearance">面板外观</button>
+          <button data-page="history">面板历史</button>
+          <button data-page="widgets">功能面板</button>
+          <button data-page="diagnostics">诊断与恢复</button>
+          <button data-page="other">其他</button>
+        </nav>
+      </aside>
+      <main>
+        <section id="panels" class="active">
+          <div class="page-head">
+            <div>
+              <h1>面板管理</h1>
+              <div class="hint">在预览里点击面板或标签切换，拖动面板块可实时调整真实面板位置。</div>
+            </div>
+            <div class="actions">
+              <button class="icon-btn primary">+</button>
+              <button class="icon-btn" title="删除">🗑</button>
+            </div>
+          </div>
+          <div class="grid two">
+            <div class="card">
+              <div class="card-title">面板</div>
+              <div class="list">
+                <div class="row"><span>面板 1</span><small>3</small></div>
+                <div class="row active"><span>游戏区</span><small>6</small></div>
+                <div class="row"><span>资料面板</span><small>4</small></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-title">
+                <span>布局预览</span>
+                <span class="hint">当前位置：主屏</span>
+              </div>
+              <div class="preview-stage">
+                <div class="screen secondary" style="left:36px;top:34px;width:43%;height:178px;" tabindex="0">
+                  <span class="screen-label">副屏</span>
+                  <div class="panel-mini" style="left:20px;top:24px;width:58%;height:92px;">
+                    <div class="mini-head">
+                      <span class="tab-pill active">资料</span>
+                      <span class="tab-pill">时间</span>
+                    </div>
+                    <div class="mini-body">副屏面板</div>
+                  </div>
+                </div>
+                <div class="screen primary" style="left:30%;top:62px;width:64%;height:206px;">
+                  <span class="screen-label">主屏</span>
+                  <div class="panel-mini" style="left:26px;top:26px;width:43%;height:112px;">
+                    <div class="mini-head">
+                      <span class="tab-pill active">应用</span>
+                      <span class="tab-pill">时间</span>
+                      <span class="tab-pill">新标签</span>
+                    </div>
+                    <div class="mini-body">面板 1</div>
+                  </div>
+                  <div class="panel-mini selected" style="right:18px;top:34px;width:38%;height:142px;">
+                    <div class="mini-head">
+                      <span class="tab-pill active">其它</span>
+                      <span class="tab-pill">压缩包</span>
+                      <span class="tab-pill">+4</span>
+                    </div>
+                    <div class="mini-body">游戏区</div>
+                  </div>
+                </div>
+              </div>
+              <div class="card-title" style="margin-top:16px;">当前标签</div>
+              <div class="chips">
+                <span class="chip">应用</span>
+                <span class="chip">时间</span>
+                <span class="chip">其它</span>
+                <span class="chip accent">当前：压缩包</span>
+                <span class="chip">文件夹</span>
+                <span class="chip">文档</span>
+                <span class="chip">图片</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="rules">
+          <div class="page-head">
+            <div>
+              <h1>桌面整理</h1>
+              <div class="hint">这里只编辑“什么类型整理到哪个标签”。切换规则不会弹出窗口。</div>
+            </div>
+          </div>
+          <div class="grid two">
+            <div class="card">
+              <div class="card-title">规则</div>
+              <div class="list">
+                <div class="row"><span>文件夹</span><small>启用</small></div>
+                <div class="row active"><span>文档</span><small>启用</small></div>
+                <div class="row"><span>图片</span><small>启用</small></div>
+                <div class="row"><span>压缩包</span><small>启用</small></div>
+                <div class="row"><span>应用</span><small>启用</small></div>
+                <div class="row"><span>其它</span><small>启用</small></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-title">规则详情</div>
+              <div class="rule-detail">
+                <span class="hint">规则名</span><strong>文档</strong>
+                <span class="hint">规则类型</span><span>后缀匹配</span>
+                <span class="hint">整理到</span><select class="select"><option>文档</option></select>
+                <span class="hint">当前预设</span><span>文档</span>
+              </div>
+              <div class="card-title" style="margin-top:18px;">类型预设</div>
+              <div class="chips">
+                <span class="chip">图片</span>
+                <span class="chip accent">文档</span>
+                <span class="chip">压缩包</span>
+                <span class="chip">应用</span>
+                <span class="chip">代码</span>
+              </div>
+              <div class="card-title" style="margin-top:18px;">后缀列表</div>
+              <div class="chip-area">
+                <div class="chips">
+                  <span class="chip">.pdf</span><span class="chip">.doc</span><span class="chip">.docx</span>
+                  <span class="chip">.rtf</span><span class="chip">.odt</span><span class="chip">.wps</span>
+                  <span class="chip">.xls</span><span class="chip">.xlsx</span><span class="chip">.xlsm</span>
+                  <span class="chip">.csv</span><span class="chip">.ods</span><span class="chip">.ppt</span>
+                  <span class="chip">.pptx</span><span class="chip">.pptm</span><span class="chip">.pps</span>
+                  <span class="chip">.ppsx</span><span class="chip">.txt</span><span class="chip">.md</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="appearance">
+          <div class="page-head">
+            <div>
+              <h1>面板外观</h1>
+              <div class="hint">颜色和透明度实时应用，短暂延迟后自动保存。</div>
+            </div>
+          </div>
+          <div class="grid two">
+            <div class="card">
+              <div class="card-title">背景颜色</div>
+              <div class="swatches">
+                <div class="swatch" style="background:#000"></div>
+                <div class="swatch" style="background:#111827"></div>
+                <div class="swatch" style="background:#2d2a32"></div>
+                <div class="swatch" style="background:#4b5563"></div>
+                <div class="swatch" style="background:#8b3a5d"></div>
+                <div class="swatch" style="background:#25636b"></div>
+                <div class="swatch" style="background:#7c6a46"></div>
+              </div>
+              <div class="card-title" style="margin-top:22px;">透明度</div>
+              <div class="range-row">
+                <input type="range" min="10" max="100" value="60" step="10">
+                <input class="input" value="60%">
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-title">实时预览</div>
+              <div class="preview-stage">
+                <div class="screen secondary" style="left:40px;top:42px;width:42%;height:150px;" tabindex="0">
+                  <span class="screen-label">副屏</span>
+                </div>
+                <div class="screen primary" style="left:18%;top:54px;width:68%;height:198px;">
+                  <span class="screen-label">主屏</span>
+                  <div class="panel-mini selected" style="left:9%;top:36px;width:82%;height:136px;background:rgba(17,17,17,.6);">
+                    <div class="mini-head">
+                      <span class="tab-pill active">文档</span>
+                      <span class="tab-pill">图片</span>
+                      <span class="tab-pill">压缩包</span>
+                      <span class="tab-pill">+3</span>
+                    </div>
+                    <div class="mini-body">图标保持不透明，只有面板背景透明。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="history">
+          <div class="page-head">
+            <div>
+              <h1>面板历史</h1>
+              <div class="hint">保留最近 10 条布局历史，预览里显示面板位置和标签变化。</div>
+            </div>
+          </div>
+          <div class="history-grid">
+            <div class="card history-card">
+              <div class="preview-stage">
+                <div class="screen secondary" style="left:20px;top:28px;width:42%;height:98px;" tabindex="0"><span class="screen-label">副屏</span></div>
+                <div class="screen primary" style="left:20%;top:46px;width:74%;height:112px;">
+                  <span class="screen-label">主屏</span>
+                  <div class="panel-mini selected" style="left:22px;top:22px;width:62%;height:72px;">
+                    <div class="mini-head"><span class="tab-pill active">文档</span><span class="tab-pill">图片</span><span class="tab-pill">+4</span></div>
+                  </div>
+                </div>
+              </div>
+              <strong>刚刚 · 移动面板</strong>
+              <div class="hint">2 个面板 · 9 个标签</div>
+            </div>
+            <div class="card history-card">
+              <div class="preview-stage">
+                <div class="screen secondary" style="left:18px;top:26px;width:42%;height:96px;" tabindex="0"><span class="screen-label">副屏</span></div>
+                <div class="screen primary" style="left:20%;top:46px;width:74%;height:112px;">
+                  <span class="screen-label">主屏</span>
+                  <div class="panel-mini" style="left:26px;top:24px;width:38%;height:62px;">
+                    <div class="mini-head"><span class="tab-pill active">应用</span><span class="tab-pill">+2</span></div>
+                  </div>
+                  <div class="panel-mini selected" style="right:26px;top:18px;width:34%;height:86px;">
+                    <div class="mini-head"><span class="tab-pill active">时间</span></div>
+                  </div>
+                </div>
+              </div>
+              <strong>12:20 · 新建时间面板</strong>
+              <div class="hint">3 个面板 · 10 个标签</div>
+            </div>
+            <div class="card history-card">
+              <div class="preview-stage">
+                <div class="screen secondary" style="left:20px;top:28px;width:42%;height:98px;" tabindex="0"><span class="screen-label">副屏</span></div>
+                <div class="screen primary" style="left:20%;top:46px;width:74%;height:112px;">
+                  <span class="screen-label">主屏</span>
+                  <div class="panel-mini selected" style="left:18px;top:18px;width:78%;height:78px;">
+                    <div class="mini-head"><span class="tab-pill active">其它</span><span class="tab-pill">压缩包</span><span class="tab-pill">文档</span></div>
+                  </div>
+                </div>
+              </div>
+              <strong>11:55 · 合并面板</strong>
+              <div class="hint">1 个面板 · 7 个标签</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="widgets">
+          <div class="page-head">
+            <div>
+              <h1>功能面板</h1>
+              <div class="hint">每个功能都是一张可预览卡片，右上角 + 创建独立面板。</div>
+            </div>
+          </div>
+          <div class="grid three">
+            <div class="card widget-card">
+              <div class="card-title"><span>时间面板</span><button class="icon-btn primary">+</button></div>
+              <div class="clock-face">12:34<small>2026-05-28 星期四</small></div>
+            </div>
+            <div class="card widget-card muted-card">
+              <div class="card-title"><span>天气面板</span><button class="icon-btn">+</button></div>
+              <div class="hint">预留接口，后续加入。</div>
+            </div>
+            <div class="card widget-card muted-card">
+              <div class="card-title"><span>待办面板</span><button class="icon-btn">+</button></div>
+              <div class="hint">预留接口，后续加入。</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="diagnostics">
+          <div class="page-head">
+            <div>
+              <h1>诊断与恢复</h1>
+              <div class="hint">专业排障入口保留在独立页，避免和普通设置混在一起。</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">当前状态</div>
+            <div class="hint">桌面图标可见 · 接管未启用 · 最近没有错误</div>
+          </div>
+        </section>
+
+        <section id="other">
+          <div class="page-head">
+            <div>
+              <h1>其他</h1>
+              <div class="hint">原基础设置移动到这里，并按用途拆成清晰分组。</div>
+            </div>
+          </div>
+          <div class="other-grid">
+            <div class="card">
+              <div class="card-title">系统位置</div>
+              <div class="setting-line"><span>桌面路径</span><span class="hint">E:\system\桌面</span></div>
+              <div class="setting-line"><span>显示器布局</span><button class="btn">识别</button></div>
+            </div>
+            <div class="card">
+              <div class="card-title">启动与接管</div>
+              <div class="setting-line"><span>桌面接管</span><span class="toggle on"></span></div>
+              <div class="setting-line"><span>开机自启</span><span class="toggle on"></span></div>
+            </div>
+            <div class="card">
+              <div class="card-title">恢复工具</div>
+              <div class="setting-line"><span>恢复桌面图标</span><button class="btn">执行</button></div>
+              <div class="setting-line"><span>恢复删除确认提示</span><button class="btn">重置</button></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script>
+    const buttons = [...document.querySelectorAll(".nav button")];
+    const pages = [...document.querySelectorAll("main section")];
+    buttons.forEach(button => {
+      button.addEventListener("click", () => {
+        buttons.forEach(item => item.classList.remove("active"));
+        pages.forEach(page => page.classList.remove("active"));
+        button.classList.add("active");
+        document.getElementById(button.dataset.page).classList.add("active");
+      });
+    });
+  </script>
+</body>
+</html>

@@ -23,6 +23,8 @@ class ClockWidget(QWidget):
     def __init__(self, settings: dict[str, object], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = dict(settings)
+        self.setMinimumSize(260, 130)
+        self.setMaximumSize(340, 190)
         self._time_label = QLabel(self)
         self._date_label = QLabel(self)
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -24,6 +24,8 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(plugin.id, "clock")
         self.assertEqual(plugin.display_name, "时间")
         self.assertTrue(widget.findChildren(QLabel))
+        self.assertLessEqual(widget.maximumWidth(), 340)
+        self.assertLessEqual(widget.maximumHeight(), 190)
 
     def test_unknown_widget_type_uses_safe_placeholder(self) -> None:
         registry = BuiltinWidgetRegistry()

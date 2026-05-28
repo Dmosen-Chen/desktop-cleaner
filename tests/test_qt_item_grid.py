@@ -259,18 +259,22 @@ class ItemGridWidgetTests(unittest.TestCase):
             self.assertGreater(wide_columns, narrow_columns)
             self.assertLess(narrow_columns, 4)
 
-    def test_item_spacing_adapts_to_reduce_right_edge_gap_when_panel_is_wide(self) -> None:
+    def test_item_spacing_stays_fixed_when_panel_is_wide(self) -> None:
         widget = make_item_grid(active_tab_id="tab-documents")
         with TemporaryDirectory() as tmp:
             entries = [IndexedItem(Path(tmp) / f"item-{index}.pdf") for index in range(6)]
             for entry in entries:
                 entry.path.write_text("x", encoding="utf-8")
-            widget.resize(760, 320)
+            widget.resize(520, 320)
             widget.show()
             widget.set_entries(entries)
             type(self).app.processEvents()
-
             layout = widget._grid_host.layout()
+            narrow_spacing = layout.horizontalSpacing()
+
+            widget.resize(960, 320)
+            type(self).app.processEvents()
+            wide_spacing = layout.horizontalSpacing()
             first = layout.itemAt(0).widget()
             last = layout.itemAt(min(widget.column_count(), len(entries)) - 1).widget()
             self.assertIsNotNone(first)
@@ -278,10 +282,11 @@ class ItemGridWidgetTests(unittest.TestCase):
             viewport_width = widget._scroll_area.viewport().width()
             right_gap = viewport_width - last.geometry().right()
 
-            self.assertLessEqual(
+            self.assertEqual(wide_spacing, narrow_spacing)
+            self.assertGreater(
                 right_gap,
                 48,
-                "wide panels should distribute spare width instead of leaving it on the right",
+                "wide panels should keep fixed desktop-like icon spacing and leave spare room on the right",
             )
 
     def test_ctrl_wheel_changes_item_icon_size_and_emits_change_signal(self) -> None:

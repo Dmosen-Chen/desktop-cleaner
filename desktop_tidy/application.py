@@ -311,6 +311,7 @@ class DesktopCleanerApplication:
         panel.item_grid.restore_auto_requested.connect(self._on_restore_auto_requested)
         panel.item_grid.item_activated.connect(self._on_item_activated)
         panel.tab_detach_requested.connect(self._on_tab_detach_requested)
+        panel.tab_reordered.connect(self._on_panel_tab_reordered)
         panel.group_merge_requested.connect(self._on_group_merge_requested)
 
     def _apply_panel_geometry(self, panel: PanelGroupWidget) -> None:
@@ -363,6 +364,10 @@ class DesktopCleanerApplication:
 
     def _on_panel_appearance_changed(self) -> None:
         self.save_with_history("appearance-change")
+
+    def _on_panel_tab_reordered(self, _group_id: str) -> None:
+        self.save_with_history("tab-reorder")
+        self.refresh()
 
     def _on_panel_layout_gesture_started(self, group_id: str) -> None:
         panel = self._panels.get(group_id)
@@ -487,6 +492,15 @@ class DesktopCleanerApplication:
             self._settings_window.management_group_geometry_changed.connect(
                 self._on_settings_group_geometry_changed
             )
+            self._settings_window.management_tab_reordered.connect(
+                self._on_settings_tab_reordered
+            )
+            self._settings_window.appearance_live_changed.connect(
+                self._on_settings_appearance_live_changed
+            )
+            self._settings_window.appearance_live_save_requested.connect(
+                self._on_settings_appearance_live_save_requested
+            )
             self._settings_window.identify_screens_requested.connect(
                 self._on_identify_screens_requested
             )
@@ -495,9 +509,6 @@ class DesktopCleanerApplication:
             )
             self._settings_window.history_restore_requested.connect(
                 self._on_history_restore_requested
-            )
-            self._settings_window.history_capture_preview_requested.connect(
-                self._on_history_capture_preview_requested
             )
             self._settings_window.diagnostics_refresh_requested.connect(
                 self._refresh_settings_diagnostics
@@ -585,6 +596,40 @@ class DesktopCleanerApplication:
         if final:
             self.save_with_history("settings-preview-move")
 
+    def _on_settings_tab_reordered(
+        self,
+        group_id: str,
+        _tab_id: str,
+        _target_index: int,
+        final: bool,
+    ) -> None:
+        panel = self._panels.get(group_id)
+        if panel is not None:
+            panel.reload_from_model()
+        if final:
+            self.save_with_history("tab-reorder")
+            self.refresh()
+
+    def _on_settings_appearance_live_changed(
+        self,
+        group_id: str,
+        color: str,
+        opacity: float,
+    ) -> None:
+        self.model.config.appearance_defaults.background_color = color
+        self.model.config.appearance_defaults.background_opacity = opacity
+        for group in self.model.config.panel_groups:
+            group.appearance.background_color = color
+            group.appearance.background_opacity = opacity
+        for panel in self._panels.values():
+            panel.reload_from_model()
+        panel = self._panels.get(group_id)
+        if panel is not None:
+            panel.update()
+
+    def _on_settings_appearance_live_save_requested(self, group_id: str) -> None:
+        self.save_with_history("appearance-change")
+
     def _on_add_item_tab_requested(self) -> None:
         group_id = self._settings_window.selected_group_id() if self._settings_window is not None else self.panel.group_id
         tab = self.model.add_tab(group_id, "新标签")
@@ -667,23 +712,6 @@ class DesktopCleanerApplication:
         self._replace_configuration(restored)
         self.save()
         self.refresh()
-
-    def _on_history_capture_preview_requested(self, snapshot_id: str) -> None:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            self._notify_user("历史预览", "未找到可截图的主屏幕。")
-            return
-        preview_dir = self.store.path.parent / "history-previews"
-        preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{snapshot_id}.png"
-        pixmap = screen.grabWindow(0)
-        if pixmap.isNull() or not pixmap.save(str(preview_path), "PNG"):
-            self._notify_user("历史预览", "保存主屏截图失败。")
-            return
-        self.history_store.set_preview(snapshot_id, preview_path=preview_path)
-        if self._settings_window is not None:
-            self._settings_window.set_history_snapshots(self.history_store.load())
-        self._notify_user("历史预览", "已保存主屏截图预览。")
 
     def _replace_configuration(self, config: Configuration) -> None:
         self.model = WorkspaceModel(config)

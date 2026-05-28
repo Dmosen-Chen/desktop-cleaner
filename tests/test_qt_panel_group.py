@@ -201,6 +201,26 @@ class PanelGroupWidgetTests(unittest.TestCase):
 
         self.assertEqual(widget.tab_button_ids(), group.tab_ids)
 
+    def test_dragging_tab_inside_panel_reorders_tabs(self) -> None:
+        widget, model = make_group_widget()
+        widget.resize(760, 420)
+        widget.show()
+        type(self).app.processEvents()
+
+        images_button = find_tab_button(widget, "图片")
+        release_local = images_button.mapTo(widget, images_button.rect().center()) - QPoint(1, 0)
+        reordered = QSignalSpy(widget.tab_reordered)
+        widget._drag_tab_id = "tab-folders"
+        widget._tab_drag_active = True
+        widget._reorder_dragged_tab_at(release_local, final=True)
+        type(self).app.processEvents()
+
+        self.assertEqual(
+            model.group("group-default").tab_ids[:3],
+            ["tab-documents", "tab-folders", "tab-images"],
+        )
+        self.assertEqual(reordered.count(), 1)
+
     def test_toolbar_exposes_add_delete_more_lock_and_collapse_controls(self) -> None:
         widget, _model = make_group_widget()
 

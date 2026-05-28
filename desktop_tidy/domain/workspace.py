@@ -299,6 +299,21 @@ class WorkspaceModel:
                 if tab_id in by_id:
                     by_id[tab_id].order = order
 
+    def reorder_tab(self, tab_id: str, target_index: int) -> bool:
+        tab = self.tab(tab_id)
+        group = self.group(tab.group_id)
+        if group.locked or tab_id not in group.tab_ids:
+            return False
+        current_index = group.tab_ids.index(tab_id)
+        clamped = max(0, min(int(target_index), len(group.tab_ids) - 1))
+        if current_index == clamped:
+            return False
+        group.tab_ids.pop(current_index)
+        group.tab_ids.insert(clamped, tab_id)
+        group.active_tab_id = tab_id
+        self._reindex_tabs()
+        return True
+
     def detach_tab(self, tab_id: str, geometry: PanelGeometry) -> PanelGroup:
         tab = self.tab(tab_id)
         source = self.group(tab.group_id)

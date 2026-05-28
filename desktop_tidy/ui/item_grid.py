@@ -304,16 +304,8 @@ class ItemGridWidget(QWidget):
             self._layout.setHorizontalSpacing(0)
             self._grid_host.updateGeometry()
             return
-        visible_columns = max(
-            _MIN_COLUMNS,
-            min(columns or _MIN_COLUMNS, len(self._entries) or _MIN_COLUMNS),
-        )
-        available = self._usable_grid_width()
-        cell_width = self._cell_width()
-        spare = max(0, available - (visible_columns * cell_width))
-        gap = max(_MIN_GRID_GAP, spare // (visible_columns + 1))
-        self._layout.setContentsMargins(gap, 8, gap, 8)
-        self._layout.setHorizontalSpacing(gap)
+        self._layout.setContentsMargins(8, 8, 8, 8)
+        self._layout.setHorizontalSpacing(_MIN_GRID_GAP)
         self._grid_host.updateGeometry()
 
     def _rebuild_cells(self) -> None:
