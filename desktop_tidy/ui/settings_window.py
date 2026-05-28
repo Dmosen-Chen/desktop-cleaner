@@ -617,6 +617,7 @@ class SettingsWindow(QWidget):
         self._delete_confirmation = delete_confirmation
         self._management_selection_kind = "panel"
         self._selected_tab_id = ""
+        self._history_snapshots: list[object] = []
         self._inline_edit_kind = ""
         self._inline_edit_id = ""
         self._appearance_save_timer = QTimer(self)
@@ -656,6 +657,10 @@ class SettingsWindow(QWidget):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.hide()
         event.ignore()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        self._reflow_history_grid_if_needed()
 
     def _target_group(self, config: Configuration | None = None):
         config = config or self._config
@@ -1288,6 +1293,10 @@ class SettingsWindow(QWidget):
         return page
 
     def set_history_snapshots(self, snapshots: list[object]) -> None:
+        self._history_snapshots = list(snapshots)
+        self._rebuild_history_grid(self._history_snapshots)
+
+    def _rebuild_history_grid(self, snapshots: list[object]) -> None:
         while self._history_grid_layout.count():
             item = self._history_grid_layout.takeAt(0)
             widget = item.widget()
@@ -1318,6 +1327,14 @@ class SettingsWindow(QWidget):
             column = index % self._history_grid_columns
             self._history_grid_layout.addWidget(card, row, column)
             self._history_cards.append(card)
+
+    def _reflow_history_grid_if_needed(self) -> None:
+        if not hasattr(self, "_history_grid_layout") or not self._history_snapshots:
+            return
+        columns = self._history_columns_for_width(self.width())
+        if columns == self._history_grid_columns:
+            return
+        self._rebuild_history_grid(self._history_snapshots)
 
     def _history_columns_for_width(self, width: int) -> int:
         if width >= 1560:
@@ -1462,11 +1479,7 @@ class SettingsWindow(QWidget):
         self._rule_extension_panel.setVisible(not is_folder_rule)
         self._rule_target_combo.clear()
         self._rule_target_combo.addItem("（无）", "")
-        tab_names = {
-            tab.id: tab.name
-            for tab in self._config.panel_tabs
-            if tab.content_kind == "items"
-        }
+        tab_names = self._classification_target_tabs()
         for tab_id, name in sorted(tab_names.items(), key=lambda item: item[1]):
             self._rule_target_combo.addItem(name, tab_id)
         index = self._rule_target_combo.findData(
@@ -1477,6 +1490,19 @@ class SettingsWindow(QWidget):
 
     def _is_custom_rule(self, rule) -> bool:  # type: ignore[no-untyped-def]
         return rule.id not in _DEFAULT_RULE_ROLES and rule.matcher_kind == "extension"
+
+    def _classification_target_tabs(self) -> dict[str, str]:
+        referenced_tab_ids = {
+            rule.target_tab_id
+            for rule in self._config.rules
+            if rule.target_tab_id
+        }
+        return {
+            tab.id: tab.name
+            for tab in self._config.panel_tabs
+            if tab.content_kind == "items"
+            and (tab.category_role != "custom" or tab.id in referenced_tab_ids)
+        }
 
     def _create_custom_classification_type(self) -> None:
         name = self._custom_type_name_edit.text().strip()

@@ -391,6 +391,26 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertTrue(any(tab.id == created_tab.id for tab in config.panel_tabs))
         self.assertEqual(config.panel_groups[0].tab_ids[-1], created_tab.id)
 
+    def test_deleted_custom_type_target_is_hidden_from_classification_targets(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config)
+
+        window._custom_type_name_edit.setText("代码")
+        window._create_custom_type_button.click()
+        created_tab = next(tab for tab in config.panel_tabs if tab.name == "代码")
+        created_rule = next(rule for rule in config.rules if rule.name == "代码")
+
+        window._select_rule_by_id(created_rule.id)
+        window._delete_custom_rule_button.click()
+        window._select_rule_by_id("rule-documents")
+
+        combo_values = {
+            str(window._rule_target_combo.itemData(index) or "")
+            for index in range(window._rule_target_combo.count())
+        }
+        self.assertTrue(any(tab.id == created_tab.id for tab in config.panel_tabs))
+        self.assertNotIn(created_tab.id, combo_values)
+
     def test_appearance_changes_emit_live_preview_and_debounced_save(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
@@ -510,6 +530,32 @@ class SettingsWindowTests(unittest.TestCase):
         window.resize(1680, 600)
         window.set_history_snapshots(snapshots)
         self.assertEqual(window._history_grid_columns, 3)
+
+    def test_history_grid_reflows_when_window_width_changes(self) -> None:
+        window = self._make_window()
+        snapshots = [
+            SimpleNamespace(
+                id=f"layout-{index}",
+                created_at="2026-05-27T12:00:00",
+                reason="move",
+                group_count=1,
+                tab_count=6,
+                preview_kind="layout",
+                preview_path="",
+                configuration=build_default_configuration(r"D:\Preview\Desktop"),
+            )
+            for index in range(4)
+        ]
+        window.resize(720, 600)
+        window.show()
+        type(self).app.processEvents()
+        window.set_history_snapshots(snapshots)
+        self.assertEqual(window._history_grid_columns, 1)
+
+        window.resize(1180, 600)
+        type(self).app.processEvents()
+
+        self.assertEqual(window._history_grid_columns, 2)
 
     def test_widget_page_shows_preview_card_for_clock_panel(self) -> None:
         window = self._make_window()
