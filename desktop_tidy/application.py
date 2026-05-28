@@ -484,6 +484,9 @@ class DesktopCleanerApplication:
             self._settings_window.management_metadata_changed.connect(
                 self._on_settings_metadata_changed
             )
+            self._settings_window.management_group_geometry_changed.connect(
+                self._on_settings_group_geometry_changed
+            )
             self._settings_window.identify_screens_requested.connect(
                 self._on_identify_screens_requested
             )
@@ -565,6 +568,22 @@ class DesktopCleanerApplication:
             panel.reload_from_model()
         self.save_with_history("settings-rename")
         self.refresh()
+
+    def _on_settings_group_geometry_changed(
+        self,
+        group_id: str,
+        geometry: object,
+        final: bool,
+    ) -> None:
+        group = self.model.group(group_id)
+        if isinstance(geometry, PanelGeometry):
+            group.geometry = geometry
+        panel = self._panels.get(group_id)
+        if panel is not None:
+            panel._apply_geometry_from_model()
+        self._sync_panel_snap_targets()
+        if final:
+            self.save_with_history("settings-preview-move")
 
     def _on_add_item_tab_requested(self) -> None:
         group_id = self._settings_window.selected_group_id() if self._settings_window is not None else self.panel.group_id
@@ -795,12 +814,15 @@ class DesktopCleanerApplication:
         return Path(sys.argv[0]).resolve()
 
     def _apply_startup_preference(self) -> None:
-        enabled = self.startup_service.set_enabled(
+        result = self.startup_service.set_enabled(
             self.model.config.desktop.startup_enabled,
             self._startup_executable_path(),
         )
-        if not enabled and self.model.config.desktop.startup_enabled:
-            self.model.config.desktop.startup_enabled = False
+        success = bool(getattr(result, "success", result))
+        if not success and self.model.config.desktop.startup_enabled:
+            detail = str(getattr(result, "message", "") or "系统拒绝写入开机启动项")
+            log_exception("startup registration failed", RuntimeError(detail))
+            self._notify_user("开机启动设置失败", detail)
 
     def _apply_desktop_takeover_preference(self) -> None:
         if not self.model.config.desktop.takeover_enabled:

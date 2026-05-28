@@ -75,9 +75,9 @@ class FakeStartupService:
         self.result = result
         self.calls: list[tuple[bool, Path]] = []
 
-    def set_enabled(self, enabled: bool, exe_path: Path) -> bool:
+    def set_enabled(self, enabled: bool, exe_path: Path):
         self.calls.append((enabled, exe_path))
-        return self.result
+        return SimpleNamespace(success=self.result, message="fake startup failure")
 
 
 class FakeTrayController(QObject):
@@ -432,6 +432,28 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             enabled, exe_path = startup.calls[0]
             self.assertTrue(enabled)
             self.assertTrue(exe_path.is_absolute())
+
+    def test_startup_registration_failure_keeps_user_checkbox_enabled(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.startup_enabled = True
+            startup = FakeStartupService(result=False)
+            tray = FakeTrayController()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                config,
+                store=store,
+                startup_service=startup,
+                tray_controller=tray,
+            )
+
+            app._apply_startup_preference()
+
+            self.assertTrue(app.model.config.desktop.startup_enabled)
+            self.assertTrue(startup.calls[-1][0])
+            self.assertIn("开机启动", tray.last_message[0])
 
     def test_settings_diagnostics_actions_use_recovery_export_and_log_services(self) -> None:
         with TemporaryDirectory() as tmp:

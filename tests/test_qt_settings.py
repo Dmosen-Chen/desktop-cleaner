@@ -9,8 +9,8 @@ from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QComboBox
 
 from desktop_tidy.domain.defaults import build_default_configuration
@@ -68,7 +68,9 @@ class SettingsWindowTests(unittest.TestCase):
         restore_spy = QSignalSpy(window.restore_desktop_requested)
         add_panel_spy = QSignalSpy(window.add_widget_panel_requested)
 
-        window._restore_desktop_button.click()
+        self.assertNotIn("恢复桌面图标", window._basic_page_text())
+        self.assertIn("恢复桌面图标", window._other_page_text())
+        window._other_restore_desktop_button.click()
         window._add_clock_panel_button.click()
 
         self.assertEqual(restore_spy.count(), 1)
@@ -110,37 +112,70 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(delete_tab_spy.count(), 1)
         self.assertEqual(delete_tab_spy.at(0)[0], second_group.active_tab_id)
 
-    def test_panel_management_double_click_renames_panel_and_tab(self) -> None:
+    def test_panel_management_double_click_renames_panel_and_tab_inline(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
-        window = SettingsWindow(
-            config,
-            rename_prompt=lambda _kind, current: f"{current}-改",
-        )
+        window = SettingsWindow(config)
         changed_spy = QSignalSpy(window.management_metadata_changed)
+        window._section_list.setCurrentRow(window.visible_section_names().index("面板管理"))
+        window.show()
+        type(self).app.processEvents()
+        before = set(QApplication.topLevelWidgets())
 
         window._panel_group_list.itemDoubleClicked.emit(window._panel_group_list.item(0))
-        window._panel_tab_list.itemDoubleClicked.emit(window._panel_tab_list.item(0))
+        editor = window._panel_group_editors[config.panel_groups[0].id]
+        self.assertTrue(editor.isVisible())
+        editor.setText("主工作区")
+        editor.editingFinished.emit()
 
-        self.assertEqual(config.panel_groups[0].name, "面板 1-改")
-        self.assertTrue(config.panel_tabs[0].name.endswith("-改"))
+        window._panel_tab_list.itemDoubleClicked.emit(window._panel_tab_list.item(0))
+        tab_editor = window._panel_tab_editors[config.panel_groups[0].active_tab_id]
+        self.assertTrue(tab_editor.isVisible())
+        tab_editor.setText("资料")
+        tab_editor.editingFinished.emit()
+
+        after = set(QApplication.topLevelWidgets())
+        self.assertEqual(after - before, set())
+        self.assertEqual(config.panel_groups[0].name, "主工作区")
+        self.assertEqual(config.panel_tabs[0].name, "资料")
         self.assertEqual(changed_spy.count(), 2)
 
-    def test_panel_preview_click_switches_selected_panel_and_tab(self) -> None:
+    def test_panel_layout_preview_clicks_and_drags_groups(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         model = WorkspaceModel(config)
         second_group = model.add_item_panel("资料")
         second_tab = model.add_tab(second_group.id, "发票")
         window = SettingsWindow(config)
+        moved_spy = QSignalSpy(window.management_group_geometry_changed)
+        window._section_list.setCurrentRow(window.visible_section_names().index("面板管理"))
+        window.show()
+        type(self).app.processEvents()
 
-        window._panel_preview_group_buttons[second_group.id].click()
+        preview = window._panel_layout_preview
+        group_rect = preview.group_rect(second_group.id)
+        tab_rect = preview.tab_rect(second_tab.id)
+        self.assertGreater(group_rect.width(), 0)
+        self.assertGreater(tab_rect.width(), 0)
+
+        QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=group_rect.center())
         self.assertEqual(window.selected_group_id(), second_group.id)
 
-        window._panel_preview_tab_buttons[second_tab.id].click()
+        QTest.mouseClick(preview, Qt.MouseButton.LeftButton, pos=tab_rect.center())
         self.assertEqual(window.selected_group_id(), second_group.id)
         self.assertEqual(
             window._panel_tab_list.currentItem().data(Qt.ItemDataRole.UserRole),
             second_tab.id,
         )
+        drag_start = group_rect.center()
+        drag_end = drag_start + QPoint(24, 18)
+        QTest.mousePress(preview, Qt.MouseButton.LeftButton, pos=drag_start)
+        QTest.mouseMove(preview, pos=drag_end)
+        QTest.mouseRelease(preview, Qt.MouseButton.LeftButton, pos=drag_end)
+
+        self.assertGreaterEqual(moved_spy.count(), 2)
+        self.assertEqual(moved_spy.at(0)[0], second_group.id)
+        self.assertFalse(moved_spy.at(0)[2])
+        self.assertTrue(moved_spy.at(moved_spy.count() - 1)[2])
+        self.assertNotEqual(second_group.geometry.rx, 0.04)
 
     def test_rules_page_uses_master_detail_extension_editor(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
@@ -170,13 +205,23 @@ class SettingsWindowTests(unittest.TestCase):
     def test_selecting_folder_rule_does_not_open_extra_windows(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
+        window._section_list.setCurrentRow(window.visible_section_names().index("桌面整理"))
+        window.show()
+        type(self).app.processEvents()
         before = set(QApplication.topLevelWidgets())
+        size_before = window.size()
 
         window._rule_list.setCurrentRow(0)
         type(self).app.processEvents()
 
         after = set(QApplication.topLevelWidgets())
         self.assertEqual(after - before, set())
+        self.assertEqual(window.size(), size_before)
+        self.assertFalse(window._rule_extension_panel.isVisible())
+        self.assertIn("按文件夹类型整理", window._rules_page_text())
+        window._rule_list.setCurrentRow(2)
+        type(self).app.processEvents()
+        self.assertTrue(window._rule_extension_panel.isVisible())
 
     def test_appearance_page_uses_swatch_slider_and_percent_spinbox(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
@@ -262,6 +307,8 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertGreaterEqual(window._history_card_preview_size.height(), 145)
         self.assertIn(window._history_grid_columns, (2, 3))
         self.assertEqual(len(window._history_cards), 1)
+        self.assertIn("文件夹", window._history_cards[0].preview_tab_names)
+        self.assertIn("文档", window._history_cards[0].preview_tab_names)
         window._history_cards[0].restore_button.click()
         window._history_cards[0].capture_button.click()
 
@@ -275,7 +322,9 @@ class SettingsWindowTests(unittest.TestCase):
 
         text = window.all_text()
 
-        self.assertIn("时间面板预览", text)
+        self.assertIn("时间面板", text)
+        self.assertNotIn("时间面板预览", text)
+        self.assertIn("#", window._clock_widget_card.styleSheet())
         self.assertEqual(window._add_clock_panel_button.text(), "+")
         self.assertNotIn("添加到当前面板组", text)
 

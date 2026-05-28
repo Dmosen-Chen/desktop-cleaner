@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 VALUE_NAME = "DesktopCleaner"
+
+
+@dataclass(frozen=True)
+class StartupResult:
+    success: bool
+    message: str = ""
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 class StartupService:
@@ -19,9 +29,9 @@ class StartupService:
         self._platform = platform_name or sys.platform
         self._registry = registry
 
-    def set_enabled(self, enabled: bool, exe_path: Path) -> bool:
+    def set_enabled(self, enabled: bool, exe_path: Path) -> StartupResult:
         if self._platform != "win32":
-            return False
+            return StartupResult(False, "startup registration is unsupported on this platform")
         registry = self._registry
         if registry is None:
             import winreg as registry  # type: ignore[no-redef]
@@ -46,6 +56,6 @@ class StartupService:
                         registry.DeleteValue(key, VALUE_NAME)
                     except FileNotFoundError:
                         pass
-        except OSError:
-            return False
-        return True
+        except OSError as exc:
+            return StartupResult(False, str(exc))
+        return StartupResult(True, "")

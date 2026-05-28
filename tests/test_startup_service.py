@@ -44,6 +44,7 @@ class StartupServiceTests(unittest.TestCase):
         enabled = service.set_enabled(True, Path(r"C:\Program Files\DesktopCleaner.exe"))
 
         self.assertTrue(enabled)
+        self.assertTrue(enabled.success)
         self.assertEqual(
             registry.values["DesktopCleaner"],
             r'"C:\Program Files\DesktopCleaner.exe"',
@@ -63,12 +64,30 @@ class StartupServiceTests(unittest.TestCase):
         disabled = service.set_enabled(False, Path(r"C:\DesktopCleaner.exe"))
 
         self.assertTrue(disabled)
+        self.assertTrue(disabled.success)
         self.assertEqual(registry.deleted, ["DesktopCleaner"])
 
     def test_non_windows_startup_is_reported_as_unsupported(self) -> None:
         service = StartupService(platform_name="linux")
 
-        self.assertFalse(service.set_enabled(True, Path("/tmp/DesktopCleaner")))
+        result = service.set_enabled(True, Path("/tmp/DesktopCleaner"))
+
+        self.assertFalse(result)
+        self.assertFalse(result.success)
+        self.assertIn("unsupported", result.message)
+
+    def test_registry_failure_returns_message_without_changing_user_preference(self) -> None:
+        class FailingWinreg(FakeWinreg):
+            def OpenKey(self, root, path: str, reserved: int, access: int):
+                raise OSError("denied")
+
+        service = StartupService(platform_name="win32", registry=FailingWinreg())
+
+        result = service.set_enabled(True, Path(r"C:\DesktopCleaner.exe"))
+
+        self.assertFalse(result)
+        self.assertFalse(result.success)
+        self.assertIn("denied", result.message)
 
 
 if __name__ == "__main__":

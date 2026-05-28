@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QCloseEvent, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -33,7 +32,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from desktop_tidy.domain.models import Configuration, InvalidConfiguration, validate_configuration
+from desktop_tidy.domain.models import (
+    Configuration,
+    InvalidConfiguration,
+    PanelGeometry,
+    validate_configuration,
+)
 from desktop_tidy.persistence.ui_preferences import UiPreferences
 from desktop_tidy.services.screens import ScreenInfo, available_screens
 
@@ -273,10 +277,360 @@ class ExtensionTagEditor(QWidget):
             self._chip_widgets.append(chip)
 
 
+class EditableRowWidget(QWidget):
+    rename_committed = Signal(str)
+
+    def __init__(self, text: str, count: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._text = text
+        self.label = QLabel(text, self)
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.label.setMinimumWidth(0)
+        self.count_label = QLabel(count, self)
+        self.count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.editor = QLineEdit(text, self)
+        self.editor.hide()
+        self.editor.editingFinished.connect(self._finish_edit)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.addWidget(self.label, stretch=1)
+        if count:
+            self.count_label.setFixedWidth(32)
+            layout.addWidget(self.count_label)
+        else:
+            self.count_label.hide()
+        layout.addWidget(self.editor, stretch=1)
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        self.label.setText(text)
+        self.editor.setText(text)
+
+    def begin_edit(self) -> None:
+        self.editor.setText(self._text)
+        self.label.hide()
+        self.count_label.hide()
+        self.editor.show()
+        self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.editor.selectAll()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self.begin_edit()
+        event.accept()
+
+    def _finish_edit(self) -> None:
+        if not self.editor.isVisible():
+            return
+        text = self.editor.text().strip()
+        self.editor.hide()
+        self.label.show()
+        if self.count_label.text():
+            self.count_label.show()
+        if text and text != self._text:
+            self._text = text
+            self.label.setText(text)
+            self.rename_committed.emit(text)
+        else:
+            self.editor.setText(self._text)
+
+
+def _safe_screen_infos(screens: list[ScreenInfo]) -> list[ScreenInfo]:
+    valid = [
+        screen
+        for screen in screens
+        if screen.geometry.isValid()
+        and screen.geometry.width() > 0
+        and screen.geometry.height() > 0
+    ]
+    if valid:
+        return valid
+    return [ScreenInfo("primary", "主屏", QRect(0, 0, 1920, 1080))]
+
+
+def _screen_preview_rects(screens: list[ScreenInfo], bounds: QRect) -> dict[str, QRect]:
+    valid = _safe_screen_infos(screens)
+    geometries = [screen.geometry for screen in valid]
+    min_x = min(rect.x() for rect in geometries)
+    min_y = min(rect.y() for rect in geometries)
+    max_x = max(rect.x() + rect.width() for rect in geometries)
+    max_y = max(rect.y() + rect.height() for rect in geometries)
+    total_width = max(1, max_x - min_x)
+    total_height = max(1, max_y - min_y)
+    margin = 10
+    available_width = max(1, bounds.width() - margin * 2)
+    available_height = max(1, bounds.height() - margin * 2)
+    scale = min(available_width / total_width, available_height / total_height)
+    used_width = total_width * scale
+    used_height = total_height * scale
+    offset_x = bounds.x() + margin + int((available_width - used_width) / 2)
+    offset_y = bounds.y() + margin + int((available_height - used_height) / 2)
+    return {
+        screen.screen_id: QRect(
+            offset_x + int((screen.geometry.x() - min_x) * scale),
+            offset_y + int((screen.geometry.y() - min_y) * scale),
+            max(80, int(screen.geometry.width() * scale)),
+            max(54, int(screen.geometry.height() * scale)),
+        )
+        for screen in valid
+    }
+
+
+def layout_preview_tab_names(config: Configuration) -> list[str]:
+    tabs_by_id = {tab.id: tab for tab in config.panel_tabs}
+    names: list[str] = []
+    for group in config.panel_groups:
+        for tab_id in group.tab_ids:
+            tab = tabs_by_id.get(tab_id)
+            if tab is not None:
+                names.append(tab.name)
+    return names
+
+
+def _group_preview_rect(group, screen_rect: QRect) -> QRect:  # type: ignore[no-untyped-def]
+    inner = screen_rect.adjusted(8, 8, -8, -8)
+    geometry = group.geometry
+    width = max(70, int(inner.width() * geometry.rw))
+    height = max(42, int(inner.height() * geometry.rh))
+    x = inner.x() + int(inner.width() * geometry.rx)
+    y = inner.y() + int(inner.height() * geometry.ry)
+    return QRect(
+        max(inner.x(), min(x, inner.right() - width + 1)),
+        max(inner.y(), min(y, inner.bottom() - height + 1)),
+        min(width, inner.width()),
+        min(height, inner.height()),
+    )
+
+
+def _tab_preview_rects(group_rect: QRect, tab_ids: list[str]) -> dict[str, QRect]:
+    if not tab_ids:
+        return {}
+    visible_ids = tab_ids[:6]
+    gap = 3
+    tab_height = min(22, max(14, group_rect.height() // 4))
+    usable_width = max(1, group_rect.width() - 10 - gap * (len(visible_ids) - 1))
+    tab_width = max(34, usable_width // len(visible_ids))
+    rects: dict[str, QRect] = {}
+    x = group_rect.x() + 5
+    y = group_rect.y() + 5
+    for tab_id in visible_ids:
+        rects[tab_id] = QRect(x, y, tab_width, tab_height)
+        x += tab_width + gap
+    return rects
+
+
+def render_layout_preview_pixmap(
+    config: Configuration,
+    screens: list[ScreenInfo],
+    size: QSize,
+    *,
+    selected_group_id: str = "",
+    selected_tab_id: str = "",
+) -> QPixmap:
+    pixmap = QPixmap(size)
+    pixmap.fill(QColor("#191919"))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    screen_rects = _screen_preview_rects(screens, pixmap.rect())
+    tabs_by_id = {tab.id: tab for tab in config.panel_tabs}
+    for screen in _safe_screen_infos(screens):
+        rect = screen_rects.get(screen.screen_id)
+        if rect is None:
+            continue
+        painter.setPen(QPen(QColor("#444444"), 1))
+        painter.setBrush(QColor("#111111"))
+        painter.drawRoundedRect(rect, 8, 8)
+    for index, group in enumerate(config.panel_groups):
+        screen_rect = screen_rects.get(group.screen_id) or next(iter(screen_rects.values()))
+        rect = _group_preview_rect(group, screen_rect)
+        base = QColor(group.appearance.background_color or "#4B5563")
+        base.setAlpha(190 if group.id == selected_group_id else 145)
+        painter.setBrush(base)
+        painter.setPen(QPen(QColor("#f0b7d5" if group.id == selected_group_id else "#777777"), 2))
+        painter.drawRoundedRect(rect, 6, 6)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(rect.adjusted(8, 26, -8, -8), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, group.name or f"面板 {index + 1}")
+        for tab_id, tab_rect in _tab_preview_rects(rect, group.tab_ids).items():
+            tab = tabs_by_id.get(tab_id)
+            if tab is None:
+                continue
+            checked = tab_id == selected_tab_id or (not selected_tab_id and tab_id == group.active_tab_id)
+            painter.setBrush(QColor("#d99abd" if checked else "#3a3a3a"))
+            painter.setPen(QPen(QColor("#ffffff" if checked else "#666666"), 1))
+            painter.drawRoundedRect(tab_rect, 4, 4)
+            painter.setPen(QColor("#111111" if checked else "#ffffff"))
+            painter.drawText(tab_rect.adjusted(4, 0, -4, 0), Qt.AlignmentFlag.AlignCenter, tab.name)
+    painter.end()
+    return pixmap
+
+
+class LayoutPreviewWidget(QWidget):
+    group_selected = Signal(str)
+    tab_selected = Signal(str)
+    group_rename_requested = Signal(str)
+    tab_rename_requested = Signal(str)
+    group_geometry_changed = Signal(str, object, bool)
+
+    def __init__(
+        self,
+        config: Configuration,
+        screens: list[ScreenInfo],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._screens = _safe_screen_infos(screens)
+        self._selected_group_id = config.panel_groups[0].id if config.panel_groups else ""
+        self._selected_tab_id = ""
+        self._drag_group_id = ""
+        self._drag_start = QPoint()
+        self._drag_start_geometry = PanelGeometry()
+        self.setMinimumHeight(190)
+        self.setMouseTracking(True)
+
+    def set_state(
+        self,
+        config: Configuration,
+        screens: list[ScreenInfo],
+        selected_group_id: str,
+        selected_tab_id: str = "",
+    ) -> None:
+        self._config = config
+        self._screens = _safe_screen_infos(screens)
+        self._selected_group_id = selected_group_id
+        self._selected_tab_id = selected_tab_id
+        self.update()
+
+    def group_rect(self, group_id: str) -> QRect:
+        group = next((entry for entry in self._config.panel_groups if entry.id == group_id), None)
+        if group is None:
+            return QRect()
+        screen_rects = _screen_preview_rects(self._screens, self.rect())
+        screen_rect = screen_rects.get(group.screen_id) or next(iter(screen_rects.values()))
+        return _group_preview_rect(group, screen_rect)
+
+    def tab_rect(self, tab_id: str) -> QRect:
+        tab = next((entry for entry in self._config.panel_tabs if entry.id == tab_id), None)
+        if tab is None:
+            return QRect()
+        group_rect = self.group_rect(tab.group_id)
+        return _tab_preview_rects(group_rect, next((g.tab_ids for g in self._config.panel_groups if g.id == tab.group_id), [])).get(tab_id, QRect())
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        painter = QPainter(self)
+        painter.drawPixmap(
+            self.rect(),
+            render_layout_preview_pixmap(
+                self._config,
+                self._screens,
+                self.size(),
+                selected_group_id=self._selected_group_id,
+                selected_tab_id=self._selected_tab_id,
+            ),
+        )
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        point = event.position().toPoint()
+        tab_id = self._hit_tab(point)
+        if tab_id:
+            self._selected_tab_id = tab_id
+            self.tab_selected.emit(tab_id)
+            self.update()
+            return
+        group_id = self._hit_group(point)
+        if group_id:
+            self._selected_group_id = group_id
+            self.group_selected.emit(group_id)
+            self._drag_group_id = group_id
+            self._drag_start = point
+            group = next(entry for entry in self._config.panel_groups if entry.id == group_id)
+            self._drag_start_geometry = PanelGeometry(
+                group.geometry.rx,
+                group.geometry.ry,
+                group.geometry.rw,
+                group.geometry.rh,
+            )
+            self.group_geometry_changed.emit(group.id, group.geometry, False)
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._drag_group_id:
+            self._update_drag(event.position().toPoint(), final=False)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._drag_group_id and event.button() == Qt.MouseButton.LeftButton:
+            self._update_drag(event.position().toPoint(), final=True)
+            self._drag_group_id = ""
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        point = event.position().toPoint()
+        tab_id = self._hit_tab(point)
+        if tab_id:
+            self.tab_rename_requested.emit(tab_id)
+            event.accept()
+            return
+        group_id = self._hit_group(point)
+        if group_id:
+            self.group_rename_requested.emit(group_id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _hit_tab(self, point: QPoint) -> str:
+        for tab in reversed(self._config.panel_tabs):
+            if self.tab_rect(tab.id).contains(point):
+                return tab.id
+        return ""
+
+    def _hit_group(self, point: QPoint) -> str:
+        for group in reversed(self._config.panel_groups):
+            if self.group_rect(group.id).contains(point):
+                return group.id
+        return ""
+
+    def _update_drag(self, point: QPoint, *, final: bool) -> None:
+        group = next((entry for entry in self._config.panel_groups if entry.id == self._drag_group_id), None)
+        if group is None:
+            return
+        screen_rects = _screen_preview_rects(self._screens, self.rect())
+        screen_rect = screen_rects.get(group.screen_id) or next(iter(screen_rects.values()))
+        delta = point - self._drag_start
+        rx = self._drag_start_geometry.rx + (delta.x() / max(1, screen_rect.width()))
+        ry = self._drag_start_geometry.ry + (delta.y() / max(1, screen_rect.height()))
+        geometry = PanelGeometry(
+            max(0.0, min(1.0 - self._drag_start_geometry.rw, rx)),
+            max(0.0, min(1.0 - self._drag_start_geometry.rh, ry)),
+            self._drag_start_geometry.rw,
+            self._drag_start_geometry.rh,
+        )
+        group.geometry = geometry
+        self.group_geometry_changed.emit(group.id, geometry, final)
+        self.update()
+
+
 class HistoryCardWidget(QFrame):
-    def __init__(self, snapshot: object, icon: QIcon, preview_size: QSize, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        snapshot: object,
+        icon: QIcon,
+        preview_size: QSize,
+        preview_tab_names: list[str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.snapshot_id = str(getattr(snapshot, "id", "") or "")
+        self.preview_tab_names = list(preview_tab_names or [])
         self.restore_button = QPushButton("恢复", self)
         self.capture_button = QPushButton("保存截图", self)
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -318,6 +672,7 @@ class SettingsWindow(QWidget):
     history_capture_preview_requested = Signal(str)
     ui_preferences_changed = Signal()
     management_metadata_changed = Signal()
+    management_group_geometry_changed = Signal(str, object, bool)
     diagnostics_refresh_requested = Signal()
     diagnostics_restore_icons_requested = Signal()
     diagnostics_refresh_takeover_requested = Signal()
@@ -334,7 +689,6 @@ class SettingsWindow(QWidget):
         ui_preferences: UiPreferences | None = None,
         takeover_confirmation: Callable[[], bool] | None = None,
         delete_confirmation: Callable[[str, str], tuple[bool, bool]] | None = None,
-        rename_prompt: Callable[[str, str], str | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -354,9 +708,12 @@ class SettingsWindow(QWidget):
         self._ui_preferences = ui_preferences or UiPreferences()
         self._takeover_confirmation = takeover_confirmation
         self._delete_confirmation = delete_confirmation
-        self._rename_prompt = rename_prompt
         self._management_selection_kind = "panel"
         self._selected_tab_id = ""
+        self._panel_group_row_widgets: dict[str, EditableRowWidget] = {}
+        self._panel_group_editors: dict[str, QLineEdit] = {}
+        self._panel_tab_row_widgets: dict[str, EditableRowWidget] = {}
+        self._panel_tab_editors: dict[str, QLineEdit] = {}
         self.setWindowTitle("设置")
         self.resize(820, 600)
 
@@ -502,9 +859,6 @@ class SettingsWindow(QWidget):
         form.addRow(self._startup_checkbox)
         self._takeover_status_label = QLabel("", page)
         form.addRow("接管状态", self._takeover_status_label)
-        self._restore_desktop_button = QPushButton("恢复桌面图标", page)
-        self._restore_desktop_button.clicked.connect(self.restore_desktop_requested.emit)
-        form.addRow(self._restore_desktop_button)
         self._update_takeover_status_label()
         return page
 
@@ -534,12 +888,15 @@ class SettingsWindow(QWidget):
         right.addLayout(actions)
         self._panel_summary_label = QLabel("", page)
         right.addWidget(self._panel_summary_label)
-        right.addWidget(QLabel("预览", page))
-        self._panel_preview_container = QWidget(page)
-        self._panel_preview_layout = QGridLayout(self._panel_preview_container)
-        self._panel_preview_group_buttons: dict[str, QPushButton] = {}
-        self._panel_preview_tab_buttons: dict[str, QPushButton] = {}
-        right.addWidget(self._panel_preview_container)
+        self._panel_layout_preview = LayoutPreviewWidget(self._config, self._screen_infos, page)
+        self._panel_layout_preview.group_selected.connect(self._select_panel_from_preview)
+        self._panel_layout_preview.tab_selected.connect(self._select_tab_from_preview)
+        self._panel_layout_preview.group_rename_requested.connect(self._begin_panel_inline_rename_by_id)
+        self._panel_layout_preview.tab_rename_requested.connect(self._begin_tab_inline_rename_by_id)
+        self._panel_layout_preview.group_geometry_changed.connect(
+            self.management_group_geometry_changed.emit
+        )
+        right.addWidget(self._panel_layout_preview)
         right.addWidget(QLabel("标签", page))
         self._panel_tab_list = QListWidget(page)
         self._panel_tab_list.currentRowChanged.connect(self._select_panel_tab_row)
@@ -572,22 +929,22 @@ class SettingsWindow(QWidget):
         self._panel_group_list.blockSignals(True)
         self._panel_group_list.clear()
         self._panel_group_count_labels = {}
+        self._panel_group_row_widgets = {}
+        self._panel_group_editors = {}
         selected_row = 0
         for index, group in enumerate(config.panel_groups):
             item = QListWidgetItem(group.name or f"面板 {index + 1}")
-            item.setSizeHint(QSize(220, 34))
+            item.setSizeHint(QSize(220, 40))
             item.setData(Qt.ItemDataRole.UserRole, group.id)
             self._panel_group_list.addItem(item)
-            row_widget = QWidget(self._panel_group_list)
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(8, 2, 8, 2)
-            row_layout.addWidget(QLabel(item.text(), row_widget))
-            row_layout.addStretch(1)
-            count_label = QLabel(str(len(group.tab_ids)), row_widget)
-            count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            row_layout.addWidget(count_label)
+            row_widget = EditableRowWidget(item.text(), str(len(group.tab_ids)), self._panel_group_list)
+            row_widget.rename_committed.connect(
+                lambda value, group_id=group.id: self._commit_panel_rename(group_id, value)
+            )
             self._panel_group_list.setItemWidget(item, row_widget)
-            self._panel_group_count_labels[group.id] = count_label
+            self._panel_group_row_widgets[group.id] = row_widget
+            self._panel_group_editors[group.id] = row_widget.editor
+            self._panel_group_count_labels[group.id] = row_widget.count_label
             if group.id == self._group_id:
                 selected_row = index
         self._panel_group_list.setCurrentRow(selected_row)
@@ -618,6 +975,10 @@ class SettingsWindow(QWidget):
         if tab_id:
             self._selected_tab_id = tab_id
             self._management_selection_kind = "tab"
+            group = self._target_group()
+            if tab_id in group.tab_ids:
+                group.active_tab_id = tab_id
+            self._rebuild_panel_preview()
 
     def _sync_panel_detail(self) -> None:
         if not hasattr(self, "_panel_tab_list"):
@@ -627,14 +988,24 @@ class SettingsWindow(QWidget):
         self._panel_summary_label.setText(f"位置：{self._screen_label(group.screen_id)}")
         self._panel_tab_list.blockSignals(True)
         self._panel_tab_list.clear()
+        self._panel_tab_row_widgets = {}
+        self._panel_tab_editors = {}
         for tab_id in group.tab_ids:
             tab = tabs_by_id.get(tab_id)
             if tab is None:
                 continue
             marker = "当前 · " if tab.id == group.active_tab_id else ""
             item = QListWidgetItem(f"{marker}{tab.name}")
+            item.setSizeHint(QSize(320, 36))
             item.setData(Qt.ItemDataRole.UserRole, tab.id)
             self._panel_tab_list.addItem(item)
+            row_widget = EditableRowWidget(f"{marker}{tab.name}", "", self._panel_tab_list)
+            row_widget.rename_committed.connect(
+                lambda value, target_tab_id=tab.id: self._commit_tab_rename(target_tab_id, value)
+            )
+            self._panel_tab_list.setItemWidget(item, row_widget)
+            self._panel_tab_row_widgets[tab.id] = row_widget
+            self._panel_tab_editors[tab.id] = row_widget.editor
         if self._panel_tab_list.count():
             active_row = max(0, group.tab_ids.index(group.active_tab_id))
             self._panel_tab_list.setCurrentRow(active_row)
@@ -649,38 +1020,14 @@ class SettingsWindow(QWidget):
         return "主屏" if screen_id == "primary" else screen_id
 
     def _rebuild_panel_preview(self) -> None:
-        if not hasattr(self, "_panel_preview_layout"):
+        if not hasattr(self, "_panel_layout_preview"):
             return
-        while self._panel_preview_layout.count():
-            item = self._panel_preview_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-        self._panel_preview_group_buttons = {}
-        self._panel_preview_tab_buttons = {}
-        tabs_by_id = {tab.id: tab for tab in self._config.panel_tabs}
-        for row, group in enumerate(self._config.panel_groups):
-            group_button = QPushButton(group.name, self._panel_preview_container)
-            group_button.setCheckable(True)
-            group_button.setChecked(group.id == self._group_id)
-            group_button.clicked.connect(
-                lambda _checked=False, value=group.id: self._select_panel_from_preview(value)
-            )
-            self._panel_preview_layout.addWidget(group_button, row, 0)
-            self._panel_preview_group_buttons[group.id] = group_button
-            for column, tab_id in enumerate(group.tab_ids[:5], start=1):
-                tab = tabs_by_id.get(tab_id)
-                if tab is None:
-                    continue
-                tab_button = QPushButton(tab.name, self._panel_preview_container)
-                tab_button.setCheckable(True)
-                tab_button.setChecked(group.id == self._group_id and tab.id == group.active_tab_id)
-                tab_button.clicked.connect(
-                    lambda _checked=False, value=tab.id: self._select_tab_from_preview(value)
-                )
-                self._panel_preview_layout.addWidget(tab_button, row, column)
-                self._panel_preview_tab_buttons[tab.id] = tab_button
+        self._panel_layout_preview.set_state(
+            self._config,
+            self._screen_infos,
+            self._group_id,
+            self._selected_tab_id or self._target_group().active_tab_id,
+        )
 
     def _select_panel_from_preview(self, group_id: str) -> None:
         for row in range(self._panel_group_list.count()):
@@ -717,12 +1064,20 @@ class SettingsWindow(QWidget):
         self._rule_name_label = QLabel("", page)
         self._rule_target_combo = QComboBox(page)
         self._rule_extension_editor = ExtensionTagEditor([], page)
+        self._rule_extension_panel = QFrame(page)
+        self._rule_extension_panel.setMinimumHeight(220)
+        self._rule_extension_panel.setMaximumHeight(220)
+        extension_panel_layout = QVBoxLayout(self._rule_extension_panel)
+        extension_panel_layout.setContentsMargins(0, 0, 0, 0)
+        extension_panel_layout.addWidget(self._rule_extension_editor)
+        self._rule_folder_note = QLabel("按文件夹类型整理", page)
         self._rule_type_label = QLabel("", page)
         self._rule_current_preset_label = QLabel("", page)
         self._rule_preset_buttons: dict[str, QPushButton] = {}
         preset_row = QHBoxLayout()
         for preset in ("图片", "文档", "压缩包", "应用", "代码"):
             button = QPushButton(preset, page)
+            button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, value=preset: self._apply_rule_preset(value))
             preset_row.addWidget(button)
             self._rule_preset_buttons[preset] = button
@@ -737,7 +1092,8 @@ class SettingsWindow(QWidget):
         detail.addWidget(self._rule_current_preset_label)
         detail.addLayout(preset_row)
         detail.addWidget(QLabel("后缀列表", page))
-        detail.addWidget(self._rule_extension_editor, stretch=1)
+        detail.addWidget(self._rule_folder_note)
+        detail.addWidget(self._rule_extension_panel, stretch=1)
         body.addLayout(detail, stretch=2)
         layout.addLayout(body, stretch=1)
         self._reload_rules_editor()
@@ -805,14 +1161,16 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("功能面板", page))
         card = QFrame(page)
+        self._clock_widget_card = card
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
-            "QFrame { background: #242424; border: 1px solid #444; border-radius: 8px; }"
+            "QFrame { background: #2f2538; border: 1px solid #7b4d68; border-radius: 10px; }"
             "QLabel { color: #ffffff; background: transparent; }"
+            "QPushButton { background: #d99abd; color: #111111; border-radius: 8px; font-weight: 700; }"
         )
         card_layout = QVBoxLayout(card)
         header = QHBoxLayout()
-        header.addWidget(QLabel("时间面板预览", card))
+        header.addWidget(QLabel("时间面板", card))
         header.addStretch(1)
         self._add_clock_panel_button = QPushButton("+", card)
         self._add_clock_panel_button.setFixedSize(34, 30)
@@ -825,7 +1183,10 @@ class SettingsWindow(QWidget):
         preview = QLabel("12:34\n2026-05-28", card)
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview.setMinimumHeight(90)
-        preview.setStyleSheet("font-size: 24px; font-weight: 600;")
+        preview.setStyleSheet(
+            "font-size: 24px; font-weight: 700; color: #ffe4f0; "
+            "background: #51344a; border-radius: 10px; padding: 12px;"
+        )
         card_layout.addWidget(preview)
         layout.addWidget(card)
         layout.addStretch(1)
@@ -892,6 +1253,7 @@ class SettingsWindow(QWidget):
 
     def _build_other_page(self) -> QWidget:
         page = QWidget(self)
+        self._other_page = page
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("其他", page))
         layout.addWidget(QLabel("把不常用的提示和偏好恢复到默认状态。", page))
@@ -902,8 +1264,13 @@ class SettingsWindow(QWidget):
         self._reset_delete_confirmations_button.clicked.connect(
             self._reset_delete_confirmations
         )
+        self._other_restore_desktop_button = QPushButton("恢复桌面图标", page)
+        self._other_restore_desktop_button.clicked.connect(
+            self.restore_desktop_requested.emit
+        )
         row = QHBoxLayout()
         row.addStretch(1)
+        row.addWidget(self._other_restore_desktop_button)
         row.addWidget(self._reset_delete_confirmations_button)
         layout.addLayout(row)
         layout.addStretch(1)
@@ -920,11 +1287,19 @@ class SettingsWindow(QWidget):
         self._history_grid_columns = 3 if self.width() >= 900 else 2
         for index, snapshot in enumerate(snapshots):
             preview_path = str(getattr(snapshot, "preview_path", "") or "")
+            config = getattr(snapshot, "configuration", None)
+            preview_tab_names = layout_preview_tab_names(config) if isinstance(config, Configuration) else []
             if preview_path and Path(preview_path).is_file():
                 icon = QIcon(preview_path)
             else:
                 icon = self._layout_preview_icon(snapshot)
-            card = HistoryCardWidget(snapshot, icon, self._history_card_preview_size, self._history_grid_host)
+            card = HistoryCardWidget(
+                snapshot,
+                icon,
+                self._history_card_preview_size,
+                preview_tab_names,
+                self._history_grid_host,
+            )
             card.restore_button.clicked.connect(
                 lambda _checked=False, value=card.snapshot_id: self.history_restore_requested.emit(value)
             )
@@ -949,20 +1324,9 @@ class SettingsWindow(QWidget):
             painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "无布局")
             painter.end()
             return QIcon(pixmap)
-        colors = ["#934A69", "#4B5563", "#25636B", "#7C6A46"]
-        for index, group in enumerate(groups):
-            geometry = group.geometry
-            rect = QRectF(
-                12 + geometry.rx * (size.width() - 24),
-                12 + geometry.ry * (size.height() - 24),
-                max(16, geometry.rw * (size.width() - 24)),
-                max(12, geometry.rh * (size.height() - 24)),
-            )
-            painter.setBrush(QColor(colors[index % len(colors)]))
-            painter.setPen(QPen(QColor("#d7d7d7"), 1))
-            painter.drawRoundedRect(rect, 4, 4)
         painter.end()
-        return QIcon(pixmap)
+        screens = self._screen_infos or [ScreenInfo("primary", "主屏", QRect(0, 0, 1920, 1080))]
+        return QIcon(render_layout_preview_pixmap(config, screens, size))
 
     def set_diagnostics(self, snapshot: object, recent_logs: list[str]) -> None:
         self._diagnostics_summary.setPlainText(self._format_diagnostics(snapshot))
@@ -1067,12 +1431,18 @@ class SettingsWindow(QWidget):
         rule = next((entry for entry in self._config.rules if entry.id == rule_id), None)
         if rule is None:
             return
+        self._rule_enabled_checkbox.blockSignals(True)
         self._rule_enabled_checkbox.setChecked(rule.enabled)
+        self._rule_enabled_checkbox.blockSignals(False)
         self._rule_name_label.setText(rule.name)
         self._rule_type_label.setText("文件夹" if rule.matcher_kind == "folder" else "后缀匹配" if rule.matcher_kind == "extension" else "其它")
         self._rule_extension_editor.set_extensions(list(rule.extensions))
         preset_name = self._preset_name_for_extensions(rule.extensions)
-        self._rule_current_preset_label.setText(preset_name or "自定义")
+        self._rule_current_preset_label.setText(f"当前预设：{preset_name or '自定义'}")
+        self._sync_rule_preset_buttons(preset_name)
+        is_folder_rule = rule.matcher_kind == "folder"
+        self._rule_folder_note.setVisible(is_folder_rule)
+        self._rule_extension_panel.setVisible(not is_folder_rule)
         self._rule_target_combo.clear()
         self._rule_target_combo.addItem("（无）", "")
         tab_names = {
@@ -1098,8 +1468,23 @@ class SettingsWindow(QWidget):
     def _apply_rule_preset(self, name: str) -> None:
         if not hasattr(self, "_rule_extension_editor"):
             return
+        self._rule_extension_editor.set_extensions([])
         self._rule_extension_editor.apply_preset(name)
-        self._rule_current_preset_label.setText(name)
+        self._rule_current_preset_label.setText(f"当前预设：{name}")
+        self._sync_rule_preset_buttons(name)
+
+    def _sync_rule_preset_buttons(self, selected_name: str) -> None:
+        for name, button in self._rule_preset_buttons.items():
+            checked = name == selected_name
+            button.setChecked(checked)
+            button.setStyleSheet(
+                "QPushButton { padding: 4px 18px; }"
+                + (
+                    "QPushButton { background: #d99abd; color: #111111; border: 1px solid #f2c4db; }"
+                    if checked
+                    else ""
+                )
+            )
 
     def _suggested_target_for_rule(self, rule, config: Configuration) -> str:  # type: ignore[no-untyped-def]
         tab_ids = {tab.id for tab in config.panel_tabs if tab.content_kind == "items"}
@@ -1267,35 +1652,51 @@ class SettingsWindow(QWidget):
 
     def _rename_panel_from_item(self, item: QListWidgetItem) -> None:
         group_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
-        group = next((entry for entry in self._config.panel_groups if entry.id == group_id), None)
-        if group is None:
-            return
-        new_name = self._ask_for_name("panel", group.name)
-        if new_name is None:
-            return
-        group.name = new_name.strip() or "未命名面板"
-        self._reload_panel_management(self._config)
-        self.management_metadata_changed.emit()
+        self._begin_panel_inline_rename_by_id(group_id)
 
     def _rename_tab_from_item(self, item: QListWidgetItem) -> None:
         tab_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        self._begin_tab_inline_rename_by_id(tab_id)
+
+    def _begin_panel_inline_rename_by_id(self, group_id: str) -> None:
+        for row in range(self._panel_group_list.count()):
+            item = self._panel_group_list.item(row)
+            if str(item.data(Qt.ItemDataRole.UserRole) or "") == group_id:
+                self._panel_group_list.setCurrentRow(row)
+                break
+        row_widget = self._panel_group_row_widgets.get(group_id)
+        if row_widget is not None:
+            row_widget.begin_edit()
+
+    def _begin_tab_inline_rename_by_id(self, tab_id: str) -> None:
         tab = next((entry for entry in self._config.panel_tabs if entry.id == tab_id), None)
         if tab is None:
             return
-        new_name = self._ask_for_name("tab", tab.name)
-        if new_name is None:
+        self._select_panel_from_preview(tab.group_id)
+        for row in range(self._panel_tab_list.count()):
+            item = self._panel_tab_list.item(row)
+            if str(item.data(Qt.ItemDataRole.UserRole) or "") == tab_id:
+                self._panel_tab_list.setCurrentRow(row)
+                break
+        row_widget = self._panel_tab_row_widgets.get(tab_id)
+        if row_widget is not None:
+            row_widget.begin_edit()
+
+    def _commit_panel_rename(self, group_id: str, value: str) -> None:
+        group = next((entry for entry in self._config.panel_groups if entry.id == group_id), None)
+        if group is None:
             return
-        tab.name = new_name.strip() or "未命名面板"
+        group.name = value.strip() or "未命名面板"
         self._reload_panel_management(self._config)
         self.management_metadata_changed.emit()
 
-    def _ask_for_name(self, kind: str, current: str) -> str | None:
-        if self._rename_prompt is not None:
-            return self._rename_prompt(kind, current)
-        title = "重命名面板" if kind == "panel" else "重命名标签"
-        label = "名称"
-        text, accepted = QInputDialog.getText(self, title, label, text=current)
-        return text if accepted else None
+    def _commit_tab_rename(self, tab_id: str, value: str) -> None:
+        tab = next((entry for entry in self._config.panel_tabs if entry.id == tab_id), None)
+        if tab is None:
+            return
+        tab.name = value.strip() or "未命名标签"
+        self._reload_panel_management(self._config)
+        self.management_metadata_changed.emit()
 
     def _request_delete_selected_panel(self) -> None:
         if len(self._config.panel_groups) <= 1:
@@ -1385,3 +1786,6 @@ class SettingsWindow(QWidget):
 
     def _rules_page_text(self) -> str:
         return self._widget_text(self._rules_page)
+
+    def _other_page_text(self) -> str:
+        return self._widget_text(self._other_page)
