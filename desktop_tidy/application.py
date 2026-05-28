@@ -198,15 +198,30 @@ class DesktopCleanerApplication:
     def save(self) -> None:
         self.store.save(self.model.config)
 
-    def save_with_history(self, reason: str) -> None:
+    def save_with_history(self, reason: str, *, merge_key: str = "") -> None:
         try:
             fingerprint = self.history_store.fingerprint(self.model.config)
             if fingerprint != self._last_layout_history_fingerprint:
-                self.history_store.push(self.model.config, reason)
+                self.history_store.push(
+                    self.model.config,
+                    reason,
+                    merge_key=merge_key or self._history_merge_key(reason),
+                )
                 self._last_layout_history_fingerprint = fingerprint
         except Exception as exc:
             log_exception(f"record layout history: {reason}", exc)
         self.save()
+
+    def _history_merge_key(self, reason: str) -> str:
+        if reason in {
+            "appearance-change",
+            "geometry-change",
+            "settings-preview-move",
+            "tab-reorder",
+            "panel-change",
+        }:
+            return reason
+        return ""
 
     def _on_about_to_quit(self) -> None:
         if self._shutdown_started:

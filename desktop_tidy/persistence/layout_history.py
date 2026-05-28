@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+from typing import Callable
 import uuid
 
 from desktop_tidy.domain.models import Configuration, validate_configuration
@@ -56,9 +57,16 @@ class LayoutSnapshot:
 class LayoutHistoryStore:
     """Stores recent configuration snapshots without touching source files."""
 
-    def __init__(self, path: Path, *, limit: int = 10) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        limit: int = 10,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.path = Path(path)
         self.limit = limit
+        self._clock = clock or datetime.now
 
     def load(self) -> list[LayoutSnapshot]:
         if not self.path.is_file():
@@ -80,16 +88,46 @@ class LayoutHistoryStore:
             snapshots.append(snapshot)
         return snapshots[-self.limit :]
 
-    def push(self, config: Configuration, reason: str) -> LayoutSnapshot | None:
+    def push(
+        self,
+        config: Configuration,
+        reason: str,
+        *,
+        merge_key: str = "",
+        merge_window_seconds: int = 300,
+    ) -> LayoutSnapshot | None:
         validate_configuration(config)
         snapshots = self.load()
         fingerprint = self.fingerprint(config)
         if snapshots and self.fingerprint(snapshots[-1].configuration) == fingerprint:
             return None
+        now = self._clock()
+        if snapshots and merge_key:
+            last = snapshots[-1]
+            try:
+                last_created = datetime.fromisoformat(last.created_at)
+            except ValueError:
+                last_created = None
+            if (
+                last.reason == merge_key
+                and last_created is not None
+                and (now - last_created).total_seconds() <= merge_window_seconds
+            ):
+                snapshot = LayoutSnapshot(
+                    id=last.id,
+                    created_at=last.created_at,
+                    reason=merge_key,
+                    configuration=Configuration.from_dict(config.to_dict()),
+                    preview_kind=last.preview_kind,
+                    preview_path=last.preview_path,
+                )
+                snapshots[-1] = snapshot
+                self._save(snapshots)
+                return snapshot
         snapshot = LayoutSnapshot(
             id=f"layout-{uuid.uuid4().hex}",
-            created_at=datetime.now().isoformat(timespec="seconds"),
-            reason=reason,
+            created_at=now.isoformat(timespec="seconds"),
+            reason=merge_key or reason,
             configuration=Configuration.from_dict(config.to_dict()),
         )
         snapshots.append(snapshot)

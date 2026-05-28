@@ -47,6 +47,8 @@ from desktop_tidy.ui.panel_preview import (
     layout_preview_tab_names as shared_layout_preview_tab_names,
     render_layout_preview_pixmap as shared_render_layout_preview_pixmap,
 )
+from desktop_tidy.widgets.models import WidgetDefinition
+from desktop_tidy.widgets.registry import BuiltinWidgetRegistry
 
 _SECTIONS = ["面板管理", "桌面整理", "面板外观"]
 _OPACITY_MIN = 0.10
@@ -375,11 +377,12 @@ class ExtensionTagEditor(QWidget):
         self._custom_input.clear()
 
     def _rebuild_chips(self) -> None:
-        for chip in self._chip_widgets:
-            chip.setParent(None)
-            chip.deleteLater()
         while self._chips_flow.count():
-            self._chips_flow.takeAt(0)
+            item = self._chips_flow.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
         self._chip_widgets = []
         for extension in self._extensions:
             chip = QPushButton(extension, self._chips_host)
@@ -1448,28 +1451,43 @@ class SettingsWindow(QWidget):
         page = QWidget(self)
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("功能面板", page))
-        card = QFrame(page)
-        self._clock_widget_card = card
-        card.setFixedSize(320, 190)
+        registry = BuiltinWidgetRegistry()
+        for definition in registry.available():
+            card = self._build_widget_definition_card(definition, page)
+            if definition.id == "clock":
+                self._clock_widget_card = card
+            layout.addWidget(card, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        layout.addStretch(1)
+        return page
+
+    def _build_widget_definition_card(
+        self,
+        definition: WidgetDefinition,
+        parent: QWidget,
+    ) -> QFrame:
+        card = QFrame(parent)
+        card.setFixedSize(definition.default_width, definition.default_height)
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
-            "QFrame { background: #2f2538; border: 1px solid #7b4d68; border-radius: 10px; }"
+            f"QFrame {{ background: #2f2538; border: 1px solid {definition.accent_color}; border-radius: 10px; }}"
             "QLabel { color: #ffffff; background: transparent; }"
-            "QPushButton { background: #d99abd; color: #111111; border-radius: 8px; font-weight: 700; }"
+            f"QPushButton {{ background: {definition.accent_color}; color: #111111; border-radius: 8px; font-weight: 700; }}"
         )
         card_layout = QVBoxLayout(card)
         header = QHBoxLayout()
-        header.addWidget(QLabel("时间面板", card))
+        header.addWidget(QLabel(definition.display_name, card))
         header.addStretch(1)
-        self._add_clock_panel_button = QPushButton("+", card)
-        self._add_clock_panel_button.setFixedSize(34, 30)
-        self._add_clock_panel_button.setToolTip("创建独立时间面板")
-        self._add_clock_panel_button.clicked.connect(
-            lambda: self.add_widget_panel_requested.emit("clock")
+        button = QPushButton("+", card)
+        button.setFixedSize(34, 30)
+        button.setToolTip(f"创建独立{definition.display_name}")
+        button.clicked.connect(
+            lambda _checked=False, widget_id=definition.id: self.add_widget_panel_requested.emit(widget_id)
         )
-        header.addWidget(self._add_clock_panel_button)
+        if definition.id == "clock":
+            self._add_clock_panel_button = button
+        header.addWidget(button)
         card_layout.addLayout(header)
-        preview = QLabel("12:34\n2026-05-28", card)
+        preview = QLabel(f"{definition.preview_title}\n{definition.preview_body}", card)
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview.setFixedHeight(108)
         preview.setStyleSheet(
@@ -1477,9 +1495,7 @@ class SettingsWindow(QWidget):
             "background: #51344a; border-radius: 10px; padding: 12px;"
         )
         card_layout.addWidget(preview)
-        layout.addWidget(card, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        layout.addStretch(1)
-        return page
+        return card
 
     def _build_diagnostics_page(self) -> QWidget:
         page = QWidget(self)

@@ -15,9 +15,11 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QComboBox
 
 from desktop_tidy.domain.defaults import build_default_configuration
+from desktop_tidy.domain.models import PanelGeometry
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.ui_preferences import UiPreferences
 from desktop_tidy.services.screens import ScreenInfo
+from desktop_tidy.ui.panel_preview import PanelPreviewWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 
 _SUPPORTED_SECTIONS = ["面板管理", "桌面整理", "面板外观"]
@@ -213,6 +215,33 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertTrue(moved_spy.at(moved_spy.count() - 1)[2])
         self.assertNotEqual(second_group.geometry.rx, 0.04)
 
+    def test_panel_preview_uses_real_desktop_coordinates_for_all_screens(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        secondary = model.add_item_panel("副屏面板")
+        config.panel_groups[0].screen_id = "primary"
+        config.panel_groups[0].geometry = PanelGeometry(0.10, 0.10, 0.34, 0.32)
+        secondary.screen_id = "secondary"
+        secondary.geometry = PanelGeometry(0.50, 0.25, 0.36, 0.42)
+        screens = [
+            ScreenInfo("secondary", "副屏", QRect(-1280, 120, 1280, 720)),
+            ScreenInfo("primary", "主屏", QRect(0, 0, 1920, 1080)),
+        ]
+        preview = PanelPreviewWidget(config, screens)
+        preview.resize(900, 320)
+        preview.show()
+        type(self).app.processEvents()
+
+        secondary_screen = preview.screen_rect("secondary")
+        primary_screen = preview.screen_rect("primary")
+        secondary_panel = preview.group_rect(secondary.id)
+        primary_panel = preview.group_rect(config.panel_groups[0].id)
+
+        self.assertLess(secondary_screen.right(), primary_screen.left())
+        self.assertTrue(secondary_screen.contains(secondary_panel.center()))
+        self.assertTrue(primary_screen.contains(primary_panel.center()))
+        self.assertNotEqual(secondary_panel.center(), primary_panel.center())
+
     def test_panel_layout_preview_reorders_tabs_live_and_final(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
@@ -284,6 +313,13 @@ class SettingsWindowTests(unittest.TestCase):
         type(self).app.processEvents()
         self.assertTrue(window._rule_extension_editor.is_flow_layout_enabled())
         self.assertGreaterEqual(window._rule_extension_editor.chip_row_count_for_width(360), 2)
+        stable_top_levels = set(QApplication.topLevelWidgets())
+        for row in range(window._rule_list.count()):
+            window._rule_list.setCurrentRow(row)
+            for button in window._rule_preset_buttons.values():
+                button.click()
+            type(self).app.processEvents()
+        self.assertEqual(set(QApplication.topLevelWidgets()) - stable_top_levels, set())
 
     def test_appearance_page_uses_swatch_slider_and_percent_spinbox(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")

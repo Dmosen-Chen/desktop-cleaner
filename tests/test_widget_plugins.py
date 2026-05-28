@@ -7,6 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel
 
+from desktop_tidy.widgets.models import WidgetDefinition
+from desktop_tidy.widgets.registry import BuiltinWidgetRegistry as ModularWidgetRegistry
 from desktop_tidy.ui.widget_plugins import BuiltinWidgetRegistry, UnknownWidgetPlugin
 
 
@@ -22,7 +24,7 @@ class WidgetPluginTests(unittest.TestCase):
         widget = plugin.create_widget(plugin.default_settings())
 
         self.assertEqual(plugin.id, "clock")
-        self.assertEqual(plugin.display_name, "时间")
+        self.assertEqual(plugin.display_name, "时间面板")
         self.assertTrue(widget.findChildren(QLabel))
         self.assertLessEqual(widget.maximumWidth(), 340)
         self.assertLessEqual(widget.maximumHeight(), 190)
@@ -37,6 +39,20 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertIsNotNone(label)
         self.assertIn("未知功能面板", label.text())
         self.assertIn("missing-widget", label.text())
+
+
+    def test_modular_registry_exposes_widget_definitions(self) -> None:
+        registry = ModularWidgetRegistry()
+
+        definitions = registry.available()
+        clock = next(definition for definition in definitions if definition.id == "clock")
+
+        self.assertIsInstance(clock, WidgetDefinition)
+        self.assertEqual(clock.display_name, "时间面板")
+        self.assertEqual(clock.default_width, 320)
+        self.assertEqual(clock.default_height, 190)
+        self.assertEqual(clock.max_width, 340)
+        self.assertEqual(clock.max_height, 190)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import json
 import unittest
 from pathlib import Path
@@ -108,6 +109,36 @@ class LayoutHistoryStoreTests(unittest.TestCase):
             snapshots = store.load()
             self.assertEqual(len(snapshots), 10)
             self.assertEqual(snapshots[0].reason, "move-2")
+
+    def test_push_coalesces_same_merge_key_within_five_minutes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            now = datetime(2026, 5, 28, 12, 0, 0)
+
+            def clock() -> datetime:
+                return now
+
+            store = LayoutHistoryStore(Path(tmp) / "layout-history.json", clock=clock)
+            config = build_default_configuration(r"D:\Desktop")
+
+            store.push(config, reason="appearance-change", merge_key="appearance")
+            first_id = store.load()[0].id
+            now = now + timedelta(minutes=3)
+            config.panel_groups[0].appearance.background_opacity = 0.72
+            store.push(config, reason="appearance-change", merge_key="appearance")
+
+            snapshots = store.load()
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].id, first_id)
+            self.assertAlmostEqual(
+                snapshots[0].configuration.panel_groups[0].appearance.background_opacity,
+                0.72,
+            )
+
+            now = now + timedelta(minutes=6)
+            config.panel_groups[0].appearance.background_opacity = 0.43
+            store.push(config, reason="appearance-change", merge_key="appearance")
+
+            self.assertEqual(len(store.load()), 2)
 
 
 if __name__ == "__main__":
