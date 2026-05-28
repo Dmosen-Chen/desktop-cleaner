@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QCloseEvent, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,15 +24,15 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSlider,
+    QSpinBox,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from desktop_tidy.domain.models import Configuration, InvalidConfiguration, validate_configuration
-from desktop_tidy.services.screens import available_screen_options
+from desktop_tidy.persistence.ui_preferences import UiPreferences
+from desktop_tidy.services.screens import ScreenInfo, available_screens
 
 _SECTIONS = ["基础设置", "面板管理", "桌面整理", "面板外观"]
 _OPACITY_MIN = 0.10
@@ -78,7 +78,107 @@ _DEFAULT_RULE_ROLES = {
     "rule-apps": "apps",
     "rule-other": "other",
 }
-_SECTIONS = _SECTIONS + ["面板历史", "功能面板", "诊断与恢复"]
+_SECTIONS = _SECTIONS + ["面板历史", "功能面板", "诊断与恢复", "其他"]
+
+
+class ScreenLayoutWidget(QWidget):
+    screen_selected = Signal(str)
+    identify_requested = Signal()
+
+    def __init__(
+        self,
+        screens: list[ScreenInfo],
+        selected_screen_id: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._screens = screens
+        self._selected_screen_id = selected_screen_id
+        self._buttons: dict[str, QPushButton] = {}
+        self.setMinimumSize(420, 220)
+        self.resize(420, 220)
+        self._identify_button = QPushButton("识别", self)
+        self._identify_button.clicked.connect(self.identify_requested.emit)
+        self._rebuild_buttons()
+
+    @property
+    def buttons(self) -> dict[str, QPushButton]:
+        return self._buttons
+
+    def set_selected_screen(self, screen_id: str) -> None:
+        self._selected_screen_id = screen_id
+        self._sync_button_styles()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        self._layout_buttons()
+
+    def _rebuild_buttons(self) -> None:
+        for button in self._buttons.values():
+            button.setParent(None)
+            button.deleteLater()
+        self._buttons = {}
+        for index, screen in enumerate(self._screens, start=1):
+            button = QPushButton(str(index), self)
+            button.setCheckable(True)
+            button.setToolTip(screen.label)
+            button.clicked.connect(
+                lambda _checked=False, value=screen.screen_id: self._select_screen(value)
+            )
+            self._buttons[screen.screen_id] = button
+        self._layout_buttons()
+        self._sync_button_styles()
+
+    def _select_screen(self, screen_id: str) -> None:
+        self._selected_screen_id = screen_id
+        self._sync_button_styles()
+        self.screen_selected.emit(screen_id)
+
+    def _layout_buttons(self) -> None:
+        if not self._screens:
+            return
+        geometries = [screen.geometry for screen in self._screens]
+        min_x = min(rect.x() for rect in geometries)
+        min_y = min(rect.y() for rect in geometries)
+        max_x = max(rect.x() + rect.width() for rect in geometries)
+        max_y = max(rect.y() + rect.height() for rect in geometries)
+        total_width = max(1, max_x - min_x)
+        total_height = max(1, max_y - min_y)
+        margin = 16
+        action_height = 42
+        available_width = max(1, self.width() - margin * 2)
+        available_height = max(1, self.height() - margin * 2 - action_height)
+        scale = min(available_width / total_width, available_height / total_height)
+        used_width = total_width * scale
+        used_height = total_height * scale
+        offset_x = margin + int((available_width - used_width) / 2)
+        offset_y = margin + int((available_height - used_height) / 2)
+        for screen in self._screens:
+            rect = screen.geometry
+            button = self._buttons[screen.screen_id]
+            button.setGeometry(
+                offset_x + int((rect.x() - min_x) * scale),
+                offset_y + int((rect.y() - min_y) * scale),
+                max(58, int(rect.width() * scale)),
+                max(44, int(rect.height() * scale)),
+            )
+        self._identify_button.setGeometry(
+            max(margin, self.width() - 116),
+            max(margin, self.height() - 40),
+            92,
+            30,
+        )
+
+    def _sync_button_styles(self) -> None:
+        for screen_id, button in self._buttons.items():
+            checked = screen_id == self._selected_screen_id
+            button.setChecked(checked)
+            background = "#934A69" if checked else "#2F2F2F"
+            button.setStyleSheet(
+                f"QPushButton {{ color: #ffffff; background: {background}; "
+                "border: 1px solid #555; border-radius: 8px; font-size: 28px; }}"
+                "QPushButton:hover { border-color: #d7b0c2; }"
+            )
 
 
 class ExtensionTagEditor(QWidget):
@@ -176,11 +276,13 @@ class SettingsWindow(QWidget):
     restore_desktop_requested = Signal()
     add_item_panel_requested = Signal()
     add_item_tab_requested = Signal()
+    delete_item_panel_requested = Signal(str)
+    delete_item_tab_requested = Signal(str)
     identify_screens_requested = Signal()
     add_widget_panel_requested = Signal(str)
-    add_widget_tab_requested = Signal(str)
     history_restore_requested = Signal(str)
     history_capture_preview_requested = Signal(str)
+    ui_preferences_changed = Signal()
     diagnostics_refresh_requested = Signal()
     diagnostics_restore_icons_requested = Signal()
     diagnostics_refresh_takeover_requested = Signal()
@@ -192,20 +294,30 @@ class SettingsWindow(QWidget):
         config: Configuration,
         *,
         group_id: str | None = None,
+        screen_infos: list[ScreenInfo] | None = None,
         screen_options: list[tuple[str, str]] | None = None,
+        ui_preferences: UiPreferences | None = None,
         takeover_confirmation: Callable[[], bool] | None = None,
+        delete_confirmation: Callable[[str, str], tuple[bool, bool]] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
         self._group_id = group_id or config.panel_groups[0].id
-        self._screen_options = screen_options or available_screen_options()
+        if screen_infos is None and screen_options is not None:
+            screen_infos = [
+                ScreenInfo(screen_id, label, QRect(index * 1280, 0, 1280, 720))
+                for index, (screen_id, label) in enumerate(screen_options)
+            ]
+        self._screen_infos = screen_infos or available_screens()
         self._selected_screen_id = self._target_group(config).screen_id or config.desktop.primary_screen_id
-        self._screen_card_buttons: dict[str, QPushButton] = {}
+        self._screen_layout_buttons: dict[str, QPushButton] = {}
         self._rule_extension_editors: dict[str, ExtensionTagEditor] = {}
         self._color_swatch_buttons: dict[str, QPushButton] = {}
         self._selected_color = self._target_group(config).appearance.background_color
+        self._ui_preferences = ui_preferences or UiPreferences()
         self._takeover_confirmation = takeover_confirmation
+        self._delete_confirmation = delete_confirmation
         self.setWindowTitle("设置")
         self.resize(820, 600)
 
@@ -222,6 +334,7 @@ class SettingsWindow(QWidget):
         self._pages.addWidget(self._build_history_page())
         self._pages.addWidget(self._build_widgets_page())
         self._pages.addWidget(self._build_diagnostics_page())
+        self._pages.addWidget(self._build_other_page())
 
         self._section_list.currentRowChanged.connect(self._pages.setCurrentIndex)
         self._section_list.setCurrentRow(0)
@@ -262,9 +375,9 @@ class SettingsWindow(QWidget):
         self._startup_checkbox.setChecked(config.desktop.startup_enabled)
         self._update_takeover_status_label()
         self._selected_screen_id = self._target_group(config).screen_id or config.desktop.primary_screen_id
-        self._reload_screen_cards(config)
-        self._reload_panel_list(config)
-        self._reload_rules_table()
+        self._reload_screen_layout(config)
+        self._reload_panel_management(config)
+        self._reload_rules_editor()
         group = self._target_group(config)
         self._selected_color = group.appearance.background_color
         self._sync_color_swatch_states()
@@ -272,7 +385,10 @@ class SettingsWindow(QWidget):
         self._opacity_slider.blockSignals(True)
         self._opacity_slider.setValue(self._opacity_to_slider(opacity))
         self._opacity_slider.blockSignals(False)
-        self._update_opacity_label()
+        if hasattr(self, "_opacity_spinbox"):
+            self._opacity_spinbox.blockSignals(True)
+            self._opacity_spinbox.setValue(self._opacity_slider.value())
+            self._opacity_spinbox.blockSignals(False)
 
     def visible_section_names(self) -> list[str]:
         return list(_SECTIONS)
@@ -291,11 +407,12 @@ class SettingsWindow(QWidget):
                 parts.append(widget.currentText())
             elif isinstance(widget, QPlainTextEdit):
                 parts.append(widget.toPlainText())
-        for row in range(self._rules_table.rowCount()):
-            for column in range(self._rules_table.columnCount()):
-                item = self._rules_table.item(row, column)
-                if item is not None:
-                    parts.append(item.text())
+        if hasattr(self, "_rules_table"):
+            for row in range(self._rules_table.rowCount()):
+                for column in range(self._rules_table.columnCount()):
+                    item = self._rules_table.item(row, column)
+                    if item is not None:
+                        parts.append(item.text())
         return "\n".join(part for part in parts if part)
 
     def panel_background_color(self) -> str:
@@ -313,8 +430,12 @@ class SettingsWindow(QWidget):
     def selected_screen_id(self) -> str:
         return self._selected_screen_id or "primary"
 
+    def selected_group_id(self) -> str:
+        return self._group_id
+
     def _build_basic_page(self) -> QWidget:
         page = QWidget(self)
+        self._basic_page = page
         form = QFormLayout(page)
         self._desktop_path_edit = QLineEdit(self._config.desktop.path, page)
         browse = QPushButton("选择文件夹", page)
@@ -323,6 +444,17 @@ class SettingsWindow(QWidget):
         path_row.addWidget(self._desktop_path_edit)
         path_row.addWidget(browse)
         form.addRow("桌面路径", path_row)
+        self._screen_layout_widget = ScreenLayoutWidget(
+            self._screen_infos,
+            self.selected_screen_id(),
+            page,
+        )
+        self._screen_layout_widget.screen_selected.connect(self._select_screen)
+        self._screen_layout_widget.identify_requested.connect(
+            self.identify_screens_requested.emit
+        )
+        self._screen_layout_buttons = self._screen_layout_widget.buttons
+        form.addRow("显示器布局", self._screen_layout_widget)
         self._takeover_checkbox = QCheckBox("启用桌面接管", page)
         self._takeover_checkbox.setChecked(self._config.desktop.takeover_enabled)
         form.addRow(self._takeover_checkbox)
@@ -339,87 +471,113 @@ class SettingsWindow(QWidget):
 
     def _build_panel_management_page(self) -> QWidget:
         page = QWidget(self)
-        layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("显示器", page))
-        self._screen_cards_row = QHBoxLayout()
-        layout.addLayout(self._screen_cards_row)
-        self._identify_screens_button = QPushButton("识别", page)
-        self._identify_screens_button.clicked.connect(self.identify_screens_requested.emit)
-        layout.addWidget(self._identify_screens_button, alignment=Qt.AlignmentFlag.AlignRight)
+        self._panel_management_page = page
+        layout = QHBoxLayout(page)
+        left = QVBoxLayout()
+        left.addWidget(QLabel("面板", page))
+        self._panel_group_list = QListWidget(page)
+        self._panel_group_list.currentRowChanged.connect(self._select_panel_group_row)
+        left.addWidget(self._panel_group_list, stretch=1)
+        layout.addLayout(left, stretch=1)
 
-        actions = QHBoxLayout()
+        right = QVBoxLayout()
         self._new_item_panel_button = QPushButton("新建面板", page)
         self._new_item_tab_button = QPushButton("新建标签", page)
+        self._delete_item_panel_button = QPushButton("删除面板", page)
+        self._delete_item_tab_button = QPushButton("删除标签", page)
         self._new_item_panel_button.clicked.connect(self.add_item_panel_requested.emit)
         self._new_item_tab_button.clicked.connect(self.add_item_tab_requested.emit)
+        self._delete_item_panel_button.clicked.connect(self._request_delete_selected_panel)
+        self._delete_item_tab_button.clicked.connect(self._request_delete_selected_tab)
+        actions = QHBoxLayout()
         actions.addWidget(self._new_item_panel_button)
         actions.addWidget(self._new_item_tab_button)
+        actions.addWidget(self._delete_item_panel_button)
+        actions.addWidget(self._delete_item_tab_button)
         actions.addStretch(1)
-        layout.addLayout(actions)
-        layout.addWidget(QLabel("当前面板", page))
-        self._panel_list = QListWidget(page)
-        layout.addWidget(self._panel_list, stretch=1)
-        self._reload_screen_cards(self._config)
-        self._reload_panel_list(self._config)
+        right.addLayout(actions)
+        self._panel_summary_label = QLabel("", page)
+        right.addWidget(self._panel_summary_label)
+        right.addWidget(QLabel("标签", page))
+        self._panel_tab_list = QListWidget(page)
+        right.addWidget(self._panel_tab_list, stretch=1)
+        layout.addLayout(right, stretch=2)
+        self._reload_panel_management(self._config)
         return page
 
-    def _reload_screen_cards(self, config: Configuration) -> None:
-        if not hasattr(self, "_screen_cards_row"):
+    def _reload_screen_layout(self, config: Configuration) -> None:
+        if not hasattr(self, "_screen_layout_widget"):
             return
-        for button in self._screen_card_buttons.values():
-            self._screen_cards_row.removeWidget(button)
-            button.setParent(None)
-            button.deleteLater()
-        self._screen_card_buttons = {}
         current = self._selected_screen_id or self._target_group(config).screen_id or config.desktop.primary_screen_id
-        valid_ids = {screen_id for screen_id, _label in self._screen_options}
+        valid_ids = {screen.screen_id for screen in self._screen_infos}
         if current not in valid_ids:
             current = "primary"
         self._selected_screen_id = current
-        for screen_id, label in self._screen_options:
-            button = QPushButton(label, self)
-            button.setCheckable(True)
-            button.setMinimumSize(120, 70)
-            button.clicked.connect(lambda _checked=False, value=screen_id: self._select_screen(value))
-            self._screen_cards_row.addWidget(button)
-            self._screen_card_buttons[screen_id] = button
-        self._sync_screen_card_states()
+        self._screen_layout_widget.set_selected_screen(current)
+        self._screen_layout_buttons = self._screen_layout_widget.buttons
 
     def _select_screen(self, screen_id: str) -> None:
         self._selected_screen_id = screen_id
-        self._sync_screen_card_states()
+        if hasattr(self, "_screen_layout_widget"):
+            self._screen_layout_widget.set_selected_screen(screen_id)
 
-    def _sync_screen_card_states(self) -> None:
-        for screen_id, button in self._screen_card_buttons.items():
-            checked = screen_id == self._selected_screen_id
-            button.setChecked(checked)
-            background = "#934A69" if checked else "#2F2F2F"
-            button.setStyleSheet(
-                f"QPushButton {{ color: #ffffff; background: {background}; "
-                "border: 1px solid #4a4a4a; border-radius: 8px; font-size: 18px; }}"
-                "QPushButton:hover { border-color: #d7b0c2; }"
-            )
-
-    def _reload_panel_list(self, config: Configuration) -> None:
-        if not hasattr(self, "_panel_list"):
+    def _reload_panel_management(self, config: Configuration) -> None:
+        if not hasattr(self, "_panel_group_list"):
             return
-        self._panel_list.clear()
-        for group in config.panel_groups:
-            item = QListWidgetItem(f"面板：{group.id} · {len(group.tab_ids)}个标签")
+        self._panel_group_list.blockSignals(True)
+        self._panel_group_list.clear()
+        tabs_by_id = {tab.id: tab for tab in config.panel_tabs}
+        selected_row = 0
+        for index, group in enumerate(config.panel_groups):
+            active_tab = tabs_by_id.get(group.active_tab_id)
+            active_name = active_tab.name if active_tab is not None else "无"
+            item = QListWidgetItem(
+                f"面板 {index + 1} · 当前：{active_name} · {len(group.tab_ids)} 个标签"
+            )
             item.setData(Qt.ItemDataRole.UserRole, group.id)
-            self._panel_list.addItem(item)
-            for tab_id in group.tab_ids:
-                tab = next(
-                    (entry for entry in config.panel_tabs if entry.id == tab_id),
-                    None,
-                )
-                if tab is not None:
-                    child = QListWidgetItem(f"  · {tab.name}")
-                    child.setData(Qt.ItemDataRole.UserRole, tab.id)
-                    self._panel_list.addItem(child)
+            self._panel_group_list.addItem(item)
+            if group.id == self._group_id:
+                selected_row = index
+        self._panel_group_list.setCurrentRow(selected_row)
+        self._panel_group_list.blockSignals(False)
+        self._sync_panel_detail()
+
+    def _select_panel_group_row(self, row: int) -> None:
+        item = self._panel_group_list.item(row)
+        if item is None:
+            return
+        group_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if group_id:
+            self._group_id = group_id
+            self._selected_screen_id = self._target_group().screen_id or self.selected_screen_id()
+            self._sync_panel_detail()
+
+    def _sync_panel_detail(self) -> None:
+        if not hasattr(self, "_panel_tab_list"):
+            return
+        group = self._target_group()
+        tabs_by_id = {tab.id: tab for tab in self._config.panel_tabs}
+        geometry = group.geometry
+        self._panel_summary_label.setText(
+            f"屏幕：{group.screen_id}    位置：{geometry.rx:.2f}, {geometry.ry:.2f}    "
+            f"大小：{geometry.rw:.2f} x {geometry.rh:.2f}"
+        )
+        self._panel_tab_list.clear()
+        for tab_id in group.tab_ids:
+            tab = tabs_by_id.get(tab_id)
+            if tab is None:
+                continue
+            marker = "当前 · " if tab.id == group.active_tab_id else ""
+            item = QListWidgetItem(f"{marker}{tab.name}")
+            item.setData(Qt.ItemDataRole.UserRole, tab.id)
+            self._panel_tab_list.addItem(item)
+        if self._panel_tab_list.count():
+            active_row = max(0, group.tab_ids.index(group.active_tab_id))
+            self._panel_tab_list.setCurrentRow(active_row)
 
     def _build_rules_page(self) -> QWidget:
         page = QWidget(self)
+        self._rules_page = page
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("分类规则", page))
         action_row = QHBoxLayout()
@@ -431,12 +589,24 @@ class SettingsWindow(QWidget):
         action_row.addWidget(self._rules_new_item_tab_button)
         action_row.addStretch(1)
         layout.addLayout(action_row)
-        self._rules_table = QTableWidget(0, 4, page)
-        self._rules_table.setHorizontalHeaderLabels(
-            ["启用", "名称", "包含后缀", "整理到"]
-        )
-        self._reload_rules_table()
-        layout.addWidget(self._rules_table)
+        body = QHBoxLayout()
+        self._rule_list = QListWidget(page)
+        self._rule_list.currentRowChanged.connect(self._select_rule_row)
+        body.addWidget(self._rule_list, stretch=1)
+        detail = QVBoxLayout()
+        self._rule_enabled_checkbox = QCheckBox("启用", page)
+        self._rule_name_label = QLabel("", page)
+        self._rule_target_combo = QComboBox(page)
+        self._rule_extension_editor = ExtensionTagEditor([], page)
+        detail.addWidget(self._rule_enabled_checkbox)
+        detail.addWidget(self._rule_name_label)
+        detail.addWidget(QLabel("整理到", page))
+        detail.addWidget(self._rule_target_combo)
+        detail.addWidget(QLabel("包含后缀", page))
+        detail.addWidget(self._rule_extension_editor, stretch=1)
+        body.addLayout(detail, stretch=2)
+        layout.addLayout(body, stretch=1)
+        self._reload_rules_editor()
         return page
 
     def _build_appearance_page(self) -> QWidget:
@@ -466,14 +636,18 @@ class SettingsWindow(QWidget):
         self._opacity_slider.setSingleStep(10)
         self._opacity_slider.setPageStep(10)
         self._opacity_slider.setValue(self._opacity_to_slider(group.appearance.background_opacity))
-        self._opacity_percent_label = QLabel(page)
-        self._opacity_slider.valueChanged.connect(lambda _value: self._update_opacity_label())
+        self._opacity_spinbox = QSpinBox(page)
+        self._opacity_spinbox.setRange(0, 100)
+        self._opacity_spinbox.setSuffix("%")
+        self._opacity_spinbox.setSingleStep(10)
+        self._opacity_spinbox.setValue(self._opacity_slider.value())
+        self._opacity_slider.valueChanged.connect(self._sync_opacity_from_slider)
+        self._opacity_spinbox.valueChanged.connect(self._sync_opacity_from_spinbox)
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(self._opacity_slider, stretch=1)
-        opacity_row.addWidget(self._opacity_percent_label)
+        opacity_row.addWidget(self._opacity_spinbox)
         form.addRow("背景透明度", opacity_row)
         self._sync_color_swatch_states()
-        self._update_opacity_label()
         return page
 
     def _build_history_page(self) -> QWidget:
@@ -481,6 +655,8 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("面板历史", page))
         self._history_list = QListWidget(page)
+        self._history_list.setIconSize(QSize(220, 124))
+        self._history_list.setSpacing(8)
         layout.addWidget(self._history_list, stretch=1)
         self._restore_history_button = QPushButton("恢复选中历史", page)
         self._restore_history_button.clicked.connect(self._emit_selected_history_restore)
@@ -506,24 +682,22 @@ class SettingsWindow(QWidget):
             "QLabel { color: #ffffff; background: transparent; }"
         )
         card_layout = QVBoxLayout(card)
-        card_layout.addWidget(QLabel("时间面板预览", card))
+        header = QHBoxLayout()
+        header.addWidget(QLabel("时间面板预览", card))
+        header.addStretch(1)
+        self._add_clock_panel_button = QPushButton("+", card)
+        self._add_clock_panel_button.setFixedSize(34, 30)
+        self._add_clock_panel_button.setToolTip("创建独立时间面板")
+        self._add_clock_panel_button.clicked.connect(
+            lambda: self.add_widget_panel_requested.emit("clock")
+        )
+        header.addWidget(self._add_clock_panel_button)
+        card_layout.addLayout(header)
         preview = QLabel("12:34\n2026-05-28", card)
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview.setMinimumHeight(90)
         preview.setStyleSheet("font-size: 24px; font-weight: 600;")
         card_layout.addWidget(preview)
-        self._add_clock_panel_button = QPushButton("添加为独立面板", card)
-        self._add_clock_tab_button = QPushButton("添加到当前面板组", card)
-        self._add_clock_panel_button.clicked.connect(
-            lambda: self.add_widget_panel_requested.emit("clock")
-        )
-        self._add_clock_tab_button.clicked.connect(
-            lambda: self.add_widget_tab_requested.emit("clock")
-        )
-        button_row = QHBoxLayout()
-        button_row.addWidget(self._add_clock_panel_button)
-        button_row.addWidget(self._add_clock_tab_button)
-        card_layout.addLayout(button_row)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
@@ -587,6 +761,22 @@ class SettingsWindow(QWidget):
         layout.addWidget(self._diagnostics_advanced_group, stretch=3)
         return page
 
+    def _build_other_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("其他", page))
+        layout.addWidget(QLabel("把不常用的提示和偏好恢复到默认状态。", page))
+        self._reset_delete_confirmations_button = QPushButton(
+            "恢复删除确认提示",
+            page,
+        )
+        self._reset_delete_confirmations_button.clicked.connect(
+            self._reset_delete_confirmations
+        )
+        layout.addWidget(self._reset_delete_confirmations_button)
+        layout.addStretch(1)
+        return page
+
     def set_history_snapshots(self, snapshots: list[object]) -> None:
         self._history_list.clear()
         for snapshot in snapshots:
@@ -619,7 +809,7 @@ class SettingsWindow(QWidget):
             self.history_capture_preview_requested.emit(snapshot_id)
 
     def _layout_preview_icon(self, snapshot: object) -> QIcon:
-        pixmap = QPixmap(128, 72)
+        pixmap = QPixmap(220, 124)
         pixmap.fill(QColor("#191919"))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -634,10 +824,10 @@ class SettingsWindow(QWidget):
         for index, group in enumerate(groups):
             geometry = group.geometry
             rect = QRectF(
-                8 + geometry.rx * 112,
-                8 + geometry.ry * 56,
-                max(10, geometry.rw * 112),
-                max(8, geometry.rh * 56),
+                12 + geometry.rx * 196,
+                12 + geometry.ry * 100,
+                max(16, geometry.rw * 196),
+                max(12, geometry.rh * 100),
             )
             painter.setBrush(QColor(colors[index % len(colors)]))
             painter.setPen(QPen(QColor("#d7d7d7"), 1))
@@ -713,36 +903,58 @@ class SettingsWindow(QWidget):
             text = "桌面接管未启用"
         self._takeover_status_label.setText(text)
 
-    def _reload_rules_table(self) -> None:
+    def _reload_rules_editor(self) -> None:
+        if not hasattr(self, "_rule_list"):
+            return
         rules = sorted(self._config.rules, key=lambda entry: entry.order)
-        self._rules_table.setRowCount(len(rules))
-        self._rule_extension_editors = {}
+        current_id = self._current_rule_id()
+        self._rule_list.blockSignals(True)
+        self._rule_list.clear()
+        selected_row = 0
+        for row, rule in enumerate(rules):
+            item = QListWidgetItem(rule.name)
+            item.setData(Qt.ItemDataRole.UserRole, rule.id)
+            self._rule_list.addItem(item)
+            if rule.id == current_id:
+                selected_row = row
+        self._rule_list.setCurrentRow(selected_row if rules else -1)
+        self._rule_list.blockSignals(False)
+        self._load_rule_detail(self._current_rule_id())
+
+    def _select_rule_row(self, _row: int) -> None:
+        self._load_rule_detail(self._current_rule_id())
+
+    def _current_rule_id(self) -> str:
+        if not hasattr(self, "_rule_list"):
+            return self._config.rules[0].id if self._config.rules else ""
+        item = self._rule_list.currentItem()
+        if item is None:
+            return self._config.rules[0].id if self._config.rules else ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "")
+
+    def _load_rule_detail(self, rule_id: str) -> None:
+        if not rule_id or not hasattr(self, "_rule_enabled_checkbox"):
+            return
+        rule = next((entry for entry in self._config.rules if entry.id == rule_id), None)
+        if rule is None:
+            return
+        self._rule_enabled_checkbox.setChecked(rule.enabled)
+        self._rule_name_label.setText(rule.name)
+        self._rule_extension_editor.set_extensions(list(rule.extensions))
+        self._rule_target_combo.clear()
+        self._rule_target_combo.addItem("（无）", "")
         tab_names = {
             tab.id: tab.name
             for tab in self._config.panel_tabs
             if tab.content_kind == "items"
         }
-        for row, rule in enumerate(rules):
-            enabled = QTableWidgetItem()
-            enabled.setFlags(
-                Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
-            )
-            enabled.setCheckState(
-                Qt.CheckState.Checked if rule.enabled else Qt.CheckState.Unchecked
-            )
-            self._rules_table.setItem(row, 0, enabled)
-            self._rules_table.setItem(row, 1, QTableWidgetItem(rule.name))
-            editor = ExtensionTagEditor(list(rule.extensions), self._rules_table)
-            self._rule_extension_editors[rule.id] = editor
-            self._rules_table.setCellWidget(row, 2, editor)
-            target = QComboBox(self._rules_table)
-            target.addItem("（无）", "")
-            for tab_id, name in sorted(tab_names.items(), key=lambda item: item[1]):
-                target.addItem(name, tab_id)
-            index = target.findData(self._suggested_target_for_rule(rule, self._config))
-            if index >= 0:
-                target.setCurrentIndex(index)
-            self._rules_table.setCellWidget(row, 3, target)
+        for tab_id, name in sorted(tab_names.items(), key=lambda item: item[1]):
+            self._rule_target_combo.addItem(name, tab_id)
+        index = self._rule_target_combo.findData(
+            self._suggested_target_for_rule(rule, self._config)
+        )
+        if index >= 0:
+            self._rule_target_combo.setCurrentIndex(index)
 
     def _suggested_target_for_rule(self, rule, config: Configuration) -> str:  # type: ignore[no-untyped-def]
         tab_ids = {tab.id for tab in config.panel_tabs if tab.content_kind == "items"}
@@ -808,30 +1020,22 @@ class SettingsWindow(QWidget):
         config.desktop.startup_enabled = self._startup_checkbox.isChecked()
         config.desktop.primary_screen_id = self.selected_screen_id()
         rules_by_id = {rule.id: rule for rule in config.rules}
-        for row, rule in enumerate(sorted(config.rules, key=lambda entry: entry.order)):
-            enabled_item = self._rules_table.item(row, 0)
-            enabled = (
-                enabled_item.checkState() == Qt.CheckState.Checked
-                if enabled_item is not None
-                else rule.enabled
-            )
-            extensions_widget = self._rules_table.cellWidget(row, 2)
-            if isinstance(extensions_widget, ExtensionTagEditor):
-                extensions = extensions_widget.extensions()
-            else:
-                extensions = list(rule.extensions)
-            target_widget = self._rules_table.cellWidget(row, 3)
-            if isinstance(target_widget, QComboBox):
-                target_tab_id = str(target_widget.currentData() or "")
-            else:
-                target_tab_id = rule.target_tab_id
+        valid_item_tab_ids = {tab.id for tab in config.panel_tabs if tab.content_kind == "items"}
+        for rule in config.rules:
+            if rule.enabled and rule.target_tab_id not in valid_item_tab_ids:
+                rule.target_tab_id = self._suggested_target_for_rule(rule, config)
+        rule_id = self._current_rule_id()
+        if rule_id in rules_by_id:
+            target = rules_by_id[rule_id]
+            enabled = self._rule_enabled_checkbox.isChecked()
+            extensions = self._rule_extension_editor.extensions()
+            target_tab_id = str(self._rule_target_combo.currentData() or "")
             if enabled:
                 tab_ids = {
                     tab.id for tab in config.panel_tabs if tab.content_kind == "items"
                 }
                 if target_tab_id not in tab_ids:
-                    target_tab_id = self._suggested_target_for_rule(rule, config)
-            target = rules_by_id[rule.id]
+                    target_tab_id = self._suggested_target_for_rule(target, config)
             target.enabled = enabled
             target.extensions = extensions
             target.target_tab_id = target_tab_id
@@ -890,6 +1094,101 @@ class SettingsWindow(QWidget):
     def _slider_to_opacity(self, value: int) -> float:
         return round(value / 100.0, 2)
 
-    def _update_opacity_label(self) -> None:
-        if hasattr(self, "_opacity_percent_label"):
-            self._opacity_percent_label.setText(f"{self._opacity_slider.value()}%")
+    def _sync_opacity_from_slider(self, value: int) -> None:
+        if not hasattr(self, "_opacity_spinbox"):
+            return
+        if self._opacity_spinbox.value() != value:
+            self._opacity_spinbox.blockSignals(True)
+            self._opacity_spinbox.setValue(value)
+            self._opacity_spinbox.blockSignals(False)
+
+    def _sync_opacity_from_spinbox(self, value: int) -> None:
+        if self._opacity_slider.value() != value:
+            self._opacity_slider.blockSignals(True)
+            self._opacity_slider.setValue(value)
+            self._opacity_slider.blockSignals(False)
+
+    def _request_delete_selected_panel(self) -> None:
+        if len(self._config.panel_groups) <= 1:
+            return
+        group = self._target_group()
+        label = self._panel_label(group.id)
+        if self._confirm_delete("panel", label):
+            self.delete_item_panel_requested.emit(group.id)
+
+    def _request_delete_selected_tab(self) -> None:
+        group = self._target_group()
+        if len(self._config.panel_tabs) <= 1 or not group.tab_ids:
+            return
+        current = self._panel_tab_list.currentItem() if hasattr(self, "_panel_tab_list") else None
+        tab_id = str(current.data(Qt.ItemDataRole.UserRole) or "") if current is not None else group.active_tab_id
+        tab = next((entry for entry in self._config.panel_tabs if entry.id == tab_id), None)
+        if tab is None:
+            return
+        if self._confirm_delete("tab", tab.name):
+            self.delete_item_tab_requested.emit(tab.id)
+
+    def _confirm_delete(self, kind: str, label: str) -> bool:
+        if kind == "panel" and not self._ui_preferences.confirm_delete_panel:
+            return True
+        if kind == "tab" and not self._ui_preferences.confirm_delete_tab:
+            return True
+        if self._delete_confirmation is not None:
+            confirmed, dont_ask_again = self._delete_confirmation(kind, label)
+        else:
+            box = QMessageBox(self)
+            box.setWindowTitle("确认删除")
+            box.setText(f"确定删除“{label}”吗？")
+            box.setInformativeText("只删除应用里的面板/标签，不会删除任何真实文件。")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.No)
+            dont_ask = QCheckBox("以后不再询问", box)
+            box.setCheckBox(dont_ask)
+            confirmed = box.exec() == QMessageBox.StandardButton.Yes
+            dont_ask_again = dont_ask.isChecked()
+        if confirmed and dont_ask_again:
+            if kind == "panel":
+                self._ui_preferences.confirm_delete_panel = False
+            else:
+                self._ui_preferences.confirm_delete_tab = False
+            self.ui_preferences_changed.emit()
+        return confirmed
+
+    def _reset_delete_confirmations(self) -> None:
+        self._ui_preferences.confirm_delete_panel = True
+        self._ui_preferences.confirm_delete_tab = True
+        self.ui_preferences_changed.emit()
+
+    def _panel_label(self, group_id: str) -> str:
+        for index, group in enumerate(self._config.panel_groups, start=1):
+            if group.id == group_id:
+                return f"面板 {index}"
+        return "面板"
+
+    def _widget_text(self, widget: QWidget) -> str:
+        parts: list[str] = []
+        for child in widget.findChildren(QWidget):
+            if isinstance(child, QLineEdit):
+                parts.append(child.text())
+                parts.append(child.placeholderText())
+            elif isinstance(child, (QLabel, QPushButton, QCheckBox)):
+                parts.append(child.text())
+            elif isinstance(child, QComboBox):
+                parts.append(child.currentText())
+            elif isinstance(child, QPlainTextEdit):
+                parts.append(child.toPlainText())
+            elif isinstance(child, QListWidget):
+                for row in range(child.count()):
+                    parts.append(child.item(row).text())
+        return "\n".join(part for part in parts if part)
+
+    def _basic_page_text(self) -> str:
+        return self._widget_text(self._basic_page)
+
+    def _panel_management_page_text(self) -> str:
+        return self._widget_text(self._panel_management_page)
+
+    def _rules_page_text(self) -> str:
+        return self._widget_text(self._rules_page)

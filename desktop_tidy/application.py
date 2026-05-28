@@ -15,6 +15,7 @@ from desktop_tidy.domain.models import AppearanceSettings, Configuration, PanelG
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.config_store import ConfigurationStore
 from desktop_tidy.persistence.layout_history import LayoutHistoryStore
+from desktop_tidy.persistence.ui_preferences import UiPreferencesStore
 from desktop_tidy.services.desktop_index import (
     DesktopIndex,
     DesktopWatcher,
@@ -33,7 +34,7 @@ from desktop_tidy.services.logging_setup import (
     install_global_exception_hook,
     log_exception,
 )
-from desktop_tidy.services.screens import available_screen_geometries, available_screen_options
+from desktop_tidy.services.screens import available_screen_geometries, available_screens
 from desktop_tidy.services.startup import StartupService
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
@@ -125,6 +126,10 @@ class DesktopCleanerApplication:
         self.history_store = history_store or LayoutHistoryStore(
             self.store.path.with_name("layout-history.json")
         )
+        self.ui_preferences_store = UiPreferencesStore(
+            self.store.path.with_name("ui-preferences.json")
+        )
+        self.ui_preferences = self.ui_preferences_store.load()
         self._takeover_active = False
         self._shutdown_started = False
         if DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
@@ -454,7 +459,8 @@ class DesktopCleanerApplication:
             self._settings_window = SettingsWindow(
                 self.model.config,
                 group_id=group_id,
-                screen_options=available_screen_options(),
+                screen_infos=available_screens(),
+                ui_preferences=self.ui_preferences,
             )
             self._settings_window.config_saved.connect(self._on_settings_saved)
             self._settings_window.restore_desktop_requested.connect(
@@ -466,14 +472,20 @@ class DesktopCleanerApplication:
             self._settings_window.add_item_tab_requested.connect(
                 self._on_add_item_tab_requested
             )
+            self._settings_window.delete_item_panel_requested.connect(
+                self._on_delete_item_panel_requested
+            )
+            self._settings_window.delete_item_tab_requested.connect(
+                self._on_delete_item_tab_requested
+            )
+            self._settings_window.ui_preferences_changed.connect(
+                self._save_ui_preferences
+            )
             self._settings_window.identify_screens_requested.connect(
                 self._on_identify_screens_requested
             )
             self._settings_window.add_widget_panel_requested.connect(
                 self._on_add_widget_panel_requested
-            )
-            self._settings_window.add_widget_tab_requested.connect(
-                self._on_add_widget_tab_requested
             )
             self._settings_window.history_restore_requested.connect(
                 self._on_history_restore_requested
@@ -531,6 +543,9 @@ class DesktopCleanerApplication:
 
     def _on_add_item_panel_requested(self) -> None:
         group = self.model.add_item_panel()
+        if self._settings_window is not None:
+            group.screen_id = self._settings_window.selected_screen_id()
+            group.geometry = PanelGeometry(0.33, 0.33, group.geometry.rw, group.geometry.rh)
         panel = self._ensure_panel_widget(group.id)
         panel._apply_geometry_from_model()
         panel.show()
@@ -538,10 +553,12 @@ class DesktopCleanerApplication:
         self._sync_panel_geometries()
         self._sync_panel_snap_targets()
         self.save_with_history("add-item-panel")
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(self.model.config, group_id=group.id)
         self.refresh()
 
     def _on_add_item_tab_requested(self) -> None:
-        group_id = self._settings_window._group_id if self._settings_window is not None else self.panel.group_id
+        group_id = self._settings_window.selected_group_id() if self._settings_window is not None else self.panel.group_id
         tab = self.model.add_tab(group_id, "新标签")
         panel = self._ensure_panel_widget(group_id)
         panel.reload_from_model()
@@ -549,29 +566,72 @@ class DesktopCleanerApplication:
         panel.start_inline_title_edit(tab.id)
         self._sync_panel_snap_targets()
         self.save_with_history("add-item-tab")
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(self.model.config, group_id=group_id)
         self.refresh()
 
     def _on_identify_screens_requested(self) -> None:
         self._notify_user("显示器识别", "已在面板管理中高亮当前选择的显示器。")
 
+    def _on_delete_item_panel_requested(self, group_id: str) -> None:
+        if len(self.model.config.panel_groups) <= 1:
+            return
+        if group_id not in self._panels:
+            return
+        panel = self._panels.pop(group_id)
+        panel.hide()
+        panel.deleteLater()
+        self.model.delete_group(group_id)
+        replacement_group_id = self.model.config.panel_groups[0].id
+        self.panel = self._ensure_panel_widget(replacement_group_id)
+        self._sync_panel_geometries()
+        self._sync_panel_snap_targets()
+        self.save_with_history("delete-item-panel")
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(
+                self.model.config,
+                group_id=replacement_group_id,
+            )
+        self.refresh()
+
+    def _on_delete_item_tab_requested(self, tab_id: str) -> None:
+        if len(self.model.config.panel_tabs) <= 1:
+            return
+        try:
+            group_id = self.model.tab(tab_id).group_id
+        except KeyError:
+            return
+        self.model.delete_tab(tab_id)
+        if group_id not in [group.id for group in self.model.config.panel_groups]:
+            removed = self._panels.pop(group_id, None)
+            if removed is not None:
+                removed.hide()
+                removed.deleteLater()
+            group_id = self.model.config.panel_groups[0].id
+        panel = self._ensure_panel_widget(group_id)
+        panel.reload_from_model()
+        self._sync_panel_snap_targets()
+        self.save_with_history("delete-item-tab")
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(self.model.config, group_id=group_id)
+        self.refresh()
+
+    def _save_ui_preferences(self) -> None:
+        self.ui_preferences_store.save(self.ui_preferences)
+
     def _on_add_widget_panel_requested(self, widget_type: str) -> None:
         group = self.model.add_widget_panel(widget_type)
+        if self._settings_window is not None:
+            group.screen_id = self._settings_window.selected_screen_id()
+            group.geometry = PanelGeometry(0.38, 0.38, group.geometry.rw, group.geometry.rh)
         panel = self._ensure_panel_widget(group.id)
         panel._apply_geometry_from_model()
         panel.show()
         self._sync_panel_geometries()
         self._sync_panel_snap_targets()
         self.save_with_history(f"add-widget-panel:{widget_type}")
-        self.refresh()
-
-    def _on_add_widget_tab_requested(self, widget_type: str) -> None:
-        group_id = self._settings_window._group_id if self._settings_window is not None else self.panel.group_id
-        tab = self.model.add_widget_tab(group_id, widget_type)
-        panel = self._ensure_panel_widget(group_id)
-        panel.reload_from_model()
-        panel.activate_tab(tab.id)
-        self._sync_panel_snap_targets()
-        self.save_with_history(f"add-widget-tab:{widget_type}")
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(self.model.config, group_id=group.id)
         self.refresh()
 
     def _on_history_restore_requested(self, snapshot_id: str) -> None:

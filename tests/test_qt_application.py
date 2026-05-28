@@ -491,6 +491,52 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertEqual(len(app.panel_widgets()), len(app.model.config.panel_groups))
             self.assertTrue(store.path.is_file())
 
+    def test_settings_refreshes_after_creating_item_panel_and_adds_tab_to_selected_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            app.show()
+            type(self).app.processEvents()
+            app._show_settings(app.panel.group_id)
+            settings = app._settings_window
+            assert settings is not None
+
+            settings._new_item_panel_button.click()
+            type(self).app.processEvents()
+            new_group = app.model.config.panel_groups[-1]
+
+            self.assertEqual(settings.selected_group_id(), new_group.id)
+            self.assertIn("面板 2", settings._panel_management_page_text())
+            settings._new_item_tab_button.click()
+            type(self).app.processEvents()
+
+            self.assertEqual(len(app.model.group(new_group.id).tab_ids), 2)
+            self.assertEqual(app.model.tab(app.model.group(new_group.id).active_tab_id).name, "新标签")
+
+    def test_settings_delete_panel_and_tab_only_remove_metadata(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            real_file = desktop / "keep.pdf"
+            real_file.write_text("keep", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            extra_group = app.model.add_item_panel("临时")
+            app._ensure_panel_widget(extra_group.id)
+            app._show_settings(extra_group.id)
+            settings = app._settings_window
+            assert settings is not None
+            settings._delete_confirmation = lambda _kind, _label: (True, False)
+
+            settings._delete_item_panel_button.click()
+            type(self).app.processEvents()
+
+            self.assertTrue(real_file.is_file())
+            self.assertFalse(any(group.id == extra_group.id for group in app.model.config.panel_groups))
+            self.assertNotIn(extra_group.id, app.panel_widgets())
+
     def test_item_reference_changes_do_not_create_layout_history(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1575,7 +1621,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             "preview must disable quit-on-last-window-closed via ensure_application",
         )
 
-    def test_settings_can_add_clock_widget_panel_and_clock_tab(self) -> None:
+    def test_settings_can_add_clock_widget_panel_from_preview_card(self) -> None:
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
@@ -1589,14 +1635,13 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             settings = app._settings_window
             self.assertIsNotNone(settings)
 
-            settings.add_widget_tab_requested.emit("clock")
             settings.add_widget_panel_requested.emit("clock")
             type(self).app.processEvents()
 
             widget_tabs = [
                 tab for tab in app.model.config.panel_tabs if tab.content_kind == "widget"
             ]
-            self.assertEqual([tab.widget_type for tab in widget_tabs], ["clock", "clock"])
+            self.assertEqual([tab.widget_type for tab in widget_tabs], ["clock"])
             widget_tab_ids = {tab.id for tab in widget_tabs}
             self.assertTrue(
                 any(

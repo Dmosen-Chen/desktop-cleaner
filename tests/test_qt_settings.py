@@ -9,17 +9,21 @@ from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QRect, QSize
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QComboBox
 
 from desktop_tidy.domain.defaults import build_default_configuration
+from desktop_tidy.domain.workspace import WorkspaceModel
+from desktop_tidy.persistence.ui_preferences import UiPreferences
+from desktop_tidy.services.screens import ScreenInfo
 from desktop_tidy.ui.settings_window import SettingsWindow
 
 _SUPPORTED_SECTIONS = ["基础设置", "面板管理", "桌面整理", "面板外观"]
 _FORBIDDEN_TERMS = ("壁纸", "归档", "移动", "搜索", "AI", "同步")
 
 
-_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "功能面板", "诊断与恢复"]
+_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "功能面板", "诊断与恢复", "其他"]
 
 
 class SettingsWindowTests(unittest.TestCase):
@@ -30,19 +34,25 @@ class SettingsWindowTests(unittest.TestCase):
     def _make_window(self) -> SettingsWindow:
         return SettingsWindow(build_default_configuration(r"D:\Preview\Desktop"))
 
-    def test_screen_selector_saves_target_group_screen_id(self) -> None:
+    def test_screen_layout_lives_in_basic_settings_and_saves_selected_screen(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(
             config,
-            screen_options=[
-                ("primary", "\u4e3b\u5c4f"),
-                ("screen-1", "\u526f\u5c4f 1"),
+            screen_infos=[
+                ScreenInfo("screen-1", "副屏 1", QRect(-1280, 120, 1280, 720)),
+                ScreenInfo("primary", "主屏", QRect(0, 0, 1920, 1080)),
             ],
         )
 
         self.assertEqual(window.selected_screen_id(), "primary")
+        self.assertIn("显示器布局", window._basic_page_text())
+        self.assertNotIn("显示器", window._panel_management_page_text())
+        primary_rect = window._screen_layout_buttons["primary"].geometry()
+        secondary_rect = window._screen_layout_buttons["screen-1"].geometry()
+        self.assertGreater(primary_rect.width(), secondary_rect.width())
+        self.assertGreater(primary_rect.height(), secondary_rect.height())
 
-        window._screen_card_buttons["screen-1"].click()
+        window._screen_layout_buttons["screen-1"].click()
         window._save()
 
         self.assertEqual(config.panel_groups[0].screen_id, "screen-1")
@@ -57,53 +67,52 @@ class SettingsWindowTests(unittest.TestCase):
         window = self._make_window()
         restore_spy = QSignalSpy(window.restore_desktop_requested)
         add_panel_spy = QSignalSpy(window.add_widget_panel_requested)
-        add_tab_spy = QSignalSpy(window.add_widget_tab_requested)
 
         window._restore_desktop_button.click()
         window._add_clock_panel_button.click()
-        window._add_clock_tab_button.click()
 
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(add_panel_spy.at(0)[0], "clock")
-        self.assertEqual(add_tab_spy.at(0)[0], "clock")
 
-    def test_panel_management_exposes_screen_cards_and_create_actions(self) -> None:
+    def test_panel_management_hides_group_ids_and_exposes_delete_actions(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        second_group = model.add_item_panel("资料")
         window = SettingsWindow(
             config,
-            screen_options=[
-                ("primary", "主屏"),
-                ("screen-1", "副屏 1"),
-            ],
+            delete_confirmation=lambda _kind, _label: (True, False),
         )
         add_panel_spy = QSignalSpy(window.add_item_panel_requested)
         add_tab_spy = QSignalSpy(window.add_item_tab_requested)
-        identify_spy = QSignalSpy(window.identify_screens_requested)
+        delete_panel_spy = QSignalSpy(window.delete_item_panel_requested)
+        delete_tab_spy = QSignalSpy(window.delete_item_tab_requested)
 
-        self.assertEqual(set(window._screen_card_buttons), {"primary", "screen-1"})
-        self.assertTrue(window._screen_card_buttons["primary"].isChecked())
-        window._screen_card_buttons["screen-1"].click()
+        self.assertNotIn("group-", window._panel_management_page_text())
+        self.assertIn("面板 1", window._panel_management_page_text())
+        window._panel_group_list.setCurrentRow(1)
+        self.assertEqual(window.selected_group_id(), second_group.id)
         window._new_item_panel_button.click()
         window._new_item_tab_button.click()
-        window._identify_screens_button.click()
+        window._delete_item_panel_button.click()
+        window._delete_item_tab_button.click()
 
-        self.assertEqual(window.selected_screen_id(), "screen-1")
         self.assertEqual(add_panel_spy.count(), 1)
         self.assertEqual(add_tab_spy.count(), 1)
-        self.assertEqual(identify_spy.count(), 1)
+        self.assertEqual(delete_panel_spy.count(), 1)
+        self.assertEqual(delete_panel_spy.at(0)[0], second_group.id)
+        self.assertEqual(delete_tab_spy.count(), 1)
+        self.assertEqual(delete_tab_spy.at(0)[0], second_group.active_tab_id)
 
-    def test_rules_page_uses_extension_tags_presets_and_organize_to_label(self) -> None:
+    def test_rules_page_uses_master_detail_extension_editor(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
-        headers = [
-            window._rules_table.horizontalHeaderItem(column).text()
-            for column in range(window._rules_table.columnCount())
-        ]
 
-        self.assertEqual(headers, ["启用", "名称", "包含后缀", "整理到"])
+        self.assertIsNone(getattr(window, "_rules_table", None))
+        self.assertIn("整理到", window._rules_page_text())
         self.assertIn("新建面板", window.all_text())
         self.assertIn("新建标签", window.all_text())
-        editor = window._rule_extension_editors["rule-images"]
+        window._rule_list.setCurrentRow(2)
+        editor = window._rule_extension_editor
         editor.apply_preset("代码")
         editor.add_extension(".webp")
         editor.remove_extension(".png")
@@ -114,7 +123,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertIn(".webp", image_rule.extensions)
         self.assertNotIn(".png", image_rule.extensions)
 
-    def test_appearance_page_uses_swatch_buttons_and_percent_opacity_slider(self) -> None:
+    def test_appearance_page_uses_swatch_slider_and_percent_spinbox(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)
 
@@ -122,11 +131,14 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertIn("#4B5563", window._color_swatch_buttons)
         window._color_swatch_buttons["#4B5563"].click()
         window._opacity_slider.setValue(70)
+        self.assertEqual(window._opacity_spinbox.value(), 70)
+        window._opacity_spinbox.setValue(40)
+        self.assertEqual(window._opacity_slider.value(), 40)
         window._save()
 
         appearance = config.panel_groups[0].appearance
         self.assertEqual(appearance.background_color, "#4B5563")
-        self.assertAlmostEqual(appearance.background_opacity, 0.70)
+        self.assertAlmostEqual(appearance.background_opacity, 0.40)
         self.assertEqual(window._opacity_slider.tickInterval(), 10)
 
     def test_diagnostics_page_exposes_status_logs_and_recovery_actions(self) -> None:
@@ -192,6 +204,8 @@ class SettingsWindowTests(unittest.TestCase):
 
         window.set_history_snapshots([snapshot])
         window._history_list.setCurrentRow(0)
+        self.assertGreaterEqual(window._history_list.iconSize().width(), 180)
+        self.assertGreaterEqual(window._history_list.iconSize().height(), 100)
         self.assertFalse(window._history_list.item(0).icon().isNull())
         window._restore_history_button.click()
         window._capture_history_preview_button.click()
@@ -207,8 +221,22 @@ class SettingsWindowTests(unittest.TestCase):
         text = window.all_text()
 
         self.assertIn("时间面板预览", text)
-        self.assertIn("添加为独立面板", text)
-        self.assertIn("添加到当前面板组", text)
+        self.assertEqual(window._add_clock_panel_button.text(), "+")
+        self.assertNotIn("添加到当前面板组", text)
+
+    def test_other_page_resets_delete_confirmation_preferences(self) -> None:
+        preferences = UiPreferences(confirm_delete_panel=False, confirm_delete_tab=False)
+        window = SettingsWindow(
+            build_default_configuration(r"D:\Preview\Desktop"),
+            ui_preferences=preferences,
+        )
+        changed_spy = QSignalSpy(window.ui_preferences_changed)
+
+        window._reset_delete_confirmations_button.click()
+
+        self.assertTrue(preferences.confirm_delete_panel)
+        self.assertTrue(preferences.confirm_delete_tab)
+        self.assertEqual(changed_spy.count(), 1)
 
     def test_unsupported_features_are_not_exposed_in_ui_text(self) -> None:
         window = self._make_window()
@@ -324,8 +352,9 @@ class SettingsWindowTests(unittest.TestCase):
         type(self).app.processEvents()
 
         target_values: list[str] = []
-        for row in range(window._rules_table.rowCount()):
-            combo = window._rules_table.cellWidget(row, 3)
+        for row in range(window._rule_list.count()):
+            window._rule_list.setCurrentRow(row)
+            combo = window._rule_target_combo
             self.assertIsInstance(combo, QComboBox)
             target_values.append(str(combo.currentData() or ""))
 
