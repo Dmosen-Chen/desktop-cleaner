@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QComboBox
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.ui.settings_window import SettingsWindow
 
-_SUPPORTED_SECTIONS = ["基础设置", "桌面分区", "桌面整理", "面板外观"]
+_SUPPORTED_SECTIONS = ["基础设置", "面板管理", "桌面整理", "面板外观"]
 _FORBIDDEN_TERMS = ("壁纸", "归档", "移动", "搜索", "AI", "同步")
 
 
@@ -42,9 +42,7 @@ class SettingsWindowTests(unittest.TestCase):
 
         self.assertEqual(window.selected_screen_id(), "primary")
 
-        index = window._screen_combo.findData("screen-1")
-        self.assertGreaterEqual(index, 0)
-        window._screen_combo.setCurrentIndex(index)
+        window._screen_card_buttons["screen-1"].click()
         window._save()
 
         self.assertEqual(config.panel_groups[0].screen_id, "screen-1")
@@ -68,6 +66,68 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(add_panel_spy.at(0)[0], "clock")
         self.assertEqual(add_tab_spy.at(0)[0], "clock")
+
+    def test_panel_management_exposes_screen_cards_and_create_actions(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(
+            config,
+            screen_options=[
+                ("primary", "主屏"),
+                ("screen-1", "副屏 1"),
+            ],
+        )
+        add_panel_spy = QSignalSpy(window.add_item_panel_requested)
+        add_tab_spy = QSignalSpy(window.add_item_tab_requested)
+        identify_spy = QSignalSpy(window.identify_screens_requested)
+
+        self.assertEqual(set(window._screen_card_buttons), {"primary", "screen-1"})
+        self.assertTrue(window._screen_card_buttons["primary"].isChecked())
+        window._screen_card_buttons["screen-1"].click()
+        window._new_item_panel_button.click()
+        window._new_item_tab_button.click()
+        window._identify_screens_button.click()
+
+        self.assertEqual(window.selected_screen_id(), "screen-1")
+        self.assertEqual(add_panel_spy.count(), 1)
+        self.assertEqual(add_tab_spy.count(), 1)
+        self.assertEqual(identify_spy.count(), 1)
+
+    def test_rules_page_uses_extension_tags_presets_and_organize_to_label(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config)
+        headers = [
+            window._rules_table.horizontalHeaderItem(column).text()
+            for column in range(window._rules_table.columnCount())
+        ]
+
+        self.assertEqual(headers, ["启用", "名称", "包含后缀", "整理到"])
+        self.assertIn("新建面板", window.all_text())
+        self.assertIn("新建标签", window.all_text())
+        editor = window._rule_extension_editors["rule-images"]
+        editor.apply_preset("代码")
+        editor.add_extension(".webp")
+        editor.remove_extension(".png")
+        window._save()
+
+        image_rule = next(rule for rule in config.rules if rule.id == "rule-images")
+        self.assertIn(".py", image_rule.extensions)
+        self.assertIn(".webp", image_rule.extensions)
+        self.assertNotIn(".png", image_rule.extensions)
+
+    def test_appearance_page_uses_swatch_buttons_and_percent_opacity_slider(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config)
+
+        self.assertNotIn("背景颜色", [child.placeholderText() for child in window.findChildren(type(window._desktop_path_edit))])
+        self.assertIn("#4B5563", window._color_swatch_buttons)
+        window._color_swatch_buttons["#4B5563"].click()
+        window._opacity_slider.setValue(70)
+        window._save()
+
+        appearance = config.panel_groups[0].appearance
+        self.assertEqual(appearance.background_color, "#4B5563")
+        self.assertAlmostEqual(appearance.background_opacity, 0.70)
+        self.assertEqual(window._opacity_slider.tickInterval(), 10)
 
     def test_diagnostics_page_exposes_status_logs_and_recovery_actions(self) -> None:
         window = self._make_window()
@@ -101,8 +161,13 @@ class SettingsWindowTests(unittest.TestCase):
 
         text = window.all_text()
         self.assertIn("诊断与恢复", window.visible_section_names())
-        self.assertIn("D:\\Preview\\Desktop", text)
-        self.assertIn("Explorer 图标可见：否", text)
+        self.assertIn("桌面接管需要恢复", text)
+        self.assertFalse(window._diagnostics_advanced_group.isChecked())
+        self.assertTrue(window._diagnostics_advanced_content.isHidden())
+        window._diagnostics_advanced_group.setChecked(True)
+        self.assertFalse(window._diagnostics_advanced_content.isHidden())
+        self.assertIn("D:\\Preview\\Desktop", window.all_text())
+        self.assertIn("Explorer 图标可见：否", window.all_text())
         self.assertIn("line 2", text)
         self.assertEqual(refresh_spy.count(), 1)
         self.assertEqual(restore_icons_spy.count(), 1)
@@ -113,20 +178,37 @@ class SettingsWindowTests(unittest.TestCase):
     def test_history_page_lists_snapshots_and_emits_restore_request(self) -> None:
         window = self._make_window()
         restore_spy = QSignalSpy(window.history_restore_requested)
+        capture_spy = QSignalSpy(window.history_capture_preview_requested)
         snapshot = SimpleNamespace(
             id="layout-1",
             created_at="2026-05-27T12:00:00",
             reason="move",
             group_count=2,
             tab_count=7,
+            preview_kind="layout",
+            preview_path="",
+            configuration=build_default_configuration(r"D:\Preview\Desktop"),
         )
 
         window.set_history_snapshots([snapshot])
         window._history_list.setCurrentRow(0)
+        self.assertFalse(window._history_list.item(0).icon().isNull())
         window._restore_history_button.click()
+        window._capture_history_preview_button.click()
 
         self.assertEqual(restore_spy.count(), 1)
         self.assertEqual(restore_spy.at(0)[0], "layout-1")
+        self.assertEqual(capture_spy.count(), 1)
+        self.assertEqual(capture_spy.at(0)[0], "layout-1")
+
+    def test_widget_page_shows_preview_card_for_clock_panel(self) -> None:
+        window = self._make_window()
+
+        text = window.all_text()
+
+        self.assertIn("时间面板预览", text)
+        self.assertIn("添加为独立面板", text)
+        self.assertIn("添加到当前面板组", text)
 
     def test_unsupported_features_are_not_exposed_in_ui_text(self) -> None:
         window = self._make_window()
@@ -186,8 +268,8 @@ class SettingsWindowTests(unittest.TestCase):
 
         self.assertEqual(window.panel_background_color(), "#336699")
         self.assertAlmostEqual(window.panel_background_opacity(), 0.42)
-        self.assertGreaterEqual(window.panel_opacity_minimum(), 0.18)
-        self.assertLessEqual(window.panel_opacity_maximum(), 0.95)
+        self.assertAlmostEqual(window.panel_opacity_minimum(), 0.10)
+        self.assertAlmostEqual(window.panel_opacity_maximum(), 1.00)
 
     def test_default_panel_opacity_initializes_at_sixty_percent(self) -> None:
         window = self._make_window()
@@ -205,7 +287,6 @@ class SettingsWindowTests(unittest.TestCase):
             window = SettingsWindow(config)
 
             window._desktop_path_edit.setText(r"relative\desktop")
-            window._color_edit.setText("not-a-color")
 
             saved_spy = QSignalSpy(window.config_saved)
             validation_spy = QSignalSpy(window.validation_failed)

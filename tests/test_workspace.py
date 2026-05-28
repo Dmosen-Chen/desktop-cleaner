@@ -162,6 +162,20 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(saved_rule.target_tab_id, "")
         validate_configuration(model.config)
 
+    def test_delete_active_tab_selects_previous_neighbor(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        group = model.group("group-default")
+        self.assertEqual(group.tab_ids[:4], ["tab-folders", "tab-documents", "tab-images", "tab-archives"])
+
+        group.active_tab_id = "tab-images"
+        model.delete_tab("tab-images")
+
+        self.assertEqual(group.active_tab_id, "tab-documents")
+
+        model.delete_tab("tab-folders")
+
+        self.assertEqual(group.active_tab_id, "tab-documents")
+
     def test_deleting_until_one_tab_remains_does_not_rebuild_a_new_group(self) -> None:
         model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
         custom = model.add_tab("group-default", "Custom", tab_id="tab-custom")

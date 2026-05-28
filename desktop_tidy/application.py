@@ -134,6 +134,9 @@ class DesktopCleanerApplication:
         for group in self.config.panel_groups:
             self._ensure_panel_widget(group.id)
         self.panel = self._panels[self.config.panel_groups[0].id]
+        self._last_layout_history_fingerprint = self.history_store.fingerprint(
+            self.model.config
+        )
         self.diagnostics_service = self._create_diagnostics_service()
         self._settings_window: SettingsWindow | None = None
         self.watcher = DesktopWatcher(self.index)
@@ -155,7 +158,7 @@ class DesktopCleanerApplication:
         panel.show()
         self._sync_panel_geometries()
         self._sync_panel_snap_targets()
-        self.save()
+        self.save_with_history("detach-tab")
         self.refresh()
 
     def complete_group_merge_at_global_point(
@@ -183,7 +186,7 @@ class DesktopCleanerApplication:
             panel.reload_from_model()
         self._sync_panel_geometries()
         self._sync_panel_snap_targets()
-        self.save()
+        self.save_with_history("merge-group")
         self.refresh()
         return True
 
@@ -192,7 +195,10 @@ class DesktopCleanerApplication:
 
     def save_with_history(self, reason: str) -> None:
         try:
-            self.history_store.push(self.model.config, reason)
+            fingerprint = self.history_store.fingerprint(self.model.config)
+            if fingerprint != self._last_layout_history_fingerprint:
+                self.history_store.push(self.model.config, reason)
+                self._last_layout_history_fingerprint = fingerprint
         except Exception as exc:
             log_exception(f"record layout history: {reason}", exc)
         self.save()
@@ -254,7 +260,7 @@ class DesktopCleanerApplication:
 
     def handle_paths_dropped(self, paths: list[Path], tab_id: str) -> None:
         self.model.add_paths_to_tab(paths, tab_id)
-        self.save_with_history("item-reference-change")
+        self.save()
         self.refresh()
 
     def refresh(self, _changes: IndexChanges | None = None) -> None:
@@ -454,6 +460,15 @@ class DesktopCleanerApplication:
             self._settings_window.restore_desktop_requested.connect(
                 self._restore_desktop_from_settings
             )
+            self._settings_window.add_item_panel_requested.connect(
+                self._on_add_item_panel_requested
+            )
+            self._settings_window.add_item_tab_requested.connect(
+                self._on_add_item_tab_requested
+            )
+            self._settings_window.identify_screens_requested.connect(
+                self._on_identify_screens_requested
+            )
             self._settings_window.add_widget_panel_requested.connect(
                 self._on_add_widget_panel_requested
             )
@@ -462,6 +477,9 @@ class DesktopCleanerApplication:
             )
             self._settings_window.history_restore_requested.connect(
                 self._on_history_restore_requested
+            )
+            self._settings_window.history_capture_preview_requested.connect(
+                self._on_history_capture_preview_requested
             )
             self._settings_window.diagnostics_refresh_requested.connect(
                 self._refresh_settings_diagnostics
@@ -511,6 +529,31 @@ class DesktopCleanerApplication:
     def _restore_desktop_from_settings(self) -> None:
         self._restore_desktop_from_tray()
 
+    def _on_add_item_panel_requested(self) -> None:
+        group = self.model.add_item_panel()
+        panel = self._ensure_panel_widget(group.id)
+        panel._apply_geometry_from_model()
+        panel.show()
+        self.panel = panel
+        self._sync_panel_geometries()
+        self._sync_panel_snap_targets()
+        self.save_with_history("add-item-panel")
+        self.refresh()
+
+    def _on_add_item_tab_requested(self) -> None:
+        group_id = self._settings_window._group_id if self._settings_window is not None else self.panel.group_id
+        tab = self.model.add_tab(group_id, "新标签")
+        panel = self._ensure_panel_widget(group_id)
+        panel.reload_from_model()
+        panel.activate_tab(tab.id)
+        panel.start_inline_title_edit(tab.id)
+        self._sync_panel_snap_targets()
+        self.save_with_history("add-item-tab")
+        self.refresh()
+
+    def _on_identify_screens_requested(self) -> None:
+        self._notify_user("显示器识别", "已在面板管理中高亮当前选择的显示器。")
+
     def _on_add_widget_panel_requested(self, widget_type: str) -> None:
         group = self.model.add_widget_panel(widget_type)
         panel = self._ensure_panel_widget(group.id)
@@ -537,9 +580,29 @@ class DesktopCleanerApplication:
         self.save()
         self.refresh()
 
+    def _on_history_capture_preview_requested(self, snapshot_id: str) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self._notify_user("历史预览", "未找到可截图的主屏幕。")
+            return
+        preview_dir = self.store.path.parent / "history-previews"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / f"{snapshot_id}.png"
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull() or not pixmap.save(str(preview_path), "PNG"):
+            self._notify_user("历史预览", "保存主屏截图失败。")
+            return
+        self.history_store.set_preview(snapshot_id, preview_path=preview_path)
+        if self._settings_window is not None:
+            self._settings_window.set_history_snapshots(self.history_store.load())
+        self._notify_user("历史预览", "已保存主屏截图预览。")
+
     def _replace_configuration(self, config: Configuration) -> None:
         self.model = WorkspaceModel(config)
         self.config = self.model.config
+        self._last_layout_history_fingerprint = self.history_store.fingerprint(
+            self.model.config
+        )
         self.diagnostics_service = self._create_diagnostics_service()
         try:
             self.watcher.changed.disconnect(self._on_desktop_changed)

@@ -17,6 +17,8 @@ class LayoutSnapshot:
     created_at: str
     reason: str
     configuration: Configuration
+    preview_kind: str = "layout"
+    preview_path: str = ""
 
     @property
     def group_count(self) -> int:
@@ -27,12 +29,17 @@ class LayoutSnapshot:
         return len(self.configuration.panel_tabs)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "id": self.id,
             "created_at": self.created_at,
             "reason": self.reason,
             "configuration": self.configuration.to_dict(),
         }
+        if self.preview_kind != "layout":
+            payload["preview_kind"] = self.preview_kind
+        if self.preview_path:
+            payload["preview_path"] = self.preview_path
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> LayoutSnapshot:
@@ -41,6 +48,8 @@ class LayoutSnapshot:
             created_at=str(payload["created_at"]),
             reason=str(payload.get("reason", "")),
             configuration=Configuration.from_dict(dict(payload["configuration"])),
+            preview_kind=str(payload.get("preview_kind", "layout")),
+            preview_path=str(payload.get("preview_path", "")),
         )
 
 
@@ -74,8 +83,8 @@ class LayoutHistoryStore:
     def push(self, config: Configuration, reason: str) -> LayoutSnapshot | None:
         validate_configuration(config)
         snapshots = self.load()
-        fingerprint = self._fingerprint(config)
-        if snapshots and self._fingerprint(snapshots[-1].configuration) == fingerprint:
+        fingerprint = self.fingerprint(config)
+        if snapshots and self.fingerprint(snapshots[-1].configuration) == fingerprint:
             return None
         snapshot = LayoutSnapshot(
             id=f"layout-{uuid.uuid4().hex}",
@@ -87,6 +96,34 @@ class LayoutHistoryStore:
         snapshots = snapshots[-self.limit :]
         self._save(snapshots)
         return snapshot
+
+    def set_preview(
+        self,
+        snapshot_id: str,
+        *,
+        preview_path: Path,
+        preview_kind: str = "screenshot",
+    ) -> LayoutSnapshot:
+        snapshots = self.load()
+        updated: list[LayoutSnapshot] = []
+        result: LayoutSnapshot | None = None
+        for snapshot in snapshots:
+            if snapshot.id == snapshot_id:
+                result = LayoutSnapshot(
+                    id=snapshot.id,
+                    created_at=snapshot.created_at,
+                    reason=snapshot.reason,
+                    configuration=snapshot.configuration,
+                    preview_kind=preview_kind,
+                    preview_path=str(preview_path),
+                )
+                updated.append(result)
+            else:
+                updated.append(snapshot)
+        if result is None:
+            raise KeyError(f"unknown layout snapshot: {snapshot_id}")
+        self._save(updated)
+        return result
 
     def restore(self, snapshot_id: str) -> Configuration:
         for snapshot in self.load():
@@ -108,5 +145,11 @@ class LayoutHistoryStore:
         )
         temporary.replace(self.path)
 
-    def _fingerprint(self, config: Configuration) -> str:
-        return json.dumps(config.to_dict(), ensure_ascii=False, sort_keys=True)
+    def fingerprint(self, config: Configuration) -> str:
+        layout_payload = {
+            "desktop": {"primary_screen_id": config.desktop.primary_screen_id},
+            "appearance_defaults": config.appearance_defaults.to_dict(),
+            "panel_groups": [group.to_dict() for group in config.panel_groups],
+            "panel_tabs": [tab.to_dict() for tab in config.panel_tabs],
+        }
+        return json.dumps(layout_payload, ensure_ascii=False, sort_keys=True)

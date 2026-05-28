@@ -187,6 +187,32 @@ class WorkspaceModel:
         self.config.panel_tabs.append(tab)
         return group
 
+    def add_item_panel(self, name: str = "新面板") -> PanelGroup:
+        group_id = f"group-{uuid.uuid4().hex}"
+        tab_id = f"tab-{uuid.uuid4().hex}"
+        label = name.strip() or "新面板"
+        group = PanelGroup(
+            id=group_id,
+            screen_id=self.config.desktop.primary_screen_id or "primary",
+            geometry=PanelGeometry(0.10, 0.10, 0.34, 0.34),
+            tab_ids=[tab_id],
+            active_tab_id=tab_id,
+            appearance=deepcopy(self.config.appearance_defaults),
+            locked=False,
+            collapsed=False,
+        )
+        tab = PanelTab(
+            id=tab_id,
+            group_id=group_id,
+            name=label,
+            order=0,
+            category_role="custom",
+            content_kind="items",
+        )
+        self.config.panel_groups.append(group)
+        self.config.panel_tabs.append(tab)
+        return group
+
     def _default_widget_name(self, widget_type: str) -> str:
         if widget_type == "clock":
             return "时间"
@@ -205,6 +231,7 @@ class WorkspaceModel:
             return False
         tab = self.tab(tab_id)
         group = self.group(tab.group_id)
+        old_index = group.tab_ids.index(tab_id) if tab_id in group.tab_ids else 0
         self.config.panel_tabs = [entry for entry in self.config.panel_tabs if entry.id != tab_id]
         group.tab_ids = [entry for entry in group.tab_ids if entry != tab_id]
         for rule in self.config.rules:
@@ -218,7 +245,11 @@ class WorkspaceModel:
             entry for entry in self.config.external_refs if entry.target_tab_id != tab_id
         ]
         if group.active_tab_id == tab_id:
-            group.active_tab_id = group.tab_ids[0] if group.tab_ids else ""
+            if group.tab_ids:
+                next_index = max(0, min(old_index - 1, len(group.tab_ids) - 1))
+                group.active_tab_id = group.tab_ids[next_index]
+            else:
+                group.active_tab_id = ""
         if not group.tab_ids:
             self.config.panel_groups = [
                 entry for entry in self.config.panel_groups if entry.id != group.id

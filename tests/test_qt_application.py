@@ -467,6 +467,52 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertEqual(len(bundles), 1)
             self.assertIn("已导出诊断包", settings.all_text())
 
+    def test_settings_can_add_item_panel_and_item_tab(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            app.show()
+            type(self).app.processEvents()
+            app._show_settings(app.panel.group_id)
+            settings = app._settings_window
+            assert settings is not None
+
+            settings._new_item_panel_button.click()
+            type(self).app.processEvents()
+            settings._new_item_tab_button.click()
+            type(self).app.processEvents()
+
+            self.assertGreaterEqual(len(app.model.config.panel_groups), 2)
+            self.assertTrue(
+                any(tab.name == "新标签" and tab.content_kind == "items" for tab in app.model.config.panel_tabs)
+            )
+            self.assertEqual(len(app.panel_widgets()), len(app.model.config.panel_groups))
+            self.assertTrue(store.path.is_file())
+
+    def test_item_reference_changes_do_not_create_layout_history(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            appdata_root = root / "appdata"
+            desktop = root / "desktop"
+            outside = root / "outside"
+            desktop.mkdir()
+            outside.mkdir()
+            source = outside / "sample.weird"
+            source.write_text("keep-me", encoding="utf-8")
+            history_store = LayoutHistoryStore(appdata_root / "DesktopCleaner" / "layout-history.json")
+            store = ConfigurationStore(appdata_root / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                history_store=history_store,
+            )
+
+            app.handle_paths_dropped([source], "tab-images")
+
+            self.assertEqual(history_store.load(), [])
+
     def test_external_drop_is_saved_only_as_external_refs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -882,8 +928,8 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             settings = app._settings_window
             self.assertIsNotNone(settings)
-            settings._color_edit.setText(saved_color)
-            settings._opacity_value.setValue(0.33)
+            settings._select_color(saved_color)
+            settings._opacity_slider.setValue(33)
             settings._save()
             type(self).app.processEvents()
 
