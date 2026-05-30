@@ -154,7 +154,7 @@ class DiagnosticsServiceTests(unittest.TestCase):
             result = service.restore_desktop_icons()
 
             self.assertTrue(result.success)
-            self.assertEqual(takeover.calls, [("restore", None)])
+            self.assertEqual(takeover.calls, [("restore", None), ("detach", None)])
             self.assertFalse(config.desktop.restore_required)
             self.assertFalse(config.desktop.explorer_icons_hidden)
             self.assertEqual(saves, [True])

@@ -140,6 +140,42 @@ class LayoutHistoryStoreTests(unittest.TestCase):
 
             self.assertEqual(len(store.load()), 2)
 
+    def test_load_migrates_legacy_v4_snapshot_instead_of_dropping_it(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "layout-history.json"
+            config = build_default_configuration(r"D:\Desktop")
+            legacy_payload = config.to_dict()
+            legacy_payload["schema_version"] = 4
+            legacy_payload.pop("manual_orders", None)
+            legacy_payload.pop("item_groups", None)
+            legacy_payload.pop("new_item_placement", None)
+            path.write_text(
+                json.dumps(
+                    {
+                        "snapshots": [
+                            {
+                                "id": "layout-legacy",
+                                "created_at": "2026-01-01T00:00:00",
+                                "reason": "legacy",
+                                "configuration": legacy_payload,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            store = LayoutHistoryStore(path)
+            snapshots = store.load()
+
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].id, "layout-legacy")
+            self.assertEqual(snapshots[0].configuration.schema_version, 5)
+            self.assertEqual(snapshots[0].configuration.new_item_placement, "append_end")
+            restored = store.restore("layout-legacy")
+            self.assertEqual(restored.schema_version, 5)
+
 
 if __name__ == "__main__":
     unittest.main()

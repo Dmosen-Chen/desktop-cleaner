@@ -12,3 +12,4 @@ dist/
 *.spec
 .claude/
 tempCodeRunnerFile.py
+drag_debug.log

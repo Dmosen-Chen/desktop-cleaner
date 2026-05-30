@@ -480,6 +480,24 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertTrue(any(tab.id == created_tab.id for tab in config.panel_tabs))
         self.assertEqual(config.panel_groups[0].tab_ids[-1], created_tab.id)
 
+    def test_switching_rules_preserves_pending_edits(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        window = SettingsWindow(config)
+
+        window._select_rule_by_id("rule-images")
+        window._rule_extension_editor.set_extensions([".png", ".webp"])
+        window._select_rule_by_id("rule-documents")
+
+        images_rule = next(rule for rule in config.rules if rule.id == "rule-images")
+        self.assertEqual(images_rule.extensions, [".png", ".webp"])
+
+        window._rule_extension_editor.set_extensions([".pdf"])
+        window._save()
+
+        documents_rule = next(rule for rule in config.rules if rule.id == "rule-documents")
+        self.assertEqual(images_rule.extensions, [".png", ".webp"])
+        self.assertEqual(documents_rule.extensions, [".pdf"])
+
     def test_deleted_custom_type_target_is_hidden_from_classification_targets(self) -> None:
         config = build_default_configuration(r"D:\Preview\Desktop")
         window = SettingsWindow(config)

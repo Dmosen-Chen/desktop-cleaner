@@ -38,22 +38,43 @@ def should_display(entry: Path) -> bool:
 
 
 class DesktopIndex:
-    def __init__(self, desktop: Path) -> None:
+    def __init__(self, desktop: Path, *, extra_desktops: list[Path] | None = None) -> None:
         self.desktop = Path(desktop)
+        # 额外桌面目录(通常是公共桌面 C:\Users\Public\Desktop),
+        # Explorer 会把它合并进桌面视图,我们也要一起显示。
+        self.extra_desktops = [Path(entry) for entry in (extra_desktops or [])]
         self._last: dict[str, IndexedItem] = {}
 
+    def directories(self) -> list[Path]:
+        seen: set[str] = set()
+        result: list[Path] = []
+        for directory in [self.desktop, *self.extra_desktops]:
+            key = str(directory).casefold()
+            if key not in seen:
+                seen.add(key)
+                result.append(directory)
+        return result
+
     def scan(self) -> list[IndexedItem]:
-        if not self.desktop.is_dir():
-            return []
-        try:
-            entries = sorted(self.desktop.iterdir(), key=lambda entry: entry.name.casefold())
-        except OSError:
-            return []
-        return [
-            IndexedItem(entry.resolve())
-            for entry in entries
-            if should_display(entry)
-        ]
+        items: list[IndexedItem] = []
+        seen: set[str] = set()
+        for directory in self.directories():
+            if not directory.is_dir():
+                continue
+            try:
+                entries = sorted(directory.iterdir(), key=lambda entry: entry.name.casefold())
+            except OSError:
+                continue
+            for entry in entries:
+                if not should_display(entry):
+                    continue
+                resolved = entry.resolve()
+                key = canonical_key(resolved)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(IndexedItem(resolved))
+        return items
 
     def rescan(self) -> IndexChanges:
         current = {canonical_key(item.path): item for item in self.scan()}
@@ -75,9 +96,9 @@ class DesktopWatcher(QObject):
         super().__init__(parent)
         self._index = index
         self._watcher = QFileSystemWatcher(self)
-        desktop_path = str(self._index.desktop)
-        if self._index.desktop.is_dir():
-            self._watcher.addPath(desktop_path)
+        for directory in self._index.directories():
+            if directory.is_dir():
+                self._watcher.addPath(str(directory))
         self._watcher.directoryChanged.connect(self._on_directory_changed)
 
     def _on_directory_changed(self, _path: str) -> None:

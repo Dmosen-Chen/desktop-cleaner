@@ -24,6 +24,29 @@ class LoggingSetupTests(unittest.TestCase):
                 handler.close()
                 logger.removeHandler(handler)
 
+    def test_repeated_log_exception_keeps_writing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            log_path = configure_logging(Path(tmp) / "DesktopCleaner")
+
+            log_exception("first", RuntimeError("boom-1"))
+            log_exception("second", RuntimeError("boom-2"))
+
+            text = log_path.read_text(encoding="utf-8")
+            self.assertIn("first", text)
+            self.assertIn("boom-1", text)
+            self.assertIn("second", text)
+            self.assertIn("boom-2", text)
+            logger = logging.getLogger("desktop_cleaner")
+            for handler in list(logger.handlers):
+                handler.close()
+                logger.removeHandler(handler)
+
+    def tearDown(self) -> None:
+        logger = logging.getLogger("desktop_cleaner")
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,10 @@ from typing import Any
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
+# schema 5: 手动排序后新出现项目的落位策略(全局)。
+NEW_ITEM_PLACEMENTS = ("append_end", "prepend_front", "resort_all")
+DEFAULT_NEW_ITEM_PLACEMENT = "append_end"
+
 
 @dataclass
 class AppearanceSettings:
@@ -210,6 +214,36 @@ class ManualOverride:
 
 
 @dataclass
+class ItemGroup:
+    """显示层的虚拟分组(小组),归属单个标签,只记录成员引用,不碰真实文件。"""
+
+    id: str
+    tab_id: str
+    name: str
+    order: int = 0
+    member_paths: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "tab_id": self.tab_id,
+            "name": self.name,
+            "order": self.order,
+            "member_paths": list(self.member_paths),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ItemGroup:
+        return cls(
+            id=str(payload["id"]),
+            tab_id=str(payload["tab_id"]),
+            name=str(payload.get("name", "")),
+            order=int(payload.get("order", 0)),
+            member_paths=[str(path) for path in payload.get("member_paths", [])],
+        )
+
+
+@dataclass
 class DesktopIntegrationState:
     path: str
     takeover_enabled: bool = False
@@ -250,6 +284,11 @@ class Configuration:
     rules: list[ClassificationRule]
     manual_overrides: list[ManualOverride] = field(default_factory=list)
     external_refs: list[ItemRef] = field(default_factory=list)
+    # schema 5: 每标签手动顺序(key=tab_id, value=canonical_path 列表)、
+    # 虚拟分组、以及新项落位策略。
+    manual_orders: dict[str, list[str]] = field(default_factory=dict)
+    item_groups: list[ItemGroup] = field(default_factory=list)
+    new_item_placement: str = DEFAULT_NEW_ITEM_PLACEMENT
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -261,10 +300,24 @@ class Configuration:
             "rules": [rule.to_dict() for rule in self.rules],
             "manual_overrides": [entry.to_dict() for entry in self.manual_overrides],
             "external_refs": [entry.to_dict() for entry in self.external_refs],
+            "manual_orders": {
+                tab_id: list(paths) for tab_id, paths in self.manual_orders.items()
+            },
+            "item_groups": [group.to_dict() for group in self.item_groups],
+            "new_item_placement": self.new_item_placement,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> Configuration:
+        raw_orders = payload.get("manual_orders", {})
+        manual_orders: dict[str, list[str]] = {}
+        if isinstance(raw_orders, dict):
+            for tab_id, paths in raw_orders.items():
+                if isinstance(paths, list):
+                    manual_orders[str(tab_id)] = [str(path) for path in paths]
+        placement = str(payload.get("new_item_placement", DEFAULT_NEW_ITEM_PLACEMENT))
+        if placement not in NEW_ITEM_PLACEMENTS:
+            placement = DEFAULT_NEW_ITEM_PLACEMENT
         return cls(
             schema_version=int(payload["schema_version"]),
             desktop=DesktopIntegrationState.from_dict(dict(payload["desktop"])),
@@ -285,6 +338,11 @@ class Configuration:
             external_refs=[
                 ItemRef.from_dict(dict(item)) for item in payload.get("external_refs", [])
             ],
+            manual_orders=manual_orders,
+            item_groups=[
+                ItemGroup.from_dict(dict(item)) for item in payload.get("item_groups", [])
+            ],
+            new_item_placement=placement,
         )
 
 
@@ -385,7 +443,7 @@ def _validate_desktop_path_value(path: str) -> None:
 def validate_configuration_payload(
     payload: dict[str, Any],
     *,
-    expected_schema_version: int = 4,
+    expected_schema_version: int = 5,
 ) -> None:
     """Validate the persisted schema shape before any tolerant conversion."""
     if (
@@ -477,6 +535,33 @@ def validate_configuration_payload(
             _required_text(raw_reference, key, f"{label}.{key}")
         _required_string(raw_reference, "target_tab_id", f"{label}.target_tab_id")
 
+    if expected_schema_version >= 5:
+        raw_orders = payload.get("manual_orders")
+        if not isinstance(raw_orders, dict):
+            raise InvalidConfiguration("manual_orders must be an object")
+        for tab_id, paths in raw_orders.items():
+            if not isinstance(tab_id, str):
+                raise InvalidConfiguration("manual_orders keys must be strings")
+            if not isinstance(paths, list) or not all(
+                isinstance(path, str) for path in paths
+            ):
+                raise InvalidConfiguration(
+                    f"manual_orders[{tab_id}] must be a list of strings"
+                )
+        groups = _required_list(payload, "item_groups")
+        for index, raw_group in enumerate(groups):
+            if not isinstance(raw_group, dict):
+                raise InvalidConfiguration(f"item_groups[{index}] must be an object")
+            label = f"item_groups[{index}]"
+            _required_text(raw_group, "id", f"{label}.id")
+            _required_text(raw_group, "tab_id", f"{label}.tab_id")
+            _required_string(raw_group, "name", f"{label}.name")
+            _required_integer(raw_group, "order", f"{label}.order")
+            _required_string_list(raw_group, "member_paths", f"{label}.member_paths")
+        placement = payload.get("new_item_placement")
+        if placement not in NEW_ITEM_PLACEMENTS:
+            raise InvalidConfiguration("new_item_placement is invalid")
+
 
 def _validate_appearance(label: str, appearance: AppearanceSettings) -> None:
     if not _COLOR.fullmatch(appearance.background_color):
@@ -500,7 +585,7 @@ def _validate_geometry(group: PanelGroup) -> None:
 def validate_configuration(
     config: Configuration,
     *,
-    expected_schema_version: int = 4,
+    expected_schema_version: int = 5,
 ) -> None:
     """Validate the references and normalized values required by the current schema."""
     if config.schema_version != expected_schema_version:
@@ -580,3 +665,21 @@ def validate_configuration(
             raise InvalidConfiguration(
                 f"external reference {reference.id} must point outside the desktop"
             )
+
+    if expected_schema_version >= 5:
+        if config.new_item_placement not in NEW_ITEM_PLACEMENTS:
+            raise InvalidConfiguration("new_item_placement is invalid")
+        for tab_id in config.manual_orders:
+            if tab_id not in item_tab_ids:
+                raise InvalidConfiguration(
+                    f"manual_orders references an unknown item tab {tab_id}"
+                )
+        group_ids: set[str] = set()
+        for group in config.item_groups:
+            if group.id in group_ids:
+                raise InvalidConfiguration(f"item group {group.id} id is not unique")
+            group_ids.add(group.id)
+            if group.tab_id not in item_tab_ids:
+                raise InvalidConfiguration(
+                    f"item group {group.id} targets an unknown item tab"
+                )

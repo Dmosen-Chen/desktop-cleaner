@@ -56,6 +56,21 @@ def windows_known_folder_desktop() -> Path | None:
             ole32.CoTaskMemFree(allocated)
 
 
+def windows_public_desktop() -> Path | None:
+    """Return the shared (All Users) desktop, which Explorer merges into the view."""
+    if os.name != "nt":
+        return None
+    public = os.environ.get("PUBLIC")
+    if public:
+        candidate = Path(public) / "Desktop"
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            return None
+    return None
+
+
 def _is_accessible_directory(path: Path) -> bool:
     try:
         return path.is_dir() and os.access(path, os.R_OK)

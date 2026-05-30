@@ -47,6 +47,9 @@ def get_logger() -> logging.Logger:
 def log_exception(context: str, exc: BaseException) -> None:
     logger = get_logger()
     logger.error(context, exc_info=(type(exc), exc, exc.__traceback__))
+    # flush 后 close:把崩溃信息立即落盘,同时释放 Windows 文件句柄,
+    # 让构建守卫脚本、诊断导出、更新替换等能正常读/移动日志文件。
+    # RotatingFileHandler 使用 delay=True,下次写日志会自动重新打开,不会丢日志。
     for handler in logger.handlers:
         handler.flush()
         if isinstance(handler, RotatingFileHandler):

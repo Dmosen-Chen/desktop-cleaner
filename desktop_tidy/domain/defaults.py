@@ -107,7 +107,7 @@ def build_default_configuration(desktop_path: str | Path | None = None) -> Confi
         name="面板 1",
     )
     return Configuration(
-        schema_version=4,
+        schema_version=5,
         desktop=DesktopIntegrationState(path=path, primary_screen_id="primary"),
         appearance_defaults=deepcopy(DEFAULT_APPEARANCE),
         panel_groups=[group],

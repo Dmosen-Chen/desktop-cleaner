@@ -17,6 +17,7 @@ from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.models import (
     AppearanceSettings,
     Configuration,
+    DEFAULT_NEW_ITEM_PLACEMENT,
     InvalidConfiguration,
     ItemRef,
     _is_absolute_desktop_path,
@@ -25,7 +26,7 @@ from desktop_tidy.domain.models import (
 )
 
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 class UnsupportedConfigurationVersion(ValueError):
@@ -202,8 +203,17 @@ def _assign_generated_panel_names(config: Configuration) -> None:
 
 
 def _migrate_schema_three_to_four(config: Configuration) -> Configuration:
-    config.schema_version = CURRENT_SCHEMA_VERSION
+    config.schema_version = 4
     _assign_generated_panel_names(config)
+    return config
+
+
+def _migrate_schema_four_to_five(config: Configuration) -> Configuration:
+    # 纯增量迁移:不改变任何已有行为,只补齐排序/分组/落位默认值。
+    config.schema_version = 5
+    config.manual_orders = {}
+    config.item_groups = []
+    config.new_item_placement = DEFAULT_NEW_ITEM_PLACEMENT
     return config
 
 
@@ -228,6 +238,19 @@ def load_or_migrate(path: Path) -> Configuration:
             except (KeyError, TypeError, ValueError, InvalidConfiguration):
                 _copy_aside(path, "corrupt")
                 return build_default_configuration()
+        if payload["schema_version"] == 4:
+            try:
+                validate_configuration_payload(payload, expected_schema_version=4)
+                config = Configuration.from_dict(payload)
+                validate_configuration(config, expected_schema_version=4)
+            except (KeyError, TypeError, ValueError, InvalidConfiguration):
+                _copy_aside(path, "corrupt")
+                return build_default_configuration()
+            _copy_aside(path, "pre-schema-v5")
+            config = _migrate_schema_four_to_five(config)
+            validate_configuration(config, expected_schema_version=CURRENT_SCHEMA_VERSION)
+            _atomic_save(path, config)
+            return config
         if payload["schema_version"] == 3:
             try:
                 validate_configuration_payload(payload, expected_schema_version=3)
@@ -238,6 +261,7 @@ def load_or_migrate(path: Path) -> Configuration:
                 return build_default_configuration()
             _copy_aside(path, "pre-schema-v4")
             config = _migrate_schema_three_to_four(config)
+            config = _migrate_schema_four_to_five(config)
             validate_configuration(config, expected_schema_version=CURRENT_SCHEMA_VERSION)
             _atomic_save(path, config)
             return config
@@ -256,6 +280,7 @@ def load_or_migrate(path: Path) -> Configuration:
                 tab.widget_type = ""
                 tab.widget_settings = {}
             config = _migrate_schema_three_to_four(config)
+            config = _migrate_schema_four_to_five(config)
             validate_configuration(config, expected_schema_version=CURRENT_SCHEMA_VERSION)
             _atomic_save(path, config)
             return config
@@ -264,5 +289,6 @@ def load_or_migrate(path: Path) -> Configuration:
     _copy_aside(path, "pre-qt-v1")
     config = _migrate_legacy(payload)
     config = _migrate_schema_three_to_four(config)
+    config = _migrate_schema_four_to_five(config)
     _atomic_save(path, config)
     return config

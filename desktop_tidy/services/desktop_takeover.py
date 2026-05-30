@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from desktop_tidy.domain.models import Configuration
@@ -45,6 +47,64 @@ class TakeoverResult:
     message: str = ""
 
 
+class TakeoverSessionMarker:
+    """进程被强杀时 config 可能来不及落盘,用独立 marker 触发下次启动恢复。"""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def mark_active(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text("active\n", encoding="utf-8")
+
+    def clear(self) -> None:
+        if self._path.is_file():
+            self._path.unlink()
+
+    def is_active(self) -> bool:
+        return self._path.is_file()
+
+
+def recover_abandoned_takeover(
+    takeover: _TakeoverLike,
+    marker: TakeoverSessionMarker,
+) -> bool:
+    if not marker.is_active():
+        return False
+    restored = takeover.restore_explorer_icons()
+    detach = getattr(takeover, "detach_panels", None)
+    if detach is not None:
+        detach()
+    marker.clear()
+    return restored
+
+
+_abnormal_exit_handler_ref: list[object] = []
+
+
+def install_abnormal_exit_handler(callback: Callable[[], None]) -> None:
+    """尽力在控制台/关机信号时恢复桌面(任务管理器强杀不一定触发)。"""
+    if sys.platform != "win32":
+        return
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint32)
+    def handler(ctrl_type: int) -> bool:
+        if ctrl_type in (0, 2, 5, 6):
+            try:
+                callback()
+            except Exception:
+                pass
+        return False
+
+    _abnormal_exit_handler_ref.clear()
+    _abnormal_exit_handler_ref.append(handler)
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
+
+
 class _TakeoverLike(Protocol):
     def restore_explorer_icons(self) -> bool: ...
 
@@ -62,6 +122,9 @@ class DesktopRecoveryGuard:
         ):
             return False
         restored = self._takeover.restore_explorer_icons()
+        detach = getattr(self._takeover, "detach_panels", None)
+        if detach is not None:
+            detach()
         if restored:
             config.desktop.restore_required = False
             config.desktop.explorer_icons_hidden = False
@@ -176,7 +239,13 @@ class DesktopTakeoverService:
         if not list_view:
             return False
         api.ShowWindow(list_view, SW_SHOW if visible else SW_HIDE)
-        return True
+        # ShowWindow 的返回值是窗口之前的可见状态,不能用来判断是否成功。
+        # 改为复核 ListView 的实际可见性,避免恢复其实失败却误报成功、
+        # 进而清掉恢复标志导致桌面图标长期隐藏。
+        actual = self.explorer_icons_visible()
+        if actual is None:
+            return True
+        return actual == visible
 
     def explorer_icons_visible(self) -> bool | None:
         api = self._api()
@@ -231,14 +300,17 @@ class DesktopTakeoverService:
         rect: tuple[int, int, int, int],
     ) -> None:
         left, top, right, bottom = rect
+        # 保持 Qt 已经给面板设置好的 WindowStaysOnBottom 层级(壁纸之上、其它窗口之下),
+        # 不要用原始 HWND_BOTTOM 把它压到壁纸 WorkerW 下面——那样面板会收不到鼠标,
+        # 表现为"拖不动 / 点不动"。这里只校正位置,用 SWP_NOZORDER 保留 z 序。
         api.SetWindowPos(
             hwnd,
-            HWND_BOTTOM,
+            0,
             left,
             top,
             max(1, right - left),
             max(1, bottom - top),
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
 
     def _restore_panel_windows(

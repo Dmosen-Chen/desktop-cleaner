@@ -48,11 +48,12 @@ from PySide6.QtWidgets import (
 
 from desktop_tidy.domain.models import (
     Configuration,
+    DEFAULT_NEW_ITEM_PLACEMENT,
     InvalidConfiguration,
     validate_configuration,
 )
 from desktop_tidy.domain.workspace import WorkspaceModel
-from desktop_tidy.persistence.ui_preferences import UiPreferences
+from desktop_tidy.persistence.ui_preferences import DEFAULT_GROUP_ACCENT_COLOR, UiPreferences
 from desktop_tidy.services.screens import ScreenInfo, available_screens
 from desktop_tidy.version import APP_VERSION
 from desktop_tidy.ui.panel_preview import (
@@ -66,6 +67,11 @@ from desktop_tidy.widgets.registry import BuiltinWidgetRegistry
 _SECTIONS = ["面板", "分类规则"]
 _OPACITY_MIN = 0.10
 _OPACITY_MAX = 1.00
+_NEW_ITEM_PLACEMENT_CHOICES = [
+    ("append_end", "放在末尾（默认）"),
+    ("prepend_front", "放在最前"),
+    ("resort_all", "出现新文件时按规则重排全部"),
+]
 _COLOR_SWATCHES = [
     "#000000",
     "#111827",
@@ -75,6 +81,14 @@ _COLOR_SWATCHES = [
     "#8B3A5D",
     "#25636B",
     "#7C6A46",
+]
+_GROUP_ACCENT_SWATCHES = [
+    "#8264D2",
+    "#5078C8",
+    "#48A878",
+    "#C87848",
+    "#C84878",
+    "#3AAFA9",
 ]
 _EXTENSION_PRESETS = {
     "图片": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg"],
@@ -221,6 +235,45 @@ QWidget#DesktopCleanerSettings QSpinBox {
     border: 1px solid rgba(255, 255, 255, 42);
     border-radius: 8px;
     padding: 4px 8px;
+}
+QWidget#DesktopCleanerSettings QSpinBox::up-button,
+QWidget#DesktopCleanerSettings QSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 26px;
+    background: rgba(61, 66, 76, 242);
+    border-left: 1px solid rgba(255, 255, 255, 42);
+}
+QWidget#DesktopCleanerSettings QSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 8px;
+}
+QWidget#DesktopCleanerSettings QSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 8px;
+}
+QWidget#DesktopCleanerSettings QSpinBox::up-button:hover,
+QWidget#DesktopCleanerSettings QSpinBox::down-button:hover {
+    background: rgba(217, 154, 189, 200);
+}
+QWidget#DesktopCleanerSettings QSpinBox::up-button:pressed,
+QWidget#DesktopCleanerSettings QSpinBox::down-button:pressed {
+    background: rgba(217, 154, 189, 240);
+}
+QWidget#DesktopCleanerSettings QSpinBox::up-arrow {
+    image: none;
+    width: 0px;
+    height: 0px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 7px solid #F8FAFC;
+}
+QWidget#DesktopCleanerSettings QSpinBox::down-arrow {
+    image: none;
+    width: 0px;
+    height: 0px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 7px solid #F8FAFC;
 }
 QWidget#DesktopCleanerSettings QPushButton:hover {
     background: rgba(61, 66, 76, 242);
@@ -763,6 +816,7 @@ def _history_reason_label(reason: str) -> str:
         "add-item-panel": "新增面板",
         "add-item-tab": "新增标签",
         "add-widget-panel:clock": "新增时间面板",
+        "app-exit": "退出保存",
         "appearance-change": "外观调整",
         "delete-item-panel": "删除面板",
         "delete-item-tab": "删除标签",
@@ -802,6 +856,7 @@ class SettingsWindow(QWidget):
     diagnostics_refresh_requested = Signal()
     diagnostics_restore_icons_requested = Signal()
     diagnostics_refresh_takeover_requested = Signal()
+    takeover_live_changed = Signal(bool)
     diagnostics_open_logs_requested = Signal()
     diagnostics_export_requested = Signal()
     update_check_requested = Signal()
@@ -838,15 +893,18 @@ class SettingsWindow(QWidget):
         self._screen_layout_buttons: dict[str, QPushButton] = {}
         self._rule_extension_editors: dict[str, ExtensionTagEditor] = {}
         self._color_swatch_buttons: dict[str, QPushButton] = {}
+        self._group_accent_swatch_buttons: dict[str, QPushButton] = {}
         self._selected_color = self._target_group(config).appearance.background_color
         self._ui_preferences = ui_preferences or UiPreferences()
         self._takeover_confirmation = takeover_confirmation
+        self._suppress_takeover_signal = False
         self._delete_confirmation = delete_confirmation
         self._management_selection_kind = "panel"
         self._selected_tab_id = ""
         self._history_snapshots: list[object] = []
         self._inline_edit_kind = ""
         self._inline_edit_id = ""
+        self._active_rule_id = ""
         self._appearance_save_timer = QTimer(self)
         self._appearance_save_timer.setSingleShot(True)
         self._appearance_save_timer.setInterval(250)
@@ -855,7 +913,13 @@ class SettingsWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(_SETTINGS_WINDOW_STYLE)
         self.setWindowTitle("设置")
+        self.setMinimumSize(720, 480)
         self.resize(820, 600)
+        self.setMouseTracking(True)
+        self._resize_active = False
+        self._resize_edges = (False, False, False, False)
+        self._resize_start_geom = QRect()
+        self._resize_start_pos = QPoint()
 
         self._section_list = QListWidget(self)
         for name in _SECTIONS:
@@ -897,6 +961,75 @@ class SettingsWindow(QWidget):
         self.hide()
         event.ignore()
 
+    _RESIZE_MARGIN = 8
+
+    def _resize_edges_at(self, pos: QPoint) -> tuple[bool, bool, bool, bool]:
+        margin = self._RESIZE_MARGIN
+        left = pos.x() <= margin
+        right = pos.x() >= self.width() - margin
+        top = pos.y() <= margin
+        bottom = pos.y() >= self.height() - margin
+        return left, top, right, bottom
+
+    def _cursor_for_edges(self, edges: tuple[bool, bool, bool, bool]):
+        left, top, right, bottom = edges
+        if (left and top) or (right and bottom):
+            return Qt.CursorShape.SizeFDiagCursor
+        if (right and top) or (left and bottom):
+            return Qt.CursorShape.SizeBDiagCursor
+        if left or right:
+            return Qt.CursorShape.SizeHorCursor
+        if top or bottom:
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
+            edges = self._resize_edges_at(event.position().toPoint())
+            if any(edges):
+                self._resize_active = True
+                self._resize_edges = edges
+                self._resize_start_geom = QRect(self.geometry())
+                self._resize_start_pos = event.globalPosition().toPoint()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._resize_active:
+            self._perform_edge_resize(event.globalPosition().toPoint())
+            event.accept()
+            return
+        if not self.isMaximized():
+            self.setCursor(
+                self._cursor_for_edges(self._resize_edges_at(event.position().toPoint()))
+            )
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._resize_active:
+            self._resize_active = False
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _perform_edge_resize(self, global_pos: QPoint) -> None:
+        left, top, right, bottom = self._resize_edges
+        geom = QRect(self._resize_start_geom)
+        delta = global_pos - self._resize_start_pos
+        min_w = self.minimumWidth()
+        min_h = self.minimumHeight()
+        if left:
+            geom.setLeft(min(geom.left() + delta.x(), geom.right() - min_w))
+        if right:
+            geom.setRight(max(geom.right() + delta.x(), geom.left() + min_w))
+        if top:
+            geom.setTop(min(geom.top() + delta.y(), geom.bottom() - min_h))
+        if bottom:
+            geom.setBottom(max(geom.bottom() + delta.y(), geom.top() + min_h))
+        self.setGeometry(geom)
+
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         # 顶级 QWidget 不会自动绘制 QSS 的 background,
         # 叠加 WA_TranslucentBackground 后整窗透明,这里手动画磨砂底 + 圆角边框。
@@ -934,7 +1067,7 @@ class SettingsWindow(QWidget):
         if group_id is not None:
             self._group_id = group_id
         self._desktop_path_edit.setText(config.desktop.path)
-        self._takeover_checkbox.setChecked(config.desktop.takeover_enabled)
+        self._set_takeover_checkbox_silently(config.desktop.takeover_enabled)
         self._startup_checkbox.setChecked(config.desktop.startup_enabled)
         self._update_takeover_status_label()
         self._selected_screen_id = self._target_group(config).screen_id or config.desktop.primary_screen_id
@@ -943,6 +1076,7 @@ class SettingsWindow(QWidget):
         self._reload_rules_editor()
         group = self._target_group(config)
         self._sync_appearance_controls_from_group(group)
+        self._sync_new_item_placement_combo()
 
     def visible_section_names(self) -> list[str]:
         return list(_SECTIONS)
@@ -1351,6 +1485,8 @@ class SettingsWindow(QWidget):
         self._opacity_spinbox.setRange(0, 100)
         self._opacity_spinbox.setSuffix("%")
         self._opacity_spinbox.setSingleStep(10)
+        self._opacity_spinbox.setMinimumHeight(38)
+        self._opacity_spinbox.setMinimumWidth(110)
         self._opacity_spinbox.setValue(self._opacity_slider.value())
         self._opacity_slider.valueChanged.connect(self._sync_opacity_from_slider)
         self._opacity_spinbox.valueChanged.connect(self._sync_opacity_from_spinbox)
@@ -1358,8 +1494,28 @@ class SettingsWindow(QWidget):
         opacity_row.addWidget(self._opacity_slider, stretch=1)
         opacity_row.addWidget(self._opacity_spinbox)
         form.addRow("背景透明度", opacity_row)
+        self._new_item_placement_combo = QComboBox(page)
+        for value, label in _NEW_ITEM_PLACEMENT_CHOICES:
+            self._new_item_placement_combo.addItem(label, value)
+        self._sync_new_item_placement_combo()
+        form.addRow("新文件位置", self._new_item_placement_combo)
         self._sync_color_swatch_states()
         return page
+
+    def _sync_new_item_placement_combo(self) -> None:
+        combo = getattr(self, "_new_item_placement_combo", None)
+        if combo is None:
+            return
+        placement = self._config.new_item_placement
+        index = combo.findData(placement)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def new_item_placement_value(self) -> str:
+        combo = getattr(self, "_new_item_placement_combo", None)
+        if combo is None:
+            return self._config.new_item_placement
+        value = combo.currentData()
+        return value if isinstance(value, str) else DEFAULT_NEW_ITEM_PLACEMENT
 
     def _build_history_page(self) -> QWidget:
         page = QWidget(self)
@@ -1524,6 +1680,7 @@ class SettingsWindow(QWidget):
         takeover_layout = QVBoxLayout(takeover_group)
         self._takeover_checkbox = QCheckBox("启用桌面接管", takeover_group)
         self._takeover_checkbox.setChecked(self._config.desktop.takeover_enabled)
+        self._takeover_checkbox.toggled.connect(self._on_takeover_toggled)
         self._startup_checkbox = QCheckBox("开机启动", takeover_group)
         self._startup_checkbox.setChecked(self._config.desktop.startup_enabled)
         self._takeover_status_label = QLabel("", takeover_group)
@@ -1531,6 +1688,27 @@ class SettingsWindow(QWidget):
         takeover_layout.addWidget(self._startup_checkbox)
         takeover_layout.addWidget(self._takeover_status_label)
         layout.addWidget(takeover_group)
+
+        group_appearance = QGroupBox("分组外观", page)
+        group_form = QFormLayout(group_appearance)
+        accent_row = QHBoxLayout()
+        for color in _GROUP_ACCENT_SWATCHES:
+            button = QPushButton("", group_appearance)
+            button.setCheckable(True)
+            button.setFixedSize(28, 28)
+            button.setToolTip(color)
+            button.clicked.connect(
+                lambda _checked=False, value=color: self._select_group_accent_color(value)
+            )
+            accent_row.addWidget(button)
+            self._group_accent_swatch_buttons[color] = button
+        self._group_accent_more_button = QPushButton("更多颜色", group_appearance)
+        self._group_accent_more_button.clicked.connect(self._choose_group_accent_color)
+        accent_row.addWidget(self._group_accent_more_button)
+        accent_row.addStretch(1)
+        group_form.addRow("分组主色调", accent_row)
+        layout.addWidget(group_appearance)
+        self._sync_group_accent_swatch_states()
 
         update_group = QGroupBox("软件更新", page)
         self._update_group = update_group
@@ -1569,7 +1747,7 @@ class SettingsWindow(QWidget):
         recovery_layout = QHBoxLayout(recovery_group)
         recovery_layout.addStretch(1)
         self._reset_delete_confirmations_button = QPushButton(
-            "恢复删除确认提示",
+            "恢复确认提示",
             recovery_group,
         )
         self._reset_delete_confirmations_button.clicked.connect(
@@ -1766,7 +1944,31 @@ class SettingsWindow(QWidget):
         self._load_rule_detail(self._current_rule_id())
 
     def _select_rule_row(self, _row: int) -> None:
-        self._load_rule_detail(self._current_rule_id())
+        new_rule_id = self._current_rule_id()
+        # 切到新规则前,先把当前规则编辑器里的改动写回内存配置,
+        # 否则用户编辑一条规则后切走再保存,改动会静默丢失。
+        if self._active_rule_id and self._active_rule_id != new_rule_id:
+            self._write_back_rule_editor(self._config, self._active_rule_id)
+        self._load_rule_detail(new_rule_id)
+
+    def _write_back_rule_editor(self, config: Configuration, rule_id: str) -> None:
+        if not rule_id or not hasattr(self, "_rule_enabled_checkbox"):
+            return
+        target = next((entry for entry in config.rules if entry.id == rule_id), None)
+        if target is None:
+            return
+        enabled = self._rule_enabled_checkbox.isChecked()
+        extensions = self._rule_extension_editor.extensions()
+        target_tab_id = str(self._rule_target_combo.currentData() or "")
+        if enabled:
+            tab_ids = {
+                tab.id for tab in config.panel_tabs if tab.content_kind == "items"
+            }
+            if target_tab_id not in tab_ids:
+                target_tab_id = self._suggested_target_for_rule(target, config)
+        target.enabled = enabled
+        target.extensions = extensions
+        target.target_tab_id = target_tab_id
 
     def _current_rule_id(self) -> str:
         if not hasattr(self, "_rule_list"):
@@ -1806,6 +2008,7 @@ class SettingsWindow(QWidget):
         )
         if index >= 0:
             self._rule_target_combo.setCurrentIndex(index)
+        self._active_rule_id = rule_id
 
     def _is_custom_rule(self, rule) -> bool:  # type: ignore[no-untyped-def]
         return rule.id not in _DEFAULT_RULE_ROLES and rule.matcher_kind == "extension"
@@ -1920,6 +2123,25 @@ class SettingsWindow(QWidget):
         self.config_saved.emit()
         self.hide()
 
+    def _set_takeover_checkbox_silently(self, checked: bool) -> None:
+        previous = self._suppress_takeover_signal
+        self._suppress_takeover_signal = True
+        blocked = self._takeover_checkbox.blockSignals(True)
+        self._takeover_checkbox.setChecked(checked)
+        self._takeover_checkbox.blockSignals(blocked)
+        self._suppress_takeover_signal = previous
+
+    def _on_takeover_toggled(self, checked: bool) -> None:
+        if self._suppress_takeover_signal:
+            return
+        if checked and not self._config.desktop.takeover_enabled:
+            if not self._confirm_takeover_enable():
+                self._set_takeover_checkbox_silently(False)
+                return
+        self._config.desktop.takeover_enabled = bool(checked)
+        self._update_takeover_status_label()
+        self.takeover_live_changed.emit(bool(checked))
+
     def _requires_takeover_confirmation(self, candidate: Configuration) -> bool:
         return (
             not self._config.desktop.takeover_enabled
@@ -1927,48 +2149,47 @@ class SettingsWindow(QWidget):
         )
 
     def _confirm_takeover_enable(self) -> bool:
+        if not self._ui_preferences.confirm_takeover:
+            return True
         if self._takeover_confirmation is not None:
             return self._takeover_confirmation()
-        result = QMessageBox.question(
-            self,
-            "启用桌面接管",
-            "启用后会隐藏 Explorer 原生桌面图标，并由 Desktop Cleaner 面板显示桌面入口。退出程序、关闭接管或异常恢复时会尝试恢复原桌面图标。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        box = QMessageBox(self)
+        box.setWindowTitle("启用桌面接管")
+        box.setText("启用后会隐藏 Explorer 原生桌面图标，并由 Desktop Cleaner 面板显示桌面入口。")
+        box.setInformativeText("退出程序、关闭接管或异常恢复时会尝试恢复原桌面图标。")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        return result == QMessageBox.StandardButton.Yes
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        dont_ask = QCheckBox("以后不再提醒", box)
+        box.setCheckBox(dont_ask)
+        confirmed = box.exec() == QMessageBox.StandardButton.Yes
+        if confirmed and dont_ask.isChecked():
+            self._ui_preferences.confirm_takeover = False
+            self.ui_preferences_changed.emit()
+        return confirmed
 
     def _apply_editor_values_to_configuration(self, config: Configuration) -> None:
         config.desktop.path = self._desktop_path_edit.text().strip()
         config.desktop.takeover_enabled = self._takeover_checkbox.isChecked()
         config.desktop.startup_enabled = self._startup_checkbox.isChecked()
         config.desktop.primary_screen_id = self.selected_screen_id()
-        rules_by_id = {rule.id: rule for rule in config.rules}
         valid_item_tab_ids = {tab.id for tab in config.panel_tabs if tab.content_kind == "items"}
         for rule in config.rules:
             if rule.enabled and rule.target_tab_id not in valid_item_tab_ids:
                 rule.target_tab_id = self._suggested_target_for_rule(rule, config)
-        rule_id = self._current_rule_id()
-        if rule_id in rules_by_id:
-            target = rules_by_id[rule_id]
-            enabled = self._rule_enabled_checkbox.isChecked()
-            extensions = self._rule_extension_editor.extensions()
-            target_tab_id = str(self._rule_target_combo.currentData() or "")
-            if enabled:
-                tab_ids = {
-                    tab.id for tab in config.panel_tabs if tab.content_kind == "items"
-                }
-                if target_tab_id not in tab_ids:
-                    target_tab_id = self._suggested_target_for_rule(target, config)
-            target.enabled = enabled
-            target.extensions = extensions
-            target.target_tab_id = target_tab_id
+        self._write_back_rule_editor(config, self._current_rule_id())
         group = self._target_group(config)
         group.screen_id = self.selected_screen_id()
-        config.appearance_defaults.background_color = self.panel_background_color()
-        config.appearance_defaults.background_opacity = self.panel_background_opacity()
-        group.appearance.background_color = self.panel_background_color()
-        group.appearance.background_opacity = self.panel_background_opacity()
+        # 颜色/透明度是全局外观,统一写入默认值和所有面板组。
+        color = self.panel_background_color()
+        opacity = self.panel_background_opacity()
+        config.appearance_defaults.background_color = color
+        config.appearance_defaults.background_opacity = opacity
+        for entry in config.panel_groups:
+            entry.appearance.background_color = color
+            entry.appearance.background_opacity = opacity
+        config.new_item_placement = self.new_item_placement_value()
 
     def _copy_configuration_state(
         self, source: Configuration, target: Configuration
@@ -1977,6 +2198,7 @@ class SettingsWindow(QWidget):
         target.desktop.takeover_enabled = source.desktop.takeover_enabled
         target.desktop.startup_enabled = source.desktop.startup_enabled
         target.desktop.primary_screen_id = source.desktop.primary_screen_id
+        target.new_item_placement = source.new_item_placement
         source_rules = {rule.id: rule for rule in source.rules}
         for rule in target.rules:
             updated = source_rules[rule.id]
@@ -1986,8 +2208,15 @@ class SettingsWindow(QWidget):
         target_group = self._target_group(target)
         source_group = self._target_group(source)
         target_group.screen_id = source_group.screen_id
-        target.appearance_defaults.background_color = source.appearance_defaults.background_color
-        target.appearance_defaults.background_opacity = source.appearance_defaults.background_opacity
+        # 颜色/透明度是全局外观:从 source 默认值统一同步到 target 所有面板组,
+        # 而 item_icon_size 仍然按面板组独立保留。
+        global_color = source.appearance_defaults.background_color
+        global_opacity = source.appearance_defaults.background_opacity
+        target.appearance_defaults.background_color = global_color
+        target.appearance_defaults.background_opacity = global_opacity
+        for entry in target.panel_groups:
+            entry.appearance.background_color = global_color
+            entry.appearance.background_opacity = global_opacity
         for source_panel_group in source.panel_groups:
             matching = next(
                 (entry for entry in target.panel_groups if entry.id == source_panel_group.id),
@@ -1995,8 +2224,6 @@ class SettingsWindow(QWidget):
             )
             if matching is None:
                 continue
-            matching.appearance.background_color = source_panel_group.appearance.background_color
-            matching.appearance.background_opacity = source_panel_group.appearance.background_opacity
             matching.appearance.item_icon_size = source_panel_group.appearance.item_icon_size
 
     def _select_color(self, color: str) -> None:
@@ -2018,6 +2245,30 @@ class SettingsWindow(QWidget):
         color = QColorDialog.getColor(QColor(self._selected_color), self, "选择背景颜色")
         if color.isValid():
             self._select_color(color.name().upper())
+
+    def _select_group_accent_color(self, color: str) -> None:
+        self._ui_preferences.group_accent_color = color.upper()
+        self._sync_group_accent_swatch_states()
+        self.ui_preferences_changed.emit()
+
+    def _sync_group_accent_swatch_states(self) -> None:
+        if not hasattr(self, "_group_accent_swatch_buttons"):
+            return
+        selected = self._ui_preferences.group_accent_color.upper()
+        for color, button in self._group_accent_swatch_buttons.items():
+            checked = color.upper() == selected
+            button.setChecked(checked)
+            border = "#ffffff" if checked else "#666666"
+            button.setStyleSheet(
+                f"QPushButton {{ background: {color}; border: 2px solid {border}; "
+                "border-radius: 6px; }}"
+            )
+
+    def _choose_group_accent_color(self) -> None:
+        current = self._ui_preferences.group_accent_color
+        color = QColorDialog.getColor(QColor(current), self, "选择分组主色调")
+        if color.isValid():
+            self._select_group_accent_color(color.name().upper())
 
     def _opacity_to_slider(self, opacity: float) -> int:
         return int(round(max(0.0, min(1.0, opacity)) * 100))
@@ -2205,6 +2456,7 @@ class SettingsWindow(QWidget):
     def _reset_delete_confirmations(self) -> None:
         self._ui_preferences.confirm_delete_panel = True
         self._ui_preferences.confirm_delete_tab = True
+        self._ui_preferences.confirm_takeover = True
         self.ui_preferences_changed.emit()
 
     def _panel_label(self, group_id: str) -> str:

@@ -6,11 +6,14 @@ from copy import deepcopy
 from pathlib import Path
 import uuid
 
-from .classification import canonical_key, is_inside
+from desktop_tidy.domain.classification import canonical_key, is_inside
+from .shortcut_identity import desktop_entry_rank, item_identity_key
 from .defaults import build_default_configuration
 from .models import (
+    NEW_ITEM_PLACEMENTS,
     ClassificationRule,
     Configuration,
+    ItemGroup,
     ItemRef,
     ManualOverride,
     PanelGeometry,
@@ -49,6 +52,195 @@ class WorkspaceModel:
             entry for entry in self.config.manual_overrides if entry.canonical_path != key
         ]
         self.config.manual_overrides.append(ManualOverride(key, tab_id))
+        self.config.external_refs = [
+            ref for ref in self.config.external_refs if ref.canonical_path != key
+        ]
+
+    def move_paths_to_tab(
+        self,
+        paths: list[Path],
+        tab_id: str,
+        *,
+        desktop_roots: list[Path] | None = None,
+    ) -> None:
+        """把图标归类到目标标签,并清理其它标签里的顺序/分组元数据。"""
+        self._require_item_tab(tab_id)
+        keys = {canonical_key(path) for path in paths}
+        if keys:
+            for path in paths:
+                self.remove_items_from_group([path])
+            for tid, order in list(self.config.manual_orders.items()):
+                if tid == tab_id:
+                    continue
+                filtered = [entry for entry in order if entry not in keys]
+                if filtered:
+                    self.config.manual_orders[tid] = filtered
+                else:
+                    self.config.manual_orders.pop(tid, None)
+        self.add_paths_to_tab(paths, tab_id, desktop_roots=desktop_roots)
+        self.repair_metadata(desktop_roots=desktop_roots)
+
+    def set_new_item_placement(self, placement: str) -> None:
+        if placement not in NEW_ITEM_PLACEMENTS:
+            raise ValueError(f"unknown new item placement: {placement}")
+        self.config.new_item_placement = placement
+
+    def reorder_tab_items(self, tab_id: str, ordered_paths: list[Path]) -> None:
+        """记录标签内的手动显示顺序(仅元数据,不动真实文件)。
+
+        传入当前可见项目的目标顺序;空列表表示清除手动顺序、回到自动排序。
+        分组文件夹用组内第一个成员的路径作为占位。
+        """
+        self._require_item_tab(tab_id)
+        keys: list[str] = []
+        seen: set[str] = set()
+        for path in ordered_paths:
+            key = canonical_key(path)
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if keys:
+            self.config.manual_orders[tab_id] = keys
+            self._collapse_manual_order_groups(tab_id)
+        else:
+            self.config.manual_orders.pop(tab_id, None)
+
+    def _collapse_manual_order_groups(self, tab_id: str) -> None:
+        order = self.config.manual_orders.get(tab_id)
+        if not order:
+            return
+        anchor_by_group: dict[str, str] = {}
+        member_to_group: dict[str, str] = {}
+        for group in self.config.item_groups:
+            if group.tab_id != tab_id or not group.member_paths:
+                continue
+            anchor_by_group[group.id] = group.member_paths[0]
+            for member_key in group.member_paths:
+                member_to_group[member_key] = group.id
+        collapsed: list[str] = []
+        seen_groups: set[str] = set()
+        for key in order:
+            group_id = member_to_group.get(key)
+            if group_id is not None:
+                if group_id in seen_groups:
+                    continue
+                seen_groups.add(group_id)
+                collapsed.append(anchor_by_group[group_id])
+                continue
+            collapsed.append(key)
+        self.config.manual_orders[tab_id] = collapsed
+
+    def clear_manual_order(self, tab_id: str) -> None:
+        self.config.manual_orders.pop(tab_id, None)
+
+    # ----- 分组(小组)操作:全部仅改显示层元数据,绝不移动/删除真实文件 -----
+
+    def _item_group(self, group_id: str) -> ItemGroup:
+        for group in self.config.item_groups:
+            if group.id == group_id:
+                return group
+        raise KeyError(f"unknown item group: {group_id}")
+
+    def _prune_empty_item_groups(self) -> None:
+        self.config.item_groups = [
+            group for group in self.config.item_groups if group.member_paths
+        ]
+
+    def _dissolve_singleton_item_groups(self) -> None:
+        """组内只剩 1 个图标时自动解散(无需保留分组壳)。"""
+        self.config.item_groups = [
+            group for group in self.config.item_groups if len(group.member_paths) >= 2
+        ]
+
+    def _prune_item_groups_after_member_change(self) -> None:
+        self._prune_empty_item_groups()
+        self._dissolve_singleton_item_groups()
+
+    def _detach_keys_from_groups(
+        self, tab_id: str, keys: set[str], *, except_group_id: str | None = None
+    ) -> None:
+        if not keys:
+            return
+        for group in self.config.item_groups:
+            if group.tab_id != tab_id or group.id == except_group_id:
+                continue
+            group.member_paths = [k for k in group.member_paths if k not in keys]
+
+    @staticmethod
+    def _ordered_keys(paths: list[Path]) -> list[str]:
+        keys: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = canonical_key(path)
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        return keys
+
+    def create_item_group(
+        self, tab_id: str, member_paths: list[Path], name: str = "新建分组"
+    ) -> ItemGroup:
+        self._require_item_tab(tab_id)
+        keys = self._ordered_keys(member_paths)
+        self._detach_keys_from_groups(tab_id, set(keys))
+        order = 1 + max(
+            (group.order for group in self.config.item_groups if group.tab_id == tab_id),
+            default=-1,
+        )
+        group = ItemGroup(
+            id=f"item-group-{uuid.uuid4().hex}",
+            tab_id=tab_id,
+            name=name.strip() or "新建分组",
+            order=order,
+            member_paths=keys,
+        )
+        self.config.item_groups.append(group)
+        self._prune_empty_item_groups()
+        self._collapse_manual_order_groups(tab_id)
+        return group
+
+    def add_items_to_group(self, group_id: str, member_paths: list[Path]) -> ItemGroup:
+        group = self._item_group(group_id)
+        keys = self._ordered_keys(member_paths)
+        self._detach_keys_from_groups(group.tab_id, set(keys), except_group_id=group.id)
+        for key in keys:
+            if key not in group.member_paths:
+                group.member_paths.append(key)
+        self._prune_item_groups_after_member_change()
+        self._collapse_manual_order_groups(group.tab_id)
+        return group
+
+    def remove_items_from_group(
+        self, member_paths: list[Path], *, tab_id: str | None = None
+    ) -> None:
+        keys = set(self._ordered_keys(member_paths))
+        affected_tabs: set[str] = set()
+        for group in self.config.item_groups:
+            if tab_id is not None and group.tab_id != tab_id:
+                continue
+            if any(key in group.member_paths for key in keys):
+                affected_tabs.add(group.tab_id)
+            group.member_paths = [k for k in group.member_paths if k not in keys]
+        self._prune_item_groups_after_member_change()
+        for affected_tab in affected_tabs:
+            self._collapse_manual_order_groups(affected_tab)
+
+    def rename_item_group(self, group_id: str, name: str) -> None:
+        group = self._item_group(group_id)
+        cleaned = name.strip()
+        if cleaned:
+            group.name = cleaned
+
+    def dissolve_item_group(self, group_id: str) -> None:
+        tab_id = next(
+            (group.tab_id for group in self.config.item_groups if group.id == group_id),
+            None,
+        )
+        self.config.item_groups = [
+            group for group in self.config.item_groups if group.id != group_id
+        ]
+        if tab_id is not None:
+            self._collapse_manual_order_groups(tab_id)
 
     def add_external_reference(self, path: Path, tab_id: str) -> ItemRef:
         self._require_item_tab(tab_id)
@@ -75,12 +267,22 @@ class WorkspaceModel:
         self.config.external_refs.append(reference)
         return reference
 
-    def add_paths_to_tab(self, paths: list[Path], tab_id: str) -> None:
+    def add_paths_to_tab(
+        self,
+        paths: list[Path],
+        tab_id: str,
+        *,
+        desktop_roots: list[Path] | None = None,
+    ) -> None:
         self._require_item_tab(tab_id)
-        desktop = Path(self.config.desktop.path)
+        roots = [Path(self.config.desktop.path).resolve()]
+        for root in desktop_roots or []:
+            resolved_root = Path(root).resolve()
+            if resolved_root not in roots:
+                roots.append(resolved_root)
         for path in paths:
             resolved = Path(path).resolve()
-            if is_inside(resolved, desktop):
+            if any(is_inside(resolved, root) for root in roots):
                 self.set_manual_override(resolved, tab_id)
             else:
                 self.add_external_reference(resolved, tab_id)
@@ -112,9 +314,175 @@ class WorkspaceModel:
             if is_inside(resolved, desktop):
                 self.set_manual_override(resolved, tab_id)
 
-    def organize_by_rules(self) -> None:
-        """Return desktop-owned items to automatic classification without touching files."""
-        self.config.manual_overrides = []
+    def organize_by_rules(
+        self,
+        *,
+        desktop_roots: list[Path] | None = None,
+    ) -> list[str]:
+        """按规则整理:仅释放待整理(其它)里的临时归类,保留用户手动挪动的归类,并修复元数据。"""
+        pending_tab = self._pending_organize_tab_id()
+        self.config.manual_overrides = [
+            entry
+            for entry in self.config.manual_overrides
+            if entry.target_tab_id != pending_tab
+        ]
+        return self.repair_metadata(desktop_roots=desktop_roots)
+
+    def repair_metadata(
+        self,
+        *,
+        desktop_roots: list[Path] | None = None,
+    ) -> list[str]:
+        """检测并修复重复图标等低级元数据错误,返回本次修复说明。"""
+        issues: list[str] = []
+        tab_ids = {tab.id for tab in self.config.panel_tabs}
+        roots = [Path(self.config.desktop.path).resolve()]
+        for root in desktop_roots or []:
+            resolved_root = Path(root).resolve()
+            if resolved_root not in roots:
+                roots.append(resolved_root)
+
+        override_by_key: dict[str, ManualOverride] = {}
+        for entry in self.config.manual_overrides:
+            if entry.canonical_path in override_by_key:
+                issues.append(f"重复的手动归类: {entry.canonical_path}")
+            override_by_key[entry.canonical_path] = entry
+        self.config.manual_overrides = list(override_by_key.values())
+        override_keys = set(override_by_key.keys())
+
+        ref_by_key: dict[str, ItemRef] = {}
+        for ref in self.config.external_refs:
+            key = canonical_key(Path(ref.canonical_path))
+            if key in override_keys:
+                resolved = Path(ref.canonical_path).resolve()
+                if any(is_inside(resolved, root) for root in roots):
+                    issues.append(f"清理与手动归类重复的外部引用: {ref.canonical_path}")
+                    continue
+            if key in ref_by_key:
+                issues.append(f"重复的外部引用: {ref.canonical_path}")
+            ref_by_key[key] = ref
+        self.config.external_refs = list(ref_by_key.values())
+
+        for tab_id in list(self.config.manual_orders.keys()):
+            if tab_id not in tab_ids:
+                issues.append(f"清理无效标签的手动顺序: {tab_id}")
+                self.config.manual_orders.pop(tab_id, None)
+                continue
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for key in self.config.manual_orders[tab_id]:
+                if key in seen:
+                    issues.append(f"标签 {tab_id} 内重复顺序项: {key}")
+                    continue
+                seen.add(key)
+                deduped.append(key)
+            self.config.manual_orders[tab_id] = deduped
+
+        self._repair_duplicate_identities(issues, roots)
+
+        valid_keys = override_keys | set(ref_by_key.keys())
+        for group in self.config.item_groups:
+            if group.tab_id not in tab_ids:
+                issues.append(f"清理无效标签的分组: {group.name}")
+                continue
+            seen_members: set[str] = set()
+            deduped_members: list[str] = []
+            for key in group.member_paths:
+                if key in seen_members:
+                    issues.append(f"分组 {group.name} 内重复成员: {key}")
+                    continue
+                seen_members.add(key)
+                deduped_members.append(key)
+            group.member_paths = deduped_members
+        self._prune_item_groups_after_member_change()
+
+        return issues
+
+    def _path_from_canonical_key(self, key: str) -> Path | None:
+        try:
+            candidate = Path(key)
+        except ValueError:
+            return None
+        if not candidate.exists():
+            return None
+        return candidate.resolve()
+
+    def _repair_duplicate_identities(
+        self,
+        issues: list[str],
+        _roots: list[Path],
+    ) -> None:
+        primary = Path(self.config.desktop.path)
+
+        for tab_id, order in list(self.config.manual_orders.items()):
+            kept: list[str] = []
+            seen_identities: set[str] = set()
+            for key in order:
+                path = self._path_from_canonical_key(key)
+                identity = item_identity_key(path) if path is not None else f"path:{key}"
+                if identity in seen_identities:
+                    label = path.name if path is not None else key
+                    issues.append(f"标签 {tab_id} 内重复快捷方式: {label}")
+                    continue
+                seen_identities.add(identity)
+                kept.append(key)
+            self.config.manual_orders[tab_id] = kept
+
+        best_overrides: dict[tuple[str, str], ManualOverride] = {}
+        for entry in self.config.manual_overrides:
+            path = self._path_from_canonical_key(entry.canonical_path)
+            identity = (
+                item_identity_key(path)
+                if path is not None
+                else f"path:{entry.canonical_path}"
+            )
+            bucket = (entry.target_tab_id, identity)
+            existing = best_overrides.get(bucket)
+            if existing is None:
+                best_overrides[bucket] = entry
+                continue
+            existing_path = self._path_from_canonical_key(existing.canonical_path)
+            if existing_path is None or path is None:
+                issues.append(f"重复归类冲突: {entry.canonical_path}")
+                continue
+            if desktop_entry_rank(path, primary_desktop=primary) < desktop_entry_rank(
+                existing_path, primary_desktop=primary
+            ):
+                issues.append(
+                    f"清理重复归类,保留优先项: {existing_path.name} -> {path.name}"
+                )
+                best_overrides[bucket] = entry
+            else:
+                issues.append(
+                    f"清理重复归类,保留优先项: {path.name} -> {existing_path.name}"
+                )
+        self.config.manual_overrides = list(best_overrides.values())
+
+        best_refs: dict[tuple[str, str], ItemRef] = {}
+        kept_refs: list[ItemRef] = []
+        override_keys = {entry.canonical_path for entry in self.config.manual_overrides}
+        for ref in self.config.external_refs:
+            key = canonical_key(Path(ref.canonical_path))
+            if key in override_keys:
+                kept_refs.append(ref)
+                continue
+            path = self._path_from_canonical_key(key)
+            identity = item_identity_key(path) if path is not None else f"path:{key}"
+            bucket = (ref.target_tab_id, identity)
+            existing = best_refs.get(bucket)
+            if existing is None:
+                best_refs[bucket] = ref
+                continue
+            existing_path = Path(existing.canonical_path).resolve()
+            current_path = Path(ref.canonical_path).resolve()
+            if desktop_entry_rank(current_path, primary_desktop=primary) < desktop_entry_rank(
+                existing_path, primary_desktop=primary
+            ):
+                issues.append(f"清理重复外部引用: {existing_path.name}")
+                best_refs[bucket] = ref
+            else:
+                issues.append(f"清理重复外部引用: {current_path.name}")
+        self.config.external_refs = kept_refs + list(best_refs.values())
 
     def add_tab(self, group_id: str, name: str = "新标签", *, tab_id: str | None = None) -> PanelTab:
         group = self.group(group_id)
@@ -299,6 +667,13 @@ class WorkspaceModel:
         ]
         self.config.external_refs = [
             entry for entry in self.config.external_refs if entry.target_tab_id != tab_id
+        ]
+        # 仅清显示层元数据,绝不触碰真实文件。
+        self.config.manual_orders.pop(tab_id, None)
+        self.config.item_groups = [
+            group_entry
+            for group_entry in self.config.item_groups
+            if group_entry.tab_id != tab_id
         ]
         if group.active_tab_id == tab_id:
             if group.tab_ids:

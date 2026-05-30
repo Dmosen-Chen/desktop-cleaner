@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QDragMoveEvent, QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushButton, QWidget
 
@@ -18,6 +18,7 @@ from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.models import Configuration, PanelGeometry
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.services.desktop_index import IndexedItem
+from desktop_tidy.ui.item_grid import ITEM_MIME_TYPE
 from desktop_tidy.ui.panel_group import PanelGroupWidget, _ResizeRegion
 
 
@@ -722,6 +723,40 @@ class PanelGroupWidgetTests(unittest.TestCase):
         self.assertEqual(widget.frameGeometry().width(), 240)
         self.assertEqual(widget.frameGeometry().height(), 240)
 
+    def test_panel_bottom_respects_screen_inset_when_docked(self) -> None:
+        from desktop_tidy.ui.panel_group import _PANEL_SCREEN_BOTTOM_INSET
+
+        widget, model = make_group_widget()
+        group = model.group("group-default")
+        group.screen_id = "screen-1"
+        group.geometry = PanelGeometry(rx=0.04, ry=0.70, rw=0.72, rh=0.30)
+        secondary = QRect(1000, 0, 800, 600)
+        widget.set_screen_geometries(
+            {
+                "primary": QRect(0, 0, 1000, 800),
+                "screen-1": secondary,
+            }
+        )
+
+        widget._apply_geometry_from_model()
+
+        self.assertLessEqual(
+            widget.frameGeometry().bottom(),
+            secondary.bottom() - _PANEL_SCREEN_BOTTOM_INSET,
+        )
+
+    def test_snap_to_screen_bottom_uses_inset(self) -> None:
+        from desktop_tidy.ui.panel_group import _PANEL_SCREEN_BOTTOM_INSET
+
+        widget, _model = make_group_widget()
+        screen = QRect(1000, 0, 800, 600)
+        widget.set_screen_geometries({"primary": QRect(0, 0, 1000, 800), "screen-1": screen})
+        widget._group.screen_id = "screen-1"
+
+        snapped = widget._snap_frame_to_screen(QRect(1020, 560, 320, 80))
+
+        self.assertEqual(snapped.bottom(), screen.bottom() - _PANEL_SCREEN_BOTTOM_INSET)
+
     def test_header_drag_to_secondary_screen_updates_screen_id(self) -> None:
         widget, model = make_group_widget()
         group = model.group("group-default")
@@ -1090,7 +1125,7 @@ class PanelGroupWidgetTests(unittest.TestCase):
         self.assertFalse(widget.detach_preview_visible())
         self.assertEqual(detach_spy.count(), 1)
 
-    def test_tab_detach_preview_hidden_while_dragging_inside_panel(self) -> None:
+    def test_tab_detach_preview_shown_while_dragging_inside_panel(self) -> None:
         widget, _model = make_group_widget()
         widget.resize(640, 480)
         widget.show()
@@ -1100,14 +1135,14 @@ class PanelGroupWidgetTests(unittest.TestCase):
         simulate_tab_drag_to_local_point_without_release(widget, "图片", inside)
         type(self).app.processEvents()
 
-        self.assertFalse(widget.detach_preview_visible())
+        self.assertTrue(widget.detach_preview_visible())
 
         QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=inside)
         type(self).app.processEvents()
 
         self.assertFalse(widget.detach_preview_visible())
 
-    def test_tab_detach_preview_hidden_when_drag_returns_inside_before_release(self) -> None:
+    def test_tab_detach_preview_stays_visible_when_drag_returns_inside_before_release(self) -> None:
         widget, _model = make_group_widget()
         widget.resize(640, 480)
         widget.show()
@@ -1122,7 +1157,7 @@ class PanelGroupWidgetTests(unittest.TestCase):
         QTest.mouseMove(widget, pos=inside)
         type(self).app.processEvents()
 
-        self.assertFalse(widget.detach_preview_visible())
+        self.assertTrue(widget.detach_preview_visible())
 
     def test_locked_panel_never_shows_tab_detach_preview(self) -> None:
         widget, _model = make_group_widget()
@@ -1716,6 +1751,65 @@ class PanelGroupWidgetTests(unittest.TestCase):
 
             self.assertEqual(widget.size(), size_before)
             self.assertEqual(model.group("group-default").geometry, geometry_before)
+
+
+class ItemDragToTabTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_item_drag_enter_tab_switches_without_persist_signal(self) -> None:
+        widget, _model = make_group_widget()
+        widget.activate_tab("tab-folders")
+        changed_spy = QSignalSpy(widget.changed)
+        preview_spy = QSignalSpy(widget.item_drag_over_tab)
+
+        widget._on_item_drag_enter_tab("tab-images")
+
+        self.assertEqual(widget.active_tab_id, "tab-images")
+        self.assertEqual(changed_spy.count(), 0)
+        self.assertEqual(preview_spy.count(), 1)
+        self.assertEqual(preview_spy.at(0)[0], "tab-images")
+
+    def test_item_drag_over_panel_header_switches_tab_preview_by_mouse_position(self) -> None:
+        widget, _model = make_group_widget()
+        widget.activate_tab("tab-folders")
+        widget.resize(760, 420)
+        widget.show()
+        type(self).app.processEvents()
+        preview_spy = QSignalSpy(widget.item_drag_over_tab)
+        images_button = find_tab_button(widget, "图片")
+        target = images_button.mapTo(widget, images_button.rect().center())
+        mime = QMimeData()
+        mime.setData(ITEM_MIME_TYPE, b"D:/Preview/Desktop/example.txt")
+        event = QDragMoveEvent(
+            target,
+            Qt.DropAction.MoveAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        widget.dragMoveEvent(event)
+
+        self.assertEqual(widget.active_tab_id, "tab-images")
+        self.assertEqual(preview_spy.count(), 1)
+
+    def test_item_drop_on_tab_button_activates_tab_and_emits_move(self) -> None:
+        widget, _model = make_group_widget()
+        widget.activate_tab("tab-folders")
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "move-me.txt"
+            source.write_text("x", encoding="utf-8")
+            drop_spy = QSignalSpy(widget.item_dropped_on_tab)
+
+            widget._on_item_dropped_on_tab_button([source], "tab-documents")
+
+            self.assertEqual(widget.active_tab_id, "tab-documents")
+            self.assertEqual(drop_spy.count(), 1)
+            dropped = drop_spy.at(0)[0]
+            self.assertEqual([Path(str(path)).resolve() for path in dropped], [source.resolve()])
+            self.assertEqual(drop_spy.at(0)[1], "tab-documents")
 
 
 if __name__ == "__main__":

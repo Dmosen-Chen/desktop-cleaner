@@ -8,10 +8,10 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QContextMenuEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QContextMenuEvent, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QLabel, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QToolButton, QWidget
 
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.services.desktop_index import IndexedItem
@@ -31,6 +31,16 @@ def process_qt_events() -> None:
 
 def make_item_grid(active_tab_id: str = "tab-images") -> ItemGridWidget:
     return ItemGridWidget(active_tab_id=active_tab_id)
+
+
+def close_desktop_logger_handlers() -> None:
+    from desktop_tidy.services.logging_setup import get_logger
+
+    logger = get_logger()
+    for handler in list(logger.handlers):
+        handler.flush()
+        handler.close()
+        logger.removeHandler(handler)
 
 
 def _grid_item_buttons(grid: ItemGridWidget) -> list[QToolButton]:
@@ -637,6 +647,104 @@ class ItemGridWidgetTests(unittest.TestCase):
 
             self.assertEqual(widget.selected_path(), second.resolve())
 
+    def test_ctrl_click_toggles_multi_selection(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.txt"
+            second = Path(tmp) / "second.txt"
+            third = Path(tmp) / "third.txt"
+            for path in (first, second, third):
+                path.write_text("x", encoding="utf-8")
+            widget.set_entries([IndexedItem(first), IndexedItem(second), IndexedItem(third)])
+            widget.resize(420, 240)
+            widget.show()
+            type(self).app.processEvents()
+
+            buttons = _grid_item_buttons(widget)
+            QTest.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
+            QTest.mouseClick(
+                buttons[1],
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            QTest.mouseClick(
+                buttons[2],
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            type(self).app.processEvents()
+
+            self.assertEqual(
+                widget.selected_paths(),
+                frozenset({first.resolve(), second.resolve(), third.resolve()}),
+            )
+
+            QTest.mouseClick(
+                buttons[1],
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            type(self).app.processEvents()
+            self.assertEqual(
+                widget.selected_paths(),
+                frozenset({first.resolve(), third.resolve()}),
+            )
+
+    def test_shift_click_selects_visual_range(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / f"item-{index}.txt" for index in range(6)]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            widget.set_entries([IndexedItem(path) for path in paths])
+            widget.resize(420, 260)
+            widget.show()
+            type(self).app.processEvents()
+
+            buttons = _grid_item_buttons(widget)
+            QTest.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
+            QTest.mouseClick(
+                buttons[3],
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ShiftModifier,
+            )
+            type(self).app.processEvents()
+
+            self.assertEqual(
+                widget.selected_paths(),
+                frozenset(path.resolve() for path in paths[:4]),
+            )
+
+    def test_dragging_from_multi_selection_keeps_all_paths(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.txt"
+            second = Path(tmp) / "second.txt"
+            third = Path(tmp) / "third.txt"
+            for path in (first, second, third):
+                path.write_text("x", encoding="utf-8")
+            widget.set_entries([IndexedItem(first), IndexedItem(second), IndexedItem(third)])
+            widget.resize(420, 240)
+            widget.show()
+            type(self).app.processEvents()
+
+            buttons = _grid_item_buttons(widget)
+            QTest.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
+            QTest.mouseClick(
+                buttons[2],
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            type(self).app.processEvents()
+
+            QTest.mousePress(buttons[0], Qt.MouseButton.LeftButton)
+            type(self).app.processEvents()
+            dragged = widget._drag_paths_for(first.resolve())
+            self.assertEqual(
+                dragged,
+                [first.resolve(), third.resolve()],
+            )
+
     def test_right_click_selects_item_and_invokes_native_shell_context_menu(self) -> None:
         widget = make_item_grid(active_tab_id="tab-documents")
         recorder = ShellMenuRecorder()
@@ -825,6 +933,23 @@ class ItemGridWidgetTests(unittest.TestCase):
             self.assertEqual(widget.column_count(), initial_columns)
             self.assertEqual(rebuilt.count(), 0)
 
+    def test_set_entries_with_same_render_payload_does_not_rebuild_cells(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            entries = [IndexedItem(Path(tmp) / f"item-{index}.pdf") for index in range(4)]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            widget.resize(540, 260)
+            widget.show()
+            widget.set_entries(entries)
+            type(self).app.processEvents()
+            rebuilt = QSignalSpy(widget.cells_rebuilt)
+
+            widget.set_entries(entries)
+            type(self).app.processEvents()
+
+            self.assertEqual(rebuilt.count(), 0)
+
     def test_single_click_item_does_not_emit_item_activated(self) -> None:
         """Single-click on an item must NOT emit item_activated."""
         widget = make_item_grid(active_tab_id="tab-documents")
@@ -843,6 +968,684 @@ class ItemGridWidgetTests(unittest.TestCase):
             type(self).app.processEvents()
 
             self.assertEqual(spy.count(), 0)
+
+    def test_reordered_entry_paths_moves_source_to_target_index(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / name) for name in ["a.png", "b.png", "c.png"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            widget.set_entries(entries)
+
+            moved = widget.reordered_entry_paths(entries[2].path, 0)
+
+            self.assertEqual(
+                moved,
+                [entries[2].path.resolve(), entries[0].path.resolve(), entries[1].path.resolve()],
+            )
+
+    def test_reordered_anchor_paths_for_drag_moves_block_together(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [
+                IndexedItem(root / name)
+                for name in ["a.png", "b.png", "c.png", "d.png"]
+            ]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            widget.set_entries(entries)
+
+            moved = widget.reordered_anchor_paths_for_drag(
+                [entries[1].path, entries[3].path],
+                0,
+            )
+
+            self.assertEqual(
+                moved,
+                [
+                    entries[1].path.resolve(),
+                    entries[3].path.resolve(),
+                    entries[0].path.resolve(),
+                    entries[2].path.resolve(),
+                ],
+            )
+
+    def test_internal_reorder_emits_signal_and_keeps_files_untouched(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / name) for name in ["a.png", "b.png", "c.png"]]
+            for entry in entries:
+                entry.path.write_text(entry.path.name, encoding="utf-8")
+            widget.resize(640, 400)
+            widget.show()
+            widget.set_entries(entries)
+            type(self).app.processEvents()
+
+            spy = QSignalSpy(widget.items_reordered)
+            widget._apply_internal_reorder(entries[2].path, 0)
+            type(self).app.processEvents()
+
+            self.assertEqual(spy.count(), 1)
+            tab_id, ordered = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(tab_id, "tab-images")
+            self.assertEqual(
+                [Path(p) for p in ordered],
+                [entries[2].path.resolve(), entries[0].path.resolve(), entries[1].path.resolve()],
+            )
+            self.assertEqual(
+                widget.entry_paths(),
+                [entries[2].path.resolve(), entries[0].path.resolve(), entries[1].path.resolve()],
+            )
+            for entry in entries:
+                self.assertTrue(entry.path.is_file())
+                self.assertEqual(entry.path.read_text(encoding="utf-8"), entry.path.name)
+
+    def test_drop_event_with_item_mime_reorders_item(self) -> None:
+        from PySide6.QtCore import QMimeData, QPointF
+        from PySide6.QtGui import QDropEvent
+
+        from desktop_tidy.ui.item_grid import ITEM_MIME_TYPE
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / name) for name in ["a.png", "b.png", "c.png"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            widget.resize(640, 400)
+            widget.show()
+            widget.set_entries(entries)
+            type(self).app.processEvents()
+
+            target_cell = item_cell_for_path(widget, entries[0].path)
+            pos = QPointF(target_cell.mapTo(widget, target_cell.rect().topLeft()))
+            mime = QMimeData()
+            mime.setData(
+                ITEM_MIME_TYPE, str(entries[2].path.resolve()).encode("utf-8")
+            )
+            event = QDropEvent(
+                pos,
+                Qt.DropAction.MoveAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+
+            spy = QSignalSpy(widget.items_reordered)
+            widget.dropEvent(event)
+            type(self).app.processEvents()
+
+            self.assertEqual(spy.count(), 1)
+            self.assertEqual(widget.entry_paths()[0], entries[2].path.resolve())
+
+    def test_drop_after_tab_preview_emits_paths_dropped_for_cross_tab_move(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = IndexedItem(root / "game.url")
+            source.path.write_text("url", encoding="utf-8")
+            widget.resize(640, 400)
+            widget.show()
+            widget.set_entries([source])
+            type(self).app.processEvents()
+
+            widget._item_drag_origin_tab_id = "tab-folders"
+            widget.set_active_tab_id("tab-apps")
+            spy = QSignalSpy(widget.paths_dropped)
+            widget._handle_item_drop(source.path, QPoint(12, 12), origin_tab="tab-folders")
+            type(self).app.processEvents()
+
+            self.assertEqual(spy.count(), 1)
+            paths, tab_id = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(tab_id, "tab-apps")
+            self.assertEqual([Path(p) for p in paths], [source.path.resolve()])
+
+    def test_drop_on_other_panel_grid_uses_mime_origin_tab(self) -> None:
+        from PySide6.QtCore import QMimeData, QPointF
+        from PySide6.QtGui import QDropEvent
+
+        from desktop_tidy.ui.item_grid import ITEM_MIME_ORIGIN_TAB, ITEM_MIME_TYPE
+
+        target = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "other-panel.url"
+            source.write_text("url", encoding="utf-8")
+            target.resize(640, 400)
+            target.show()
+            target.set_active_tab_id("tab-archives")
+            target.set_entries([])
+            type(self).app.processEvents()
+
+            mime = QMimeData()
+            mime.setData(ITEM_MIME_TYPE, str(source.resolve()).encode("utf-8"))
+            mime.setData(ITEM_MIME_ORIGIN_TAB, b"tab-apps")
+            event = QDropEvent(
+                QPointF(24, 24),
+                Qt.DropAction.MoveAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            spy = QSignalSpy(target.paths_dropped)
+            target.dropEvent(event)
+            type(self).app.processEvents()
+
+            self.assertEqual(spy.count(), 1)
+            paths, tab_id = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(tab_id, "tab-archives")
+            self.assertEqual([Path(p) for p in paths], [source.resolve()])
+
+    def test_reorder_disabled_blocks_internal_reorder(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / name) for name in ["a.png", "b.png"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            widget.set_entries(entries)
+            widget.set_reorder_enabled(False)
+
+            spy = QSignalSpy(widget.items_reordered)
+            widget._apply_internal_reorder(entries[1].path, 0)
+
+            self.assertEqual(spy.count(), 0)
+            self.assertEqual(widget.entry_paths(), [entries[0].path.resolve(), entries[1].path.resolve()])
+
+
+class ItemGroupRenderingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = qt_app()
+
+    def _entries(self, root: Path, names: list[str]) -> list[IndexedItem]:
+        entries = []
+        for name in names:
+            path = root / name
+            path.write_text(name, encoding="utf-8")
+            entries.append(IndexedItem(path))
+        return entries
+
+    def test_group_block_renders_folder_cell_instead_of_inline_members(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="游戏",
+                members=[entries[1].path.resolve(), entries[2].path.resolve()],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            self.assertIn("g1", widget._cells_by_group_id)
+            self.assertNotIn(entries[1].path.resolve(), widget._cells_by_path)
+            self.assertNotIn(entries[2].path.resolve(), widget._cells_by_path)
+            self.assertIn(entries[0].path.resolve(), widget._cells_by_path)
+
+    def test_drag_icon_onto_folder_joins_group(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="组",
+                members=[entries[1].path.resolve(), entries[2].path.resolve()],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            host_point = folder_cell.mapTo(
+                widget._grid_host, folder_cell.rect().center()
+            )
+
+            spy = QSignalSpy(widget.group_join_requested)
+            widget._handle_item_drop(entries[0].path, host_point)
+
+            self.assertEqual(spy.count(), 1)
+            group_id, members = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(group_id, "g1")
+            self.assertEqual(
+                [Path(p) for p in members],
+                [entries[0].path.resolve()],
+            )
+
+    def test_drag_icon_onto_another_creates_group(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+            widget.resize(640, 400)
+            widget.show()
+            widget.set_entries(entries)
+            self.app.processEvents()
+
+            target_cell = item_cell_for_path(widget, entries[0].path)
+            host_point = target_cell.mapTo(
+                widget._grid_host, target_cell.rect().center()
+            )
+
+            spy = QSignalSpy(widget.group_create_requested)
+            widget._handle_item_drop(entries[2].path, host_point)
+
+            self.assertEqual(spy.count(), 1)
+            tab_id, members = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(tab_id, "tab-images")
+            self.assertEqual(
+                [Path(p) for p in members],
+                [entries[0].path.resolve(), entries[2].path.resolve()],
+            )
+            for entry in entries:
+                self.assertTrue(entry.path.is_file())
+
+    def test_drag_icon_onto_another_uses_target_icon_as_group_anchor(self) -> None:
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["source.png", "target.png"])
+            widget.resize(640, 400)
+            widget.show()
+            widget.set_entries(entries)
+            self.app.processEvents()
+
+            target_cell = item_cell_for_path(widget, entries[1].path)
+            host_point = target_cell.mapTo(
+                widget._grid_host, target_cell.rect().center()
+            )
+
+            spy = QSignalSpy(widget.group_create_requested)
+            widget._handle_item_drop(entries[0].path, host_point)
+
+            self.assertEqual(spy.count(), 1)
+            _tab_id, members = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(
+                [Path(p) for p in members],
+                [entries[1].path.resolve(), entries[0].path.resolve()],
+            )
+
+    def test_drag_icon_onto_folder_joins_existing_group(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(group_id="g1", name="组", members=[entries[1].path.resolve()])
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            host_point = folder_cell.mapTo(
+                widget._grid_host, folder_cell.rect().center()
+            )
+
+            spy = QSignalSpy(widget.group_join_requested)
+            widget._handle_item_drop(entries[0].path, host_point)
+
+            self.assertEqual(spy.count(), 1)
+            group_id, members = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(group_id, "g1")
+            self.assertEqual([Path(p) for p in members], [entries[0].path.resolve()])
+
+    def test_dragging_folder_slot_reorders_without_dissolving_group(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / name for name in ("a.txt", "b.txt", "c.txt")]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="组",
+                members=[paths[0].resolve(), paths[1].resolve()],
+            )
+            widget.set_entries(
+                [IndexedItem(paths[0]), IndexedItem(paths[1]), IndexedItem(paths[2])],
+                groups=[block],
+            )
+            widget._drag_from_folder_group_id = "g1"
+            remove_spy = QSignalSpy(widget.group_remove_requested)
+            reorder_spy = QSignalSpy(widget.items_reordered)
+
+            widget._handle_item_drop(
+                paths[0],
+                QPoint(9999, 9999),
+            )
+
+            self.assertEqual(remove_spy.count(), 0)
+            self.assertEqual(reorder_spy.count(), 1)
+
+    def test_dragging_folder_cell_starts_group_drag(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [root / name for name in ("a.txt", "b.txt")]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="组",
+                members=[path.resolve() for path in paths],
+            )
+            widget.set_entries([IndexedItem(path) for path in paths], groups=[block])
+            widget.resize(420, 260)
+            widget.show()
+            process_qt_events()
+            folder_cell = widget._cells_by_group_id["g1"]
+            calls: list[tuple[Path, str]] = []
+
+            def fake_start(source_path: Path, *, ghost_widget=None) -> None:  # type: ignore[no-untyped-def]
+                calls.append((source_path.resolve(), widget._drag_from_folder_group_id))
+
+            widget._start_item_drag = fake_start  # type: ignore[method-assign]
+            start = folder_cell.rect().center()
+            global_start = folder_cell.mapToGlobal(start)
+            move = start + QPoint(QApplication.startDragDistance() + 8, 0)
+            global_move = folder_cell.mapToGlobal(move)
+
+            press = QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(start),
+                QPointF(global_start),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            move_event = QMouseEvent(
+                QEvent.Type.MouseMove,
+                QPointF(move),
+                QPointF(global_move),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+
+            widget.eventFilter(folder_cell, press)
+            widget.eventFilter(folder_cell, move_event)
+
+            self.assertEqual(calls, [(paths[0].resolve(), "g1")])
+
+    def test_group_popup_update_group_can_switch_twice_without_crash(self) -> None:
+        from desktop_tidy.ui.group_folder_popup import GroupFolderPopup
+
+        host = QWidget()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            group_a = [root / "a.txt", root / "b.txt"]
+            group_b = [root / "c.txt", root / "d.txt", root / "e.txt"]
+            for path in [*group_a, *group_b]:
+                path.write_text("x", encoding="utf-8")
+            popup = GroupFolderPopup(
+                group_id="g1",
+                name="组A",
+                members=group_a,
+                icon_size=48,
+                parent=host,
+            )
+            popup.update_group(
+                group_id="g2",
+                name="组B",
+                members=group_b,
+                icon_size=48,
+                accent_color="#8264D2",
+                host_width=220,
+            )
+            popup.update_group(
+                group_id="g1",
+                name="组A",
+                members=group_a,
+                icon_size=48,
+                accent_color="#8264D2",
+                host_width=220,
+            )
+            self.assertEqual(popup.group_id(), "g1")
+            self.assertLessEqual(popup._card.width(), 220)
+
+    def test_group_popup_recovers_after_presented_state_reset(self) -> None:
+        from desktop_tidy.ui.group_folder_popup import GroupFolderPopup
+
+        host = QWidget()
+        host.resize(480, 640)
+        anchor = QWidget(host)
+        anchor.setGeometry(120, 420, 96, 110)
+        with TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / f"{index}.txt" for index in range(3)]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            popup = GroupFolderPopup(
+                group_id="g1",
+                name="组",
+                members=paths,
+                icon_size=48,
+                parent=host,
+            )
+            popup._card.setMaximumHeight(56)
+            popup.show_expanded_from(anchor, position_host=host, animate=False)
+            self.assertGreaterEqual(popup._card.maximumHeight(), 16777200)
+            self.assertGreater(popup._card.height(), 80)
+
+    def test_group_popup_is_clamped_inside_short_viewport(self) -> None:
+        from desktop_tidy.ui.group_folder_popup import GroupFolderPopup
+
+        host = QWidget()
+        host.resize(260, 120)
+        anchor = QWidget(host)
+        anchor.setGeometry(100, 72, 48, 40)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [root / f"item-{index}.txt" for index in range(6)]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            popup = GroupFolderPopup(
+                group_id="g1",
+                name="短面板",
+                members=paths,
+                icon_size=48,
+                parent=host,
+            )
+            popup.show_expanded_from(anchor, position_host=host, animate=False)
+
+            self.assertLessEqual(popup.geometry().bottom(), host.rect().bottom() - 8)
+            self.assertGreater(popup.height(), 72)
+
+    def test_double_click_folder_cell_requests_group_rename(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / f"{name}.png") for name in ["a", "b"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="游戏",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            widget.show()
+            process_qt_events()
+            folder_cell = widget._cells_by_group_id["g1"]
+            calls: list[tuple[str, str]] = []
+            widget._prompt_rename_group = (  # type: ignore[method-assign]
+                lambda group_id, current_name="": calls.append((group_id, current_name))
+            )
+
+            QTest.mouseDClick(
+                folder_cell,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                folder_cell.rect().center(),
+            )
+            process_qt_events()
+
+            self.assertEqual(calls, [("g1", "游戏")])
+
+    def test_group_context_menu_is_deduplicated_for_context_and_right_release(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / f"{name}.png") for name in ["a", "b"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="游戏",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            widget.show()
+            process_qt_events()
+            folder_cell = widget._cells_by_group_id["g1"]
+            local = folder_cell.rect().center()
+            global_pos = folder_cell.mapToGlobal(local)
+
+            with patch("desktop_tidy.ui.item_grid.QMenu.popup") as popup:
+                context_event = QContextMenuEvent(
+                    QContextMenuEvent.Reason.Mouse,
+                    local,
+                    global_pos,
+                )
+                widget.eventFilter(folder_cell, context_event)
+                right_release = QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    QPointF(local),
+                    QPointF(global_pos),
+                    Qt.MouseButton.RightButton,
+                    Qt.MouseButton.RightButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                widget.eventFilter(folder_cell, right_release)
+                process_qt_events()
+
+            self.assertEqual(popup.call_count, 1)
+
+    def test_left_click_group_after_context_menu_dismisses_menu_and_opens_folder(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / f"{name}.png") for name in ["a", "b"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="游戏",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            widget.resize(420, 260)
+            widget.show()
+            process_qt_events()
+            folder_cell = widget._cells_by_group_id["g1"]
+            local = folder_cell.rect().center()
+            global_pos = folder_cell.mapToGlobal(local)
+
+            with patch("desktop_tidy.ui.item_grid.QMenu.popup"):
+                context_event = QContextMenuEvent(
+                    QContextMenuEvent.Reason.Mouse,
+                    local,
+                    global_pos,
+                )
+                widget.eventFilter(folder_cell, context_event)
+            self.assertIsNotNone(widget._context_menu)
+
+            QTest.mouseClick(
+                folder_cell,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                local,
+            )
+            process_qt_events()
+
+            self.assertIsNone(widget._context_menu)
+            self.assertEqual(widget._open_group_id, "g1")
+
+    def test_group_rename_uses_inline_editor_without_dialog(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / f"{name}.png") for name in ["a", "b"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="旧名字",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            widget.show()
+            process_qt_events()
+            spy = QSignalSpy(widget.group_rename_requested)
+
+            with patch("desktop_tidy.ui.item_grid.QInputDialog.getText") as dialog:
+                dialog.side_effect = AssertionError("group rename should be inline")
+                widget._prompt_rename_group("g1", "旧名字")
+
+            editor = widget._cells_by_group_id["g1"].findChild(QLineEdit)
+            self.assertIsNotNone(editor)
+            assert editor is not None
+            self.assertTrue(editor.isVisible())
+            self.assertEqual(editor.text(), "旧名字")
+
+            editor.setText("新名字")
+            editor.editingFinished.emit()
+            process_qt_events()
+
+            self.assertEqual(spy.count(), 1)
+            self.assertEqual(spy.at(0), ["g1", "新名字"])
+
+    def test_drag_debug_uses_application_log_without_writing_cwd_file(self) -> None:
+        from desktop_tidy.services.logging_setup import configure_logging, get_logger
+        from desktop_tidy.ui import item_grid
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_path = configure_logging(root / "DesktopCleaner")
+            work_dir = root / "work"
+            work_dir.mkdir()
+            previous_cwd = Path.cwd()
+            previous_debug = item_grid._DRAG_DEBUG
+            try:
+                os.chdir(work_dir)
+                item_grid._DRAG_DEBUG = True
+                item_grid._drag_dbg("group-create", "count=2", "tab=tab-images")
+                for handler in get_logger().handlers:
+                    handler.flush()
+            finally:
+                item_grid._DRAG_DEBUG = previous_debug
+                os.chdir(previous_cwd)
+                close_desktop_logger_handlers()
+
+            self.assertFalse((work_dir / "drag_debug.log").exists())
+            self.assertIn(
+                "[drag] group-create count=2 tab=tab-images",
+                log_path.read_text(encoding="utf-8"),
+            )
 
 
 if __name__ == "__main__":

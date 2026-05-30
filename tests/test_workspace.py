@@ -6,9 +6,9 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from desktop_tidy.domain.classification import classify_path
+from desktop_tidy.domain.classification import canonical_key, classify_path
 from desktop_tidy.domain.defaults import build_default_configuration
-from desktop_tidy.domain.models import ClassificationRule, PanelGeometry, validate_configuration
+from desktop_tidy.domain.models import ClassificationRule, ItemRef, ManualOverride, PanelGeometry, validate_configuration
 from desktop_tidy.domain.workspace import WorkspaceModel
 
 
@@ -52,7 +52,7 @@ class WorkspaceTests(unittest.TestCase):
             model.restore_auto_classification(source)
             self.assertEqual(classify_path(source, model.config), "tab-images")
 
-    def test_organize_by_rules_clears_manual_overrides_without_touching_sources(self) -> None:
+    def test_organize_by_rules_only_clears_pending_overrides(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             desktop = root / "desktop"
@@ -61,21 +61,27 @@ class WorkspaceTests(unittest.TestCase):
             outside.mkdir()
             photo = desktop / "photo.png"
             photo.write_text("img", encoding="utf-8")
+            pending = desktop / "fresh.png"
+            pending.write_text("new", encoding="utf-8")
             external = outside / "linked.any"
             external.write_text("external", encoding="utf-8")
             model = WorkspaceModel(build_default_configuration(desktop))
 
             model.add_paths_to_tab([photo], "tab-documents")
             model.add_paths_to_tab([external], "tab-documents")
+            model.mark_desktop_items_pending_organize([pending])
 
             self.assertEqual(classify_path(photo, model.config), "tab-documents")
-            self.assertEqual(len(model.config.manual_overrides), 1)
+            self.assertEqual(classify_path(pending, model.config), "tab-other")
+            self.assertEqual(len(model.config.manual_overrides), 2)
             self.assertEqual(len(model.config.external_refs), 1)
 
             model.organize_by_rules()
 
-            self.assertEqual(model.config.manual_overrides, [])
-            self.assertEqual(classify_path(photo, model.config), "tab-images")
+            self.assertEqual(len(model.config.manual_overrides), 1)
+            self.assertEqual(model.config.manual_overrides[0].target_tab_id, "tab-documents")
+            self.assertEqual(classify_path(photo, model.config), "tab-documents")
+            self.assertEqual(classify_path(pending, model.config), "tab-images")
             self.assertEqual(len(model.config.external_refs), 1)
             self.assertEqual(model.config.external_refs[0].target_tab_id, "tab-documents")
             self.assertTrue(photo.is_file())
@@ -373,6 +379,252 @@ class WorkspaceTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(model.config.panel_groups), 2)
+
+    def test_reorder_tab_items_records_canonical_order_without_touching_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp)
+            first = desktop / "a.png"
+            second = desktop / "b.png"
+            first.write_text("a", encoding="utf-8")
+            second.write_text("b", encoding="utf-8")
+            model = WorkspaceModel(build_default_configuration(desktop))
+
+            model.reorder_tab_items("tab-images", [second, first])
+
+            order = model.config.manual_orders["tab-images"]
+            self.assertEqual(len(order), 2)
+            self.assertEqual(order[0], canonical_key(second))
+            self.assertEqual(order[1], canonical_key(first))
+            self.assertEqual(first.read_text(encoding="utf-8"), "a")
+            self.assertEqual(second.read_text(encoding="utf-8"), "b")
+            self.assertTrue(first.is_file() and second.is_file())
+            validate_configuration(model.config)
+
+    def test_reorder_tab_items_empty_clears_manual_order(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        model.config.manual_orders["tab-images"] = ["x"]
+
+        model.reorder_tab_items("tab-images", [])
+
+        self.assertNotIn("tab-images", model.config.manual_orders)
+
+    def test_set_new_item_placement_validates_value(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+
+        model.set_new_item_placement("prepend_front")
+        self.assertEqual(model.config.new_item_placement, "prepend_front")
+
+        with self.assertRaises(ValueError):
+            model.set_new_item_placement("nonsense")
+
+    def test_delete_tab_clears_manual_orders_and_groups_metadata_only(self) -> None:
+        from desktop_tidy.domain.models import ItemGroup
+
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+        model.config.manual_orders["tab-images"] = ["one", "two"]
+        model.config.item_groups.append(
+            ItemGroup(id="g1", tab_id="tab-images", name="工作", order=0, member_paths=["one"])
+        )
+
+        self.assertTrue(model.delete_tab("tab-images"))
+
+        self.assertNotIn("tab-images", model.config.manual_orders)
+        self.assertEqual(
+            [group for group in model.config.item_groups if group.tab_id == "tab-images"],
+            [],
+        )
+        validate_configuration(model.config)
+
+
+class ItemGroupTests(unittest.TestCase):
+    def _model_with_files(self, tmp: str):
+        desktop = Path(tmp)
+        paths = []
+        for name in ("a.png", "b.png", "c.png"):
+            path = desktop / name
+            path.write_text(name, encoding="utf-8")
+            paths.append(path)
+        return WorkspaceModel(build_default_configuration(desktop)), paths
+
+    def test_create_group_records_members_without_touching_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            group = model.create_item_group("tab-images", [paths[0], paths[1]], "游戏")
+
+            self.assertTrue(group.id.startswith("item-group-"))
+            self.assertEqual(group.tab_id, "tab-images")
+            self.assertEqual(group.name, "游戏")
+            self.assertEqual(
+                group.member_paths,
+                [canonical_key(paths[0]), canonical_key(paths[1])],
+            )
+            self.assertEqual(len(model.config.item_groups), 1)
+            for path in paths:
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.read_text(encoding="utf-8"), path.name)
+            validate_configuration(model.config)
+
+    def test_create_group_uses_default_name_when_blank(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            group = model.create_item_group("tab-images", [paths[0]], "   ")
+            self.assertEqual(group.name, "新建分组")
+
+    def test_create_group_orders_increment_per_tab(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            first = model.create_item_group("tab-images", [paths[0]])
+            second = model.create_item_group("tab-images", [paths[1]])
+            self.assertEqual(first.order, 0)
+            self.assertEqual(second.order, 1)
+
+    def test_add_items_moves_member_out_of_previous_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            first = model.create_item_group("tab-images", [paths[0], paths[1]])
+            second = model.create_item_group("tab-images", [paths[2]])
+
+            model.add_items_to_group(second.id, [paths[1]])
+
+            self.assertEqual(
+                [group for group in model.config.item_groups if group.id == first.id],
+                [],
+            )
+            self.assertEqual(
+                second.member_paths,
+                [canonical_key(paths[2]), canonical_key(paths[1])],
+            )
+            validate_configuration(model.config)
+
+    def test_remove_item_prunes_emptied_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            group = model.create_item_group("tab-images", [paths[0]])
+            model.remove_items_from_group([paths[0]])
+            self.assertEqual(model.config.item_groups, [])
+            self.assertTrue(paths[0].is_file())
+
+    def test_remove_item_leaving_one_member_dissolves_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            group = model.create_item_group("tab-images", [paths[0], paths[1]])
+            model.remove_items_from_group([paths[1]])
+            self.assertEqual(model.config.item_groups, [])
+            self.assertTrue(all(path.is_file() for path in paths[:2]))
+
+    def test_move_paths_to_tab_clears_manual_order_on_source_tab(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            key = canonical_key(paths[0])
+            model.config.manual_orders["tab-images"] = [key, canonical_key(paths[1])]
+            model.config.manual_orders["tab-documents"] = [key]
+
+            model.move_paths_to_tab([paths[0]], "tab-apps")
+
+            self.assertEqual(
+                model.config.manual_overrides[0].target_tab_id,
+                "tab-apps",
+            )
+            self.assertNotIn(key, model.config.manual_orders.get("tab-images", []))
+            self.assertNotIn(key, model.config.manual_orders.get("tab-documents", []))
+
+    def test_rename_and_dissolve_group_metadata_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            group = model.create_item_group("tab-images", [paths[0], paths[1]])
+            model.rename_item_group(group.id, "工作")
+            self.assertEqual(model._item_group(group.id).name, "工作")
+
+            model.dissolve_item_group(group.id)
+            self.assertEqual(model.config.item_groups, [])
+            for path in paths:
+                self.assertTrue(path.is_file())
+            validate_configuration(model.config)
+
+    def test_create_group_rejects_widget_tab(self) -> None:
+        from desktop_tidy.domain.models import PanelTab
+
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            widget_tab = PanelTab(
+                "tab-widget",
+                model.config.panel_groups[0].id,
+                "时钟",
+                99,
+                content_kind="widget",
+                widget_type="clock",
+            )
+            model.config.panel_tabs.append(widget_tab)
+            with self.assertRaises(ValueError):
+                model.create_item_group("tab-widget", [paths[0]])
+
+    def test_repair_metadata_deduplicates_overrides_and_external_refs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            source = desktop / "photo.png"
+            source.write_text("img", encoding="utf-8")
+            model = WorkspaceModel(build_default_configuration(desktop))
+            key = canonical_key(source)
+            model.config.manual_overrides.extend(
+                [
+                    ManualOverride(key, "tab-documents"),
+                    ManualOverride(key, "tab-images"),
+                ]
+            )
+            model.config.external_refs.append(
+                ItemRef("e1", "external", str(source.resolve()), "tab-documents")
+            )
+
+            issues = model.repair_metadata(desktop_roots=[desktop])
+
+            self.assertTrue(any("重复的手动归类" in issue for issue in issues))
+            self.assertTrue(any("清理与手动归类重复的外部引用" in issue for issue in issues))
+            self.assertEqual(len(model.config.manual_overrides), 1)
+            self.assertEqual(model.config.external_refs, [])
+
+    def test_repair_metadata_keeps_external_ref_for_outside_paths_with_override(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            outside = root / "outside"
+            desktop.mkdir()
+            outside.mkdir()
+            source = outside / "linked.any"
+            source.write_text("external", encoding="utf-8")
+            model = WorkspaceModel(build_default_configuration(desktop))
+            key = canonical_key(source)
+            model.config.manual_overrides.append(ManualOverride(key, "tab-documents"))
+            model.config.external_refs.append(
+                ItemRef("e1", "external", str(source.resolve()), "tab-documents")
+            )
+
+            issues = model.repair_metadata(desktop_roots=[desktop])
+
+            self.assertEqual(issues, [])
+            self.assertEqual(len(model.config.manual_overrides), 1)
+            self.assertEqual(len(model.config.external_refs), 1)
+
+    def test_add_paths_to_tab_uses_override_for_extra_desktop_roots(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_desktop = root / "user"
+            public_desktop = root / "public"
+            user_desktop.mkdir()
+            public_desktop.mkdir()
+            shortcut = public_desktop / "game.lnk"
+            shortcut.write_text("lnk", encoding="utf-8")
+            model = WorkspaceModel(build_default_configuration(user_desktop))
+
+            model.add_paths_to_tab(
+                [shortcut],
+                "tab-apps",
+                desktop_roots=[public_desktop],
+            )
+
+            self.assertEqual(model.config.external_refs, [])
+            self.assertEqual(len(model.config.manual_overrides), 1)
+            self.assertEqual(classify_path(shortcut, model.config), "tab-apps")
 
 
 if __name__ == "__main__":

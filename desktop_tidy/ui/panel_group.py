@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QCloseEvent, QIcon, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -22,10 +23,11 @@ from desktop_tidy.domain.models import PanelGeometry, PanelGroup, PanelTab
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.services.screens import available_screen_geometries, screen_id_containing_point
 from desktop_tidy.services.window_styles import hide_window_from_taskbar
-from desktop_tidy.ui.item_grid import ItemGridWidget
+from desktop_tidy.ui.item_grid import ITEM_MIME_TYPE, ItemGridWidget, _drag_dbg, paths_from_item_mime
 from desktop_tidy.ui.widget_plugins import BuiltinWidgetRegistry
 
 _CORNER_RADIUS = 12
+_PANEL_SCREEN_BOTTOM_INSET = 8
 _HEADER_DRAG_MARGIN = 40
 _RESIZE_MARGIN = 16
 _TOP_RESIZE_MARGIN = 6
@@ -141,8 +143,56 @@ class _ResizeRegion(Enum):
     BOTTOM_RIGHT = "bottom_right"
 
 
+class _TabButton(QPushButton):
+    """标签头按钮，同时作为图标的放置目标(把图标拖到其它标签即归类过去)。"""
+
+    def __init__(
+        self,
+        text: str,
+        parent: QWidget | None = None,
+        *,
+        on_item_drag_enter=None,
+        on_item_dropped=None,
+    ) -> None:
+        super().__init__(text, parent)
+        self._on_item_drag_enter = on_item_drag_enter
+        self._on_item_dropped = on_item_dropped
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        _drag_dbg("tab.dragEnter item?", event.mimeData().hasFormat(ITEM_MIME_TYPE))
+        if event.mimeData().hasFormat(ITEM_MIME_TYPE):
+            event.acceptProposedAction()
+            if self._on_item_drag_enter is not None:
+                self._on_item_drag_enter()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.mimeData().hasFormat(ITEM_MIME_TYPE):
+            event.acceptProposedAction()
+            if self._on_item_drag_enter is not None:
+                self._on_item_drag_enter()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        md = event.mimeData()
+        _drag_dbg("tab.drop item?", md.hasFormat(ITEM_MIME_TYPE))
+        if md.hasFormat(ITEM_MIME_TYPE) and self._on_item_dropped is not None:
+            paths = paths_from_item_mime(bytes(md.data(ITEM_MIME_TYPE)))
+            if not paths:
+                return
+            self._on_item_dropped(paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+
 class PanelGroupWidget(QWidget):
     changed = Signal()
+    active_tab_changed = Signal(str, str)
+    state_changed = Signal(str)
     geometry_changed = Signal()
     appearance_changed = Signal()
     layout_gesture_started = Signal(str)
@@ -150,7 +200,10 @@ class PanelGroupWidget(QWidget):
     organize_requested = Signal(str)
     tab_detach_requested = Signal(str, object)
     tab_reordered = Signal(str)
+    item_dropped_on_tab = Signal(object, str)
+    item_drag_over_tab = Signal(str)
     group_merge_requested = Signal(str, int, int)
+    close_requested = Signal()
 
     def __init__(
         self,
@@ -193,6 +246,7 @@ class PanelGroupWidget(QWidget):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnBottomHint
         )
+        self.setAcceptDrops(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
         self._apply_taskbar_visibility_policy()
@@ -378,14 +432,75 @@ class PanelGroupWidget(QWidget):
         if not self._screen_geometries:
             self._screen_geometries = available_screen_geometries()
 
-    def activate_tab(self, tab_id: str) -> None:
+    def activate_tab(self, tab_id: str, *, notify: bool = True) -> None:
         if tab_id not in self._group.tab_ids:
             return
+        self._item_grid.close_open_group_folder()
         self._group.active_tab_id = tab_id
         self._item_grid.set_active_tab_id(tab_id)
+        if list(self._tab_buttons.keys()) != list(self._group.tab_ids):
+            self._rebuild_tab_buttons()
+        else:
+            self._sync_tab_button_states()
         self._render_active_content()
-        self._rebuild_tab_buttons()
-        self.changed.emit()
+        if notify:
+            self.active_tab_changed.emit(self._group.id, tab_id)
+
+    def _on_item_drag_enter_tab(self, tab_id: str) -> None:
+        if tab_id not in self._group.tab_ids:
+            return
+        if tab_id == self._group.active_tab_id:
+            return
+        self.activate_tab(tab_id, notify=False)
+        self.item_drag_over_tab.emit(tab_id)
+
+    def _on_item_dropped_on_tab_button(self, paths: list[Path], tab_id: str) -> None:
+        if tab_id not in self._group.tab_ids:
+            return
+        self.activate_tab(tab_id, notify=False)
+        self.item_dropped_on_tab.emit(paths, tab_id)
+
+    def _tab_id_at_panel_point(self, local_point: QPoint) -> str:
+        for tab_id, button in self._tab_buttons.items():
+            button_rect = QRect(button.mapTo(self, QPoint(0, 0)), button.size())
+            if button_rect.adjusted(-6, -8, 6, 8).contains(local_point):
+                return tab_id
+        return ""
+
+    def _handle_item_drag_over_panel(self, local_point: QPoint) -> bool:
+        tab_id = self._tab_id_at_panel_point(local_point)
+        if not tab_id:
+            return False
+        self._on_item_drag_enter_tab(tab_id)
+        return True
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.mimeData().hasFormat(ITEM_MIME_TYPE) and self._handle_item_drag_over_panel(
+            event.position().toPoint()
+        ):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.mimeData().hasFormat(ITEM_MIME_TYPE) and self._handle_item_drag_over_panel(
+            event.position().toPoint()
+        ):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        md = event.mimeData()
+        if md.hasFormat(ITEM_MIME_TYPE):
+            tab_id = self._tab_id_at_panel_point(event.position().toPoint())
+            if tab_id:
+                paths = paths_from_item_mime(bytes(md.data(ITEM_MIME_TYPE)))
+                if paths:
+                    self._on_item_dropped_on_tab_button(paths, tab_id)
+                    event.acceptProposedAction()
+                    return
+        super().dropEvent(event)
 
     def reload_from_model(self) -> None:
         if self._workspace is None:
@@ -433,13 +548,13 @@ class PanelGroupWidget(QWidget):
         if self._locked:
             self.lock_button.setIcon(_locked_lock_icon())
             self.lock_button.setText("")
-            self.lock_button.setToolTip("解锁面板")
-            self.lock_button.setAccessibleName("解锁面板")
+            self.lock_button.setToolTip("解锁面板位置")
+            self.lock_button.setAccessibleName("解锁面板位置")
         else:
             self.lock_button.setIcon(_unlocked_lock_icon())
             self.lock_button.setText("")
-            self.lock_button.setToolTip("锁定面板")
-            self.lock_button.setAccessibleName("锁定面板")
+            self.lock_button.setToolTip("锁定面板位置")
+            self.lock_button.setAccessibleName("锁定面板位置")
 
         self.add_button.setText("+")
         self.add_button.setIcon(QIcon())
@@ -551,8 +666,9 @@ class PanelGroupWidget(QWidget):
         tab = self._workspace.add_tab(self._group.id, "新标签")
         self._tabs_by_id[tab.id] = tab
         self._group = self._workspace.group(self._group.id)
-        self.activate_tab(tab.id)
+        self.activate_tab(tab.id, notify=False)
         self.start_inline_title_edit(tab.id)
+        self.changed.emit()
 
     def _on_delete_clicked(self) -> None:
         if self._workspace is None or not self._group.active_tab_id:
@@ -577,11 +693,11 @@ class PanelGroupWidget(QWidget):
 
     def _on_collapse_clicked(self) -> None:
         self.set_collapsed(not self._collapsed)
-        self.changed.emit()
+        self.state_changed.emit(self._group.id)
 
     def _on_lock_clicked(self) -> None:
         self.set_locked(not self._locked)
-        self.changed.emit()
+        self.state_changed.emit(self._group.id)
 
     def _dispose_tab_button(self, button: QPushButton) -> None:
         button.removeEventFilter(self)
@@ -598,7 +714,14 @@ class PanelGroupWidget(QWidget):
         for tab_id in self._group.tab_ids:
             tab = self._tabs_by_id.get(tab_id)
             label = tab.name if tab is not None else tab_id
-            button = QPushButton(label, self)
+            button = _TabButton(
+                label,
+                self,
+                on_item_drag_enter=lambda tid=tab_id: self._on_item_drag_enter_tab(tid),
+                on_item_dropped=lambda paths, tid=tab_id: self._on_item_dropped_on_tab_button(
+                    paths, tid
+                ),
+            )
             button.setCheckable(True)
             button.setChecked(tab_id == self._group.active_tab_id)
             button.setMinimumWidth(0)
@@ -677,6 +800,16 @@ class PanelGroupWidget(QWidget):
     def _screen_id_for_frame(self, frame: QRect) -> str:
         return self._screen_id_for_global_point(frame.center())
 
+    def _screen_bottom_limit(self, screen: QRect) -> int:
+        """面板底边允许到达的最大 y(留出间距,避免圆角/边框被任务栏裁切)。"""
+        return screen.bottom() - _PANEL_SCREEN_BOTTOM_INSET
+
+    def _clamp_frame_bottom_to_screen(self, frame: QRect, screen: QRect) -> QRect:
+        limit = self._screen_bottom_limit(screen)
+        if frame.bottom() > limit:
+            frame.moveBottom(limit)
+        return frame
+
     def _apply_geometry_from_model(self) -> None:
         screen = self._screen_geometry(self._group.screen_id)
         geometry = self._group.geometry
@@ -687,7 +820,9 @@ class PanelGroupWidget(QWidget):
         height = self.header_height() if self._collapsed else expanded_height
         x = screen.x() + int(screen.width() * geometry.rx)
         y = screen.y() + int(screen.height() * geometry.ry)
-        self.setGeometry(x, y, width, height)
+        frame = QRect(x, y, width, height)
+        frame = self._clamp_frame_bottom_to_screen(frame, screen)
+        self.setGeometry(frame)
 
     def _frame_height_matches_expanded_rh(self, frame_height: int) -> bool:
         screen_id = self._group.screen_id or "primary"
@@ -798,9 +933,7 @@ class PanelGroupWidget(QWidget):
             return
         local = self.mapFromGlobal(global_point)
         if self.rect().contains(local):
-            self._hide_tab_detach_preview()
             self._reorder_dragged_tab_at(local, final=False)
-            return
         self._show_tab_detach_preview(self._drag_tab_id, global_point)
 
     def _target_tab_index_for_local(self, local_point: QPoint) -> int:
@@ -1017,6 +1150,7 @@ class PanelGroupWidget(QWidget):
 
         screen_id = self._group.screen_id or "primary"
         screen = self._screen_geometry(screen_id)
+        bottom_limit = self._screen_bottom_limit(screen)
         if moves_left:
             if abs(snapped.left() - screen.left()) <= _SNAP_MARGIN or snapped.left() < screen.left():
                 set_left(screen.left())
@@ -1027,8 +1161,11 @@ class PanelGroupWidget(QWidget):
             if abs(snapped.top() - screen.top()) <= _SNAP_MARGIN or snapped.top() < screen.top():
                 set_top(screen.top())
         if moves_bottom:
-            if abs(snapped.bottom() - screen.bottom()) <= _SNAP_MARGIN or snapped.bottom() > screen.bottom():
-                set_bottom(screen.bottom())
+            if (
+                abs(snapped.bottom() - bottom_limit) <= _SNAP_MARGIN
+                or snapped.bottom() > bottom_limit
+            ):
+                set_bottom(bottom_limit)
 
         for target in self._snap_rects:
             if self._screen_id_for_frame(target) != screen_id:
@@ -1088,6 +1225,7 @@ class PanelGroupWidget(QWidget):
             else self._screen_id_for_frame(frame)
         )
         screen = self._screen_geometry(screen_id)
+        bottom_limit = self._screen_bottom_limit(screen)
         snapped = QRect(frame)
         if abs(snapped.left() - screen.left()) <= _SNAP_MARGIN:
             snapped.moveLeft(screen.left())
@@ -1095,16 +1233,16 @@ class PanelGroupWidget(QWidget):
             snapped.moveTop(screen.top())
         if abs(snapped.right() - screen.right()) <= _SNAP_MARGIN:
             snapped.moveRight(screen.right())
-        if abs(snapped.bottom() - screen.bottom()) <= _SNAP_MARGIN:
-            snapped.moveBottom(screen.bottom())
+        if abs(snapped.bottom() - bottom_limit) <= _SNAP_MARGIN:
+            snapped.moveBottom(bottom_limit)
         if snapped.left() < screen.left():
             snapped.moveLeft(screen.left())
         if snapped.top() < screen.top():
             snapped.moveTop(screen.top())
         if snapped.right() > screen.right():
             snapped.moveRight(screen.right())
-        if snapped.bottom() > screen.bottom():
-            snapped.moveBottom(screen.bottom())
+        if snapped.bottom() > bottom_limit:
+            snapped.moveBottom(bottom_limit)
         for target in self._snap_rects:
             if self._screen_id_for_frame(target) != screen_id:
                 continue
@@ -1394,6 +1532,10 @@ class PanelGroupWidget(QWidget):
             return
         super().mouseReleaseEvent(event)
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        event.ignore()
+        self.close_requested.emit()
+
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().showEvent(event)
         self._apply_taskbar_visibility_policy()
@@ -1401,6 +1543,26 @@ class PanelGroupWidget(QWidget):
 
     def _apply_taskbar_visibility_policy(self) -> None:
         hide_window_from_taskbar(int(self.winId()))
+
+    def reassert_desktop_layer(self) -> None:
+        """Re-establish normal always-on-bottom layering after a takeover detach.
+
+        During takeover the panel is pushed to the raw Win32 bottom of the
+        z-order; restoring Explorer icons then re-raises the desktop above it,
+        which swallows all mouse input. Re-applying the window flags makes Qt
+        re-run its known-good show placement so the panel sits just above the
+        desktop and becomes interactive again.
+        """
+        was_visible = self.isVisible()
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnBottomHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if was_visible:
+            self.show()
+            self._apply_taskbar_visibility_policy()
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -1422,4 +1584,9 @@ class PanelGroupWidget(QWidget):
         rect = self.rect().adjusted(1, 1, -1, -1)
         path.addRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
         painter.fillPath(path, color)
+        border = QPen(QColor(255, 255, 255, 40))
+        border.setWidth(1)
+        painter.setPen(border)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
         super().paintEvent(event)

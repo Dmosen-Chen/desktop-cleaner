@@ -82,11 +82,45 @@ class LayoutHistoryStore:
                 continue
             try:
                 snapshot = LayoutSnapshot.from_dict(raw)
-                validate_configuration(snapshot.configuration)
             except Exception:
                 continue
+            upgraded = self._upgrade_snapshot_config(snapshot.configuration)
+            if upgraded is None:
+                continue
+            if upgraded is not snapshot.configuration:
+                snapshot = LayoutSnapshot(
+                    id=snapshot.id,
+                    created_at=snapshot.created_at,
+                    reason=snapshot.reason,
+                    configuration=upgraded,
+                    preview_kind=snapshot.preview_kind,
+                    preview_path=snapshot.preview_path,
+                )
             snapshots.append(snapshot)
         return snapshots[-self.limit :]
+
+    @staticmethod
+    def _upgrade_snapshot_config(config: Configuration) -> Configuration | None:
+        # 旧 schema 快照(如 v4)就地迁移升级到当前版本,而不是静默丢弃,
+        # 避免用户升级后历史布局突然消失、无法恢复。
+        from desktop_tidy.persistence.migration import (
+            CURRENT_SCHEMA_VERSION,
+            _migrate_schema_four_to_five,
+            _migrate_schema_three_to_four,
+        )
+
+        try:
+            upgraded = config
+            if upgraded.schema_version == 3:
+                upgraded = _migrate_schema_three_to_four(upgraded)
+            if upgraded.schema_version == 4:
+                upgraded = _migrate_schema_four_to_five(upgraded)
+            if upgraded.schema_version != CURRENT_SCHEMA_VERSION:
+                return None
+            validate_configuration(upgraded)
+            return upgraded
+        except Exception:
+            return None
 
     def push(
         self,

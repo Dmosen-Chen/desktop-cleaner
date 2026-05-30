@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.services.desktop_takeover import (
@@ -19,6 +20,27 @@ class FakeTakeover:
         self.calls.append("restore")
         return self.restore_result
 
+    def detach_panels(self) -> None:
+        self.calls.append("detach")
+
+
+class TakeoverSessionMarkerTests(unittest.TestCase):
+    def test_marker_recovery_restores_and_clears(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from desktop_tidy.services.desktop_takeover import (
+            TakeoverSessionMarker,
+            recover_abandoned_takeover,
+        )
+
+        with TemporaryDirectory() as tmp:
+            marker = TakeoverSessionMarker(Path(tmp) / "takeover-session.marker")
+            marker.mark_active()
+            service = FakeTakeover(restore_result=True)
+            self.assertTrue(recover_abandoned_takeover(service, marker))
+            self.assertEqual(service.calls, ["restore", "detach"])
+            self.assertFalse(marker.is_active())
+
 
 class DesktopRecoveryGuardTests(unittest.TestCase):
     def test_recover_if_needed_restores_icons_and_clears_persistent_flags(self) -> None:
@@ -30,7 +52,7 @@ class DesktopRecoveryGuardTests(unittest.TestCase):
         changed = DesktopRecoveryGuard(service).recover_if_needed(config)
 
         self.assertTrue(changed)
-        self.assertEqual(service.calls, ["restore"])
+        self.assertEqual(service.calls, ["restore", "detach"])
         self.assertFalse(config.desktop.restore_required)
         self.assertFalse(config.desktop.explorer_icons_hidden)
 
@@ -43,7 +65,7 @@ class DesktopRecoveryGuardTests(unittest.TestCase):
         changed = DesktopRecoveryGuard(service).recover_if_needed(config)
 
         self.assertTrue(changed)
-        self.assertEqual(service.calls, ["restore"])
+        self.assertEqual(service.calls, ["restore", "detach"])
         self.assertTrue(config.desktop.restore_required)
         self.assertTrue(config.desktop.explorer_icons_hidden)
 
@@ -148,8 +170,8 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
                 (123, -2880, 0, 1062, 1548),
             ],
         )
-        self.assertEqual(user32.insert_after[0], 1)
-        self.assertFalse(user32.flags[0] & 0x0004)
+        self.assertEqual(user32.insert_after[0], 0)
+        self.assertTrue(user32.flags[0] & 0x0004)
         self.assertEqual(user32.show_calls, [(30, 0), (30, 5)])
 
     def test_attach_fails_and_restores_when_panel_lands_offscreen(self) -> None:
@@ -215,6 +237,43 @@ class DesktopTakeoverServiceTests(unittest.TestCase):
                 (123, -2628, 0, 708, 1032),
             ],
         )
+
+    def test_restore_icons_returns_false_when_listview_stays_hidden(self) -> None:
+        class FakeUser32:
+            def __init__(self) -> None:
+                self.visible = False
+
+            def FindWindowW(self, class_name, _title):
+                return 10 if class_name == "Progman" else 0
+
+            def SendMessageTimeoutW(self, *_args):
+                return 1
+
+            def EnumWindows(self, callback, lparam):
+                callback(10, lparam)
+                return 1
+
+            def FindWindowExW(self, parent, after, class_name, title):
+                if class_name == "SHELLDLL_DefView" and int(parent) == 10:
+                    return 20
+                if (
+                    class_name == "SysListView32"
+                    and int(parent) == 20
+                    and title == "FolderView"
+                ):
+                    return 30
+                return 0
+
+            def ShowWindow(self, _hwnd, _command):
+                # 模拟 Explorer 未就绪:ShowWindow 调用无效,图标保持隐藏。
+                return 0
+
+            def IsWindowVisible(self, _hwnd):
+                return self.visible
+
+        service = DesktopTakeoverService(platform_name="win32", user32=FakeUser32())
+
+        self.assertFalse(service.restore_explorer_icons())
 
     def test_restore_icons_returns_false_when_desktop_window_is_missing(self) -> None:
         class FakeUser32:

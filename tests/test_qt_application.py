@@ -19,18 +19,19 @@ from PySide6.QtWidgets import QApplication
 from desktop_tidy.application import (
     DesktopCleanerApplication,
     application_store,
+    arrange_entries_for_tab,
     visible_entries_for_active_tab,
 )
 from desktop_tidy.domain.classification import classify_path
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.classification import canonical_key
-from desktop_tidy.domain.models import ItemRef, ManualOverride, PanelGeometry
+from desktop_tidy.domain.models import ItemGroup, ItemRef, ManualOverride, PanelGeometry
 from desktop_tidy.persistence.config_store import ConfigurationStore
 from desktop_tidy.persistence.layout_history import LayoutHistoryStore
 from desktop_tidy.services.desktop_index import DesktopIndex
 from desktop_tidy.services.updates import DownloadResult, UpdateInfo
 from desktop_tidy.ui.settings_window import SettingsWindow
-from tests.test_qt_item_grid import send_ctrl_wheel
+from tests.test_qt_item_grid import close_desktop_logger_handlers, send_ctrl_wheel
 from tests.test_qt_panel_group import (
     _ResizeRegion,
     find_tab_button,
@@ -208,12 +209,38 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             DesktopCleanerApplication(config, store=store, takeover_service=takeover)
 
-            self.assertEqual(takeover.calls, [("restore", None)])
+            self.assertEqual(takeover.calls, [("restore", None), ("detach", None)])
             self.assertFalse(config.desktop.restore_required)
             self.assertFalse(config.desktop.explorer_icons_hidden)
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertFalse(payload["desktop"]["restore_required"])
             self.assertFalse(payload["desktop"]["explorer_icons_hidden"])
+
+    def test_abandoned_takeover_recovery_keeps_user_takeover_preference(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            marker = store.path.parent / "takeover-session.marker"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("active\n", encoding="utf-8")
+            takeover = FakeTakeoverService()
+
+            app = DesktopCleanerApplication(config, store=store, takeover_service=takeover)
+            self.assertFalse(marker.exists())
+            app.show()
+            type(self).app.processEvents()
+
+            self.assertTrue(config.desktop.takeover_enabled)
+            self.assertEqual(
+                [name for name, _value in takeover.calls],
+                ["restore", "detach", "attach", "hide"],
+            )
+            self.assertTrue(marker.exists())
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["desktop"]["takeover_enabled"])
 
     def test_takeover_disabled_does_not_attach_or_hide_when_showing_panels(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -332,8 +359,10 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 [name for name, _value in takeover.calls],
                 ["attach", "hide", "restore", "detach"],
             )
+            self.assertTrue(config.desktop.takeover_enabled)
             self.assertFalse(config.desktop.restore_required)
             self.assertFalse(config.desktop.explorer_icons_hidden)
+            self.assertFalse(app._takeover_marker.is_active())
 
     def test_tray_hide_and_show_toggle_panel_visibility_without_quitting(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -413,6 +442,38 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertFalse(config.desktop.explorer_icons_hidden)
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertFalse(payload["desktop"]["restore_required"])
+
+    def test_settings_restore_desktop_icons_disables_takeover_and_keeps_icons(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.takeover_enabled = True
+            config.desktop.restore_required = True
+            config.desktop.explorer_icons_hidden = True
+            takeover = FakeTakeoverService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                config,
+                store=store,
+                takeover_service=takeover,
+            )
+            app._takeover_active = True
+            app._show_settings(app.panel.group_id)
+            assert app._settings_window is not None
+            takeover.calls.clear()
+
+            app._settings_window.restore_desktop_requested.emit()
+
+            self.assertEqual(
+                [name for name, _value in takeover.calls if name != "visible"],
+                ["restore", "detach"],
+            )
+            self.assertFalse(config.desktop.takeover_enabled)
+            self.assertFalse(config.desktop.explorer_icons_hidden)
+            self.assertFalse(config.desktop.restore_required)
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["desktop"]["takeover_enabled"])
 
     def test_tray_restore_refreshes_takeover_when_preference_stays_enabled(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -540,7 +601,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             self.assertEqual(
                 [name for name, _value in takeover.calls if name != "visible"],
-                ["restore", "restore", "detach", "attach", "hide"],
+                ["restore", "detach", "restore", "detach", "attach", "hide"],
             )
             open_item.assert_called_once_with(store.path.parent / "logs")
             bundles = list(store.path.parent.glob("desktop-cleaner-diagnostics-*.zip"))
@@ -770,6 +831,69 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 entry_paths,
                 "missing external refs must stay visible for relink/remove UI",
             )
+
+    def test_visible_entries_deduplicates_scan_and_external_ref(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            desktop.mkdir()
+            photo = desktop / "photo.png"
+            photo.write_text("img", encoding="utf-8")
+            config = build_default_configuration(desktop)
+            config.external_refs.append(
+                ItemRef(
+                    id="external-dup",
+                    source_kind="external",
+                    canonical_path=str(photo.resolve()),
+                    target_tab_id="tab-images",
+                )
+            )
+
+            entries = visible_entries_for_active_tab(
+                config,
+                DesktopIndex(desktop),
+                active_tab_id="tab-images",
+            )
+
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].path.resolve(), photo.resolve())
+
+    def test_visible_entries_hide_duplicate_shortcuts_with_same_target(self) -> None:
+        from desktop_tidy.domain.shortcut_identity import item_identity_key
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_desktop = root / "user"
+            public_desktop = root / "public"
+            user_desktop.mkdir()
+            public_desktop.mkdir()
+            user_link = user_desktop / "终末地.lnk"
+            public_link = public_desktop / "终末地.lnk"
+            user_link.write_text("a", encoding="utf-8")
+            public_link.write_text("b", encoding="utf-8")
+            config = build_default_configuration(user_desktop)
+            identity = "lnk:c:\\games\\endfield.exe"
+
+            def fake_identity(path: Path) -> str:
+                if path.name.casefold() == "终末地.lnk":
+                    return identity
+                return item_identity_key(path)
+
+            with patch(
+                "desktop_tidy.application.item_identity_key",
+                side_effect=fake_identity,
+            ):
+                index = DesktopIndex(user_desktop, extra_desktops=[public_desktop])
+                entries = visible_entries_for_active_tab(
+                    config,
+                    index,
+                    active_tab_id="tab-apps",
+                )
+                endfield_entries = [
+                    entry for entry in entries if entry.path.name == "终末地.lnk"
+                ]
+                self.assertEqual(len(endfield_entries), 1)
+                self.assertEqual(endfield_entries[0].path.resolve(), user_link.resolve())
 
     def test_settings_desktop_path_change_rebuilds_index_in_same_preview_session(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1027,6 +1151,69 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 payload = json.loads(store.path.read_text(encoding="utf-8"))
                 self.assertEqual(len(payload["panel_groups"]), 1)
 
+    def test_locked_panel_still_allows_item_grid_reorder(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
+            app.show()
+            type(self).app.processEvents()
+
+            app.panel.set_locked(True)
+            app.refresh()
+            type(self).app.processEvents()
+
+            self.assertTrue(app.panel.is_locked)
+            self.assertTrue(app.panel.item_grid.reorder_enabled())
+
+    def test_item_dropped_on_tab_switches_active_tab_and_moves_item(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            source = desktop / "game.url"
+            source.write_text("url", encoding="utf-8")
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
+            app.show()
+            type(self).app.processEvents()
+
+            app.panel.activate_tab("tab-folders")
+            app.refresh()
+            type(self).app.processEvents()
+
+            app.panel._on_item_dropped_on_tab_button([source], "tab-apps")
+            type(self).app.processEvents()
+
+            self.assertEqual(app.panel.active_tab_id, "tab-apps")
+            self.assertEqual(
+                app.model.config.manual_overrides[0].target_tab_id,
+                "tab-apps",
+            )
+            self.assertIn(source.resolve(), app.panel.item_grid.entry_paths())
+
+    def test_item_drag_over_tab_switches_preview_to_target_tab(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            folder = desktop / "project"
+            folder.mkdir()
+            app_link = desktop / "game.url"
+            app_link.write_text("url", encoding="utf-8")
+            app = DesktopCleanerApplication(build_default_configuration(desktop))
+            app.show()
+            type(self).app.processEvents()
+
+            app.panel.activate_tab("tab-folders")
+            app.refresh()
+            type(self).app.processEvents()
+
+            app.panel._on_item_drag_enter_tab("tab-apps")
+            type(self).app.processEvents()
+
+            self.assertEqual(app.panel.active_tab_id, "tab-apps")
+            preview_paths = app.panel.item_grid.entry_paths()
+            self.assertIn(app_link.resolve(), preview_paths)
+            self.assertNotIn(folder.resolve(), preview_paths)
+
     def test_merge_when_default_is_source_reassigns_primary_panel_reference(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
@@ -1074,7 +1261,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 {detached_group_id},
             )
 
-    def test_settings_appearance_applies_to_selected_panel_group(self) -> None:
+    def test_settings_appearance_applies_to_all_panel_groups(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             desktop = Path(tmp) / "desktop"
             desktop.mkdir()
@@ -1108,16 +1295,24 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             self.assertEqual(
                 app.model.group("group-default").appearance.background_color,
-                primary_color,
-                "appearance settings are scoped to the selected panel group",
+                saved_color,
+                "appearance is global: all panel groups share the same color",
             )
             self.assertEqual(
                 app.model.group(secondary_group_id).appearance.background_color,
                 saved_color,
             )
             self.assertAlmostEqual(
+                app.model.group("group-default").appearance.background_opacity,
+                0.33,
+            )
+            self.assertAlmostEqual(
                 app.model.group(secondary_group_id).appearance.background_opacity,
                 0.33,
+            )
+            self.assertEqual(
+                app.model.config.appearance_defaults.background_color,
+                saved_color,
             )
 
     def test_settings_appearance_live_change_updates_panel_and_saves_debounced(self) -> None:
@@ -1147,12 +1342,15 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             secondary_group_id = app.model.tab("tab-documents").group_id
             self.assertNotEqual(secondary_group_id, "group-default")
             secondary_group = app.model.group(secondary_group_id)
-            self.assertNotEqual(secondary_group.appearance.background_color, "#4B5563")
-            self.assertNotAlmostEqual(
+            # 颜色/透明度是全局外观,所有面板组都应同步生效。
+            self.assertEqual(secondary_group.appearance.background_color, "#4B5563")
+            self.assertAlmostEqual(
                 secondary_group.appearance.background_opacity,
                 0.70,
             )
             self.assertAlmostEqual(app.panel.background_opacity, 0.70)
+            for panel in app.panel_widgets():
+                self.assertAlmostEqual(panel.background_opacity, 0.70)
 
             QTest.qWait(350)
             payload = json.loads(store.path.read_text(encoding="utf-8"))
@@ -1165,8 +1363,16 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 appearances["group-default"]["background_opacity"],
                 0.70,
             )
-            self.assertNotEqual(
+            self.assertEqual(
                 appearances[secondary_group_id]["background_color"],
+                "#4B5563",
+            )
+            self.assertAlmostEqual(
+                appearances[secondary_group_id]["background_opacity"],
+                0.70,
+            )
+            self.assertEqual(
+                payload["appearance_defaults"]["background_color"],
                 "#4B5563",
             )
 
@@ -1447,7 +1653,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertEqual(store.path.name, "config.json")
             self.assertEqual(photo.read_text(encoding="utf-8"), before)
 
-    def test_one_click_organize_reapplies_rules_without_touching_files(self) -> None:
+    def test_one_click_organize_preserves_manual_moves_and_releases_pending(self) -> None:
         from desktop_tidy.application import ensure_application
 
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
@@ -1456,6 +1662,8 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             desktop.mkdir()
             photo = desktop / "photo.png"
             photo.write_text("img-bytes", encoding="utf-8")
+            pending = desktop / "fresh.png"
+            pending.write_text("new-bytes", encoding="utf-8")
             store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
             app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
             ensure_application()
@@ -1465,21 +1673,25 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             app.panel.activate_tab("tab-documents")
             app.handle_paths_dropped([photo], "tab-documents")
+            app.model.mark_desktop_items_pending_organize([pending])
             type(self).app.processEvents()
 
             self.assertEqual(classify_path(photo, app.model.config), "tab-documents")
-            self.assertEqual(len(app.model.config.manual_overrides), 1)
+            self.assertEqual(classify_path(pending, app.model.config), "tab-other")
+            self.assertEqual(len(app.model.config.manual_overrides), 2)
 
             QTest.mouseClick(app.panel.organize_button, Qt.MouseButton.LeftButton)
             type(self).app.processEvents()
 
-            self.assertEqual(app.model.config.manual_overrides, [])
-            self.assertEqual(classify_path(photo, app.model.config), "tab-images")
+            self.assertEqual(len(app.model.config.manual_overrides), 1)
+            self.assertEqual(app.model.config.manual_overrides[0].target_tab_id, "tab-documents")
+            self.assertEqual(classify_path(photo, app.model.config), "tab-documents")
+            self.assertEqual(classify_path(pending, app.model.config), "tab-images")
             self.assertTrue(photo.is_file())
             self.assertEqual(photo.read_text(encoding="utf-8"), "img-bytes")
             self.assertTrue(store.path.is_file())
             payload = json.loads(store.path.read_text(encoding="utf-8"))
-            self.assertEqual(payload.get("manual_overrides", []), [])
+            self.assertEqual(len(payload.get("manual_overrides", [])), 1)
             self.assertEqual(store.path.name, "config.json")
 
     def test_new_desktop_items_show_in_other_until_one_click_organize(self) -> None:
@@ -1702,6 +1914,108 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             self.assertEqual(calls, {"reload": 0, "show": 0, "set_entries": 0})
 
+    def test_lock_toggle_is_lightweight_and_delayed_saved(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            (desktop / "one.pdf").write_text("x", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            type(self).app.processEvents()
+
+            calls = {"history": 0, "refresh": 0, "set_entries": 0}
+            original_save_with_history = app.save_with_history
+            original_refresh = app.refresh
+            original_set_entries = app.panel.item_grid.set_entries
+
+            def record_history(*args, **kwargs):
+                calls["history"] += 1
+                original_save_with_history(*args, **kwargs)
+
+            def record_refresh(*args, **kwargs):
+                calls["refresh"] += 1
+                original_refresh(*args, **kwargs)
+
+            def record_set_entries(*args, **kwargs):
+                calls["set_entries"] += 1
+                original_set_entries(*args, **kwargs)
+
+            app.save_with_history = record_history  # type: ignore[method-assign]
+            app.refresh = record_refresh  # type: ignore[method-assign]
+            app.panel.item_grid.set_entries = record_set_entries  # type: ignore[method-assign]
+
+            QTest.mouseClick(app.panel.lock_button, Qt.MouseButton.LeftButton)
+            type(self).app.processEvents()
+
+            self.assertEqual(calls, {"history": 0, "refresh": 0, "set_entries": 0})
+            self.assertTrue(app.model.group("group-default").locked)
+
+            QTest.qWait(650)
+            type(self).app.processEvents()
+
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["panel_groups"][0]["locked"])
+
+    def test_tab_switch_refreshes_only_current_panel_without_history(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            for name in ("one.pdf", "two.png", "three.zip"):
+                (desktop / name).write_text("x", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            ensure_application()
+            app.show()
+            app.detach_tab_to_new_group(
+                "tab-documents",
+                PanelGeometry(rx=0.45, ry=0.20, rw=0.30, rh=0.35),
+            )
+            type(self).app.processEvents()
+            primary = app.panel
+            secondary = next(
+                panel for panel in app.panel_widgets() if panel.group_id != primary.group_id
+            )
+            calls = {"history": 0, "refresh": 0, "primary_entries": 0, "secondary_entries": 0}
+            original_history = app.save_with_history
+            original_refresh = app.refresh
+            original_primary_set_entries = primary.item_grid.set_entries
+            original_secondary_set_entries = secondary.item_grid.set_entries
+
+            def record_history(*args, **kwargs):
+                calls["history"] += 1
+                original_history(*args, **kwargs)
+
+            def record_refresh(*args, **kwargs):
+                calls["refresh"] += 1
+                original_refresh(*args, **kwargs)
+
+            def record_primary(*args, **kwargs):
+                calls["primary_entries"] += 1
+                original_primary_set_entries(*args, **kwargs)
+
+            def record_secondary(*args, **kwargs):
+                calls["secondary_entries"] += 1
+                original_secondary_set_entries(*args, **kwargs)
+
+            app.save_with_history = record_history  # type: ignore[method-assign]
+            app.refresh = record_refresh  # type: ignore[method-assign]
+            primary.item_grid.set_entries = record_primary  # type: ignore[method-assign]
+            secondary.item_grid.set_entries = record_secondary  # type: ignore[method-assign]
+
+            primary.activate_tab("tab-images")
+            type(self).app.processEvents()
+
+            self.assertEqual(
+                calls,
+                {"history": 0, "refresh": 0, "primary_entries": 1, "secondary_entries": 0},
+            )
+
     def test_resizing_one_panel_does_not_update_other_panel_snap_targets(self) -> None:
         from desktop_tidy.application import ensure_application
 
@@ -1823,7 +2137,7 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 )
             )
             payload = json.loads(store.path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 4)
+            self.assertEqual(payload["schema_version"], 5)
 
     def test_layout_history_restore_replaces_panel_layout_without_touching_sources(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1849,7 +2163,36 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertEqual(source.read_text(encoding="utf-8"), "original")
             self.assertEqual(
                 json.loads(store.path.read_text(encoding="utf-8"))["schema_version"],
-                4,
+                5,
+            )
+
+    def test_history_restore_refreshes_open_settings_window_config(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            history = LayoutHistoryStore(Path(tmp) / "layout-history.json")
+            config = build_default_configuration(desktop)
+            config.panel_groups[0].geometry.rw = 0.44
+            snapshot = history.push(config, "before-resize")
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                history_store=history,
+            )
+            app.show()
+            type(self).app.processEvents()
+            app._show_settings(app.panel.group_id)
+            settings = app._settings_window
+            self.assertIsNotNone(settings)
+
+            app._on_history_restore_requested(snapshot.id)
+            type(self).app.processEvents()
+
+            self.assertIs(
+                settings._config,
+                app.model.config,
+                "settings window must follow the restored configuration object",
             )
 
     def test_settings_window_close_does_not_quit_or_hide_panel(self) -> None:
@@ -2054,6 +2397,182 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                     config_mtime_before,
                     "config.json must not be rewritten after a bare open failure",
                 )
+
+    def test_item_group_change_refreshes_only_panel_showing_that_tab(self) -> None:
+        from desktop_tidy.application import ensure_application
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            try:
+                desktop = Path(tmp) / "desktop"
+                desktop.mkdir()
+                first = desktop / "a.png"
+                second = desktop / "b.png"
+                first.write_text("a", encoding="utf-8")
+                second.write_text("b", encoding="utf-8")
+                store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+                app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+                ensure_application()
+                app.show()
+                app.panel.activate_tab("tab-images")
+                app.detach_tab_to_new_group(
+                    "tab-images",
+                    PanelGeometry(rx=0.55, ry=0.18, rw=0.28, rh=0.42),
+                )
+                type(self).app.processEvents()
+
+                image_group_id = app.model.tab("tab-images").group_id
+                image_panel = next(
+                    panel for panel in app.panel_widgets() if panel.group_id == image_group_id
+                )
+                other_panel = next(
+                    panel for panel in app.panel_widgets() if panel.group_id != image_group_id
+                )
+                calls = {"image": 0, "other": 0}
+                image_set_entries = image_panel.item_grid.set_entries
+                other_set_entries = other_panel.item_grid.set_entries
+
+                def record_image(*args, **kwargs):
+                    calls["image"] += 1
+                    image_set_entries(*args, **kwargs)
+
+                def record_other(*args, **kwargs):
+                    calls["other"] += 1
+                    other_set_entries(*args, **kwargs)
+
+                image_panel.item_grid.set_entries = record_image  # type: ignore[method-assign]
+                other_panel.item_grid.set_entries = record_other  # type: ignore[method-assign]
+
+                app._on_group_create_requested("tab-images", [first, second])
+                type(self).app.processEvents()
+
+                self.assertEqual(calls["other"], 0)
+                self.assertGreaterEqual(calls["image"], 1)
+                self.assertTrue(first.is_file())
+                self.assertTrue(second.is_file())
+            finally:
+                close_desktop_logger_handlers()
+
+    def test_item_group_operation_failure_is_logged(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            try:
+                desktop = Path(tmp) / "desktop"
+                desktop.mkdir()
+                source = desktop / "a.png"
+                source.write_text("a", encoding="utf-8")
+                store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+                app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+                app._on_group_create_requested("missing-tab", [source])
+
+                log_path = Path(tmp) / "DesktopCleaner" / "logs" / "desktop-cleaner.log"
+                close_desktop_logger_handlers()
+                self.assertIn(
+                    "图标分组创建失败",
+                    log_path.read_text(encoding="utf-8"),
+                )
+            finally:
+                close_desktop_logger_handlers()
+
+    def test_clicking_outside_group_popup_closes_open_group_folder(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            first = desktop / "a.png"
+            second = desktop / "b.png"
+            first.write_text("a", encoding="utf-8")
+            second.write_text("b", encoding="utf-8")
+            config = build_default_configuration(desktop)
+            config.item_groups.append(
+                ItemGroup(
+                    id="item-group-test",
+                    tab_id="tab-images",
+                    name="图片组",
+                    member_paths=[canonical_key(first), canonical_key(second)],
+                    order=0,
+                )
+            )
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store)
+            app.show()
+            app.panel.activate_tab("tab-images")
+            type(self).app.processEvents()
+
+            app.panel.item_grid._switch_group_folder("item-group-test")
+            self.assertEqual(app.panel.item_grid._open_group_id, "item-group-test")
+
+            app._on_global_mouse_press(app.panel)
+
+            self.assertEqual(app.panel.item_grid._open_group_id, "")
+
+
+class ArrangeEntriesForTabTests(unittest.TestCase):
+    def _entries(self, root: Path, names: list[str]):
+        from desktop_tidy.services.desktop_index import IndexedItem
+
+        return [IndexedItem((root / name)) for name in names]
+
+    def test_no_manual_order_keeps_default_order(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = build_default_configuration(root)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+
+            arranged = arrange_entries_for_tab(config, entries, "tab-images")
+
+            self.assertEqual([entry.path for entry in arranged], [entry.path for entry in entries])
+
+    def test_manual_order_is_honored_and_new_item_appended_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = build_default_configuration(root)
+            a, b, c = self._entries(root, ["a.png", "b.png", "c.png"])
+            config.manual_orders["tab-images"] = [
+                canonical_key(c.path),
+                canonical_key(a.path),
+            ]
+
+            arranged = arrange_entries_for_tab(config, [a, b, c], "tab-images")
+
+            self.assertEqual([entry.path for entry in arranged], [c.path, a.path, b.path])
+
+    def test_prepend_front_places_new_items_first(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = build_default_configuration(root)
+            config.new_item_placement = "prepend_front"
+            a, b, c = self._entries(root, ["a.png", "b.png", "c.png"])
+            config.manual_orders["tab-images"] = [canonical_key(a.path), canonical_key(c.path)]
+
+            arranged = arrange_entries_for_tab(config, [a, b, c], "tab-images")
+
+            self.assertEqual([entry.path for entry in arranged], [b.path, a.path, c.path])
+
+    def test_resort_all_ignores_manual_order_when_new_items_present(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = build_default_configuration(root)
+            config.new_item_placement = "resort_all"
+            a, b, c = self._entries(root, ["a.png", "b.png", "c.png"])
+            config.manual_orders["tab-images"] = [canonical_key(c.path), canonical_key(a.path)]
+
+            arranged = arrange_entries_for_tab(config, [a, b, c], "tab-images")
+
+            self.assertEqual([entry.path for entry in arranged], [a.path, b.path, c.path])
+
+    def test_dangling_manual_order_keys_are_filtered(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = build_default_configuration(root)
+            a, b = self._entries(root, ["a.png", "b.png"])
+            config.manual_orders["tab-images"] = [
+                canonical_key(b.path),
+                canonical_key(root / "ghost.png"),
+                canonical_key(a.path),
+            ]
+
+            arranged = arrange_entries_for_tab(config, [a, b], "tab-images")
+
+            self.assertEqual([entry.path for entry in arranged], [b.path, a.path])
 
 
 if __name__ == "__main__":

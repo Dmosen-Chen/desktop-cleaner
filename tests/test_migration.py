@@ -16,7 +16,7 @@ class MigrationTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for schema_version in (1, 5):
+            for schema_version in (1, 6):
                 with self.subTest(schema_version=schema_version):
                     path = root / f"config-{schema_version}.json"
                     content = json.dumps(
@@ -191,7 +191,7 @@ class MigrationTests(unittest.TestCase):
 
                 config = load_or_migrate(path)
 
-                self.assertEqual(config.schema_version, 4)
+                self.assertEqual(config.schema_version, 5)
                 self.assertEqual(config.panel_groups[0].id, "group-default")
                 backups = list(root.glob("config.corrupt-*.json"))
                 self.assertEqual(len(backups), 1)
@@ -218,8 +218,31 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(config, expected)
             self.assertEqual(list(root.glob("config.corrupt-*.json")), [])
             self.assertEqual(len(list(root.glob("config.pre-schema-v3-*.json"))), 1)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 4)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 5)
             self.assertTrue(all(tab.content_kind == "items" for tab in config.panel_tabs))
+
+    def test_schema_v4_is_migrated_to_v5_with_default_reorder_fields(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "config.json"
+            expected = build_default_configuration(r"D:\Desktop")
+            payload = expected.to_dict()
+            payload["schema_version"] = 4
+            payload.pop("manual_orders", None)
+            payload.pop("item_groups", None)
+            payload.pop("new_item_placement", None)
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            config = load_or_migrate(path)
+
+            self.assertEqual(config.schema_version, 5)
+            self.assertEqual(config.manual_orders, {})
+            self.assertEqual(config.item_groups, [])
+            self.assertEqual(config.new_item_placement, "append_end")
+            self.assertEqual(len(list(root.glob("config.pre-schema-v5-*.json"))), 1)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["schema_version"], 5
+            )
 
     def test_schema_v3_is_migrated_to_v4_with_generated_panel_names(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -235,7 +258,7 @@ class MigrationTests(unittest.TestCase):
 
             config = load_or_migrate(path)
 
-            self.assertEqual(config.schema_version, 4)
+            self.assertEqual(config.schema_version, 5)
             self.assertEqual([group.name for group in config.panel_groups], ["面板 1", "面板 2"])
             self.assertEqual(len(list(root.glob("config.pre-schema-v4-*.json"))), 1)
 
@@ -284,7 +307,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual([ref.canonical_path for ref in config.external_refs], [str(external.resolve())])
             self.assertEqual(config.external_refs[0].target_tab_id, "tab-other")
             self.assertEqual(len(list(root.glob("config.pre-qt-v1-*.json"))), 1)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 4)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 5)
             self.assertTrue(internal.exists())
             self.assertTrue(external.exists())
             self.assertTrue(shortcut.exists())
@@ -361,7 +384,7 @@ class MigrationTests(unittest.TestCase):
 
             config = load_or_migrate(path)
 
-            self.assertEqual(config.schema_version, 4)
+            self.assertEqual(config.schema_version, 5)
             self.assertEqual(config.panel_groups[0].id, "group-default")
             backups = list(Path(tmp).glob("config.corrupt-*.json"))
             self.assertEqual(len(backups), 1)

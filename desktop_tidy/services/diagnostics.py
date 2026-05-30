@@ -133,6 +133,9 @@ class DiagnosticsService:
 
     def restore_desktop_icons(self) -> RecoveryResult:
         restored = bool(self.takeover_service.restore_explorer_icons())
+        # 恢复图标后必须把面板从桌面层 detach,否则面板仍保持接管时的
+        # Win32 状态(如 HWND_BOTTOM),而接管标志已被清除,后续接管/刷新行为不可预测。
+        self.takeover_service.detach_panels()
         if restored:
             self.config.desktop.restore_required = False
             self.config.desktop.explorer_icons_hidden = False

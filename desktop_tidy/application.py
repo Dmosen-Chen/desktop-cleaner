@@ -5,13 +5,17 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import atexit
+import weakref
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
+from PySide6.QtWidgets import QApplication, QWidget
+from shiboken6 import isValid
 
 from desktop_tidy.domain.classification import canonical_key, classify_path
+from desktop_tidy.domain.shortcut_identity import desktop_entry_rank, item_identity_key
 from desktop_tidy.domain.models import AppearanceSettings, Configuration, PanelGeometry
 from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.config_store import ConfigurationStore
@@ -23,21 +27,27 @@ from desktop_tidy.services.desktop_index import (
     IndexChanges,
     IndexedItem,
 )
+from desktop_tidy.services.desktop_location import windows_public_desktop
 from desktop_tidy.services.desktop_takeover import (
     DesktopRecoveryGuard,
     DesktopTakeoverService,
+    TakeoverSessionMarker,
+    install_abnormal_exit_handler,
+    recover_abandoned_takeover,
 )
 from desktop_tidy.services.diagnostics import DiagnosticsService, RecoveryResult
 from desktop_tidy.services.activation import ActivationServer
 from desktop_tidy.services.item_launcher import open_item
 from desktop_tidy.services.logging_setup import (
     configure_logging,
+    get_logger,
     install_global_exception_hook,
     log_exception,
 )
 from desktop_tidy.services.screens import available_screen_geometries, available_screens
 from desktop_tidy.services.startup import StartupService
 from desktop_tidy.services.updates import DownloadResult, UpdateInfo, UpdateService
+from desktop_tidy.ui.item_grid import GroupBlock, ItemGridWidget
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 from desktop_tidy.ui.tray import TrayController
@@ -91,7 +101,178 @@ def visible_entries_for_active_tab(
         for reference in config.external_refs
         if reference.target_tab_id == tab_id
     ]
-    return desktop_entries + external_entries
+    primary_desktop = Path(config.desktop.path)
+    candidates: list[IndexedItem] = []
+    seen_paths: set[str] = set()
+    for entry in desktop_entries + external_entries:
+        key = canonical_key(entry.path)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        candidates.append(entry)
+
+    chosen_by_identity: dict[str, IndexedItem] = {}
+    for entry in candidates:
+        identity = item_identity_key(entry.path)
+        existing = chosen_by_identity.get(identity)
+        if existing is None:
+            chosen_by_identity[identity] = entry
+            continue
+        if desktop_entry_rank(entry.path, primary_desktop=primary_desktop) < desktop_entry_rank(
+            existing.path, primary_desktop=primary_desktop
+        ):
+            chosen_by_identity[identity] = entry
+
+    merged: list[IndexedItem] = []
+    emitted_identities: set[str] = set()
+    for entry in candidates:
+        identity = item_identity_key(entry.path)
+        if identity in emitted_identities:
+            continue
+        if chosen_by_identity[identity] is not entry:
+            continue
+        merged.append(entry)
+        emitted_identities.add(identity)
+    return merged
+
+
+def arrange_entries_for_tab(
+    config: Configuration,
+    entries: list[IndexedItem],
+    tab_id: str,
+) -> list[IndexedItem]:
+    """应用标签内的手动顺序与新项落位策略,纯显示层重排,不触碰真实文件。"""
+    key_to_entry = {canonical_key(entry.path): entry for entry in entries}
+    groups_for_tab = [
+        group for group in config.item_groups if group.tab_id == tab_id and group.member_paths
+    ]
+    anchor_to_group = {group.member_paths[0]: group for group in groups_for_tab}
+    grouped_member_keys = {
+        member_key
+        for group in groups_for_tab
+        for member_key in group.member_paths
+    }
+
+    def normalize_order_keys(keys: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen_anchors: set[str] = set()
+        for key in keys:
+            if key in anchor_to_group:
+                if key in seen_anchors:
+                    continue
+                seen_anchors.add(key)
+                normalized.append(key)
+            elif key in grouped_member_keys:
+                continue
+            else:
+                normalized.append(key)
+        return normalized
+
+    def expand_order_key(key: str) -> list[str]:
+        if key in anchor_to_group:
+            return [
+                member_key
+                for member_key in anchor_to_group[key].member_paths
+                if member_key in key_to_entry
+            ]
+        if key in key_to_entry:
+            return [key]
+        return []
+
+    order = normalize_order_keys(config.manual_orders.get(tab_id, []))
+    if not order:
+        return entries
+
+    ordered_entries: list[IndexedItem] = []
+    ordered_set: set[str] = set()
+    for key in order:
+        for member_key in expand_order_key(key):
+            if member_key in ordered_set:
+                continue
+            ordered_entries.append(key_to_entry[member_key])
+            ordered_set.add(member_key)
+
+    new_entries = [
+        entry
+        for entry in entries
+        if canonical_key(entry.path) not in ordered_set
+    ]
+    if not new_entries:
+        return ordered_entries
+    placement = config.new_item_placement
+    if placement == "resort_all":
+        return entries
+    if placement == "prepend_front":
+        return new_entries + ordered_entries
+    return ordered_entries + new_entries
+
+
+def group_blocks_for_tab(
+    config: Configuration,
+    entries: list[IndexedItem],
+    tab_id: str,
+) -> list[GroupBlock]:
+    """构建某标签的分组渲染区块,成员过滤为当前可见项,按组 order 排序。"""
+    key_to_entry = {canonical_key(entry.path): entry for entry in entries}
+    groups = sorted(
+        (group for group in config.item_groups if group.tab_id == tab_id),
+        key=lambda group: group.order,
+    )
+    blocks: list[GroupBlock] = []
+    for group in groups:
+        members = [
+            key_to_entry[key].path.resolve()
+            for key in group.member_paths
+            if key in key_to_entry
+        ]
+        if members:
+            blocks.append(GroupBlock(group_id=group.id, name=group.name, members=members))
+    return blocks
+
+
+def _restore_takeover_on_process_exit(takeover_service: DesktopTakeoverService) -> None:
+    """进程异常退出时尽量恢复 Explorer 桌面图标。"""
+    try:
+        takeover_service.restore_explorer_icons()
+        takeover_service.detach_panels()
+    except Exception:
+        pass
+
+
+_active_desktop_apps: weakref.WeakSet[DesktopCleanerApplication] = weakref.WeakSet()
+_focus_hook_installed = False
+_mouse_filter: _GlobalMouseFilter | None = None
+
+
+class _GlobalMouseFilter(QObject):
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget):
+            for app in list(_active_desktop_apps):
+                if not _app_can_manage_group_folders(app):
+                    _active_desktop_apps.discard(app)
+                    continue
+                app._on_global_mouse_press(watched)
+        return False
+
+
+def _dispatch_application_focus_changed(
+    old: QWidget | None, new: QWidget | None
+) -> None:
+    for app in list(_active_desktop_apps):
+        if not _app_can_manage_group_folders(app):
+            _active_desktop_apps.discard(app)
+            continue
+        app._on_application_focus_changed(old, new)
+
+
+def _app_can_manage_group_folders(app: DesktopCleanerApplication) -> bool:
+    if app._shutdown_started or not app._panels:
+        return False
+    try:
+        panel = next(iter(app._panels.values()))
+    except StopIteration:
+        return False
+    return isValid(panel)
 
 
 class DesktopCleanerApplication:
@@ -122,6 +303,13 @@ class DesktopCleanerApplication:
             apply_application_appearance_defaults(self.model.config)
         self.config = self.model.config
         self.takeover_service = takeover_service or DesktopTakeoverService()
+        self._takeover_marker = TakeoverSessionMarker(
+            self.store.path.parent / "takeover-session.marker"
+        )
+        atexit.register(_restore_takeover_on_process_exit, self.takeover_service)
+        install_abnormal_exit_handler(
+            lambda: self._emergency_restore_desktop_takeover()
+        )
         self.startup_service = startup_service or StartupService()
         self.tray = tray_controller or TrayController()
         self.activation_server = activation_server or ActivationServer()
@@ -136,9 +324,19 @@ class DesktopCleanerApplication:
         self.ui_preferences = self.ui_preferences_store.load()
         self._takeover_active = False
         self._shutdown_started = False
-        if DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
+        self._closing_group_from_focus = False
+        self._deferred_save_pending = False
+        self._deferred_save_timer = QTimer()
+        self._deferred_save_timer.setSingleShot(True)
+        self._deferred_save_timer.setInterval(450)
+        self._deferred_save_timer.timeout.connect(self._flush_deferred_save)
+        if recover_abandoned_takeover(self.takeover_service, self._takeover_marker):
+            self.model.config.desktop.restore_required = False
+            self.model.config.desktop.explorer_icons_hidden = False
             self.save()
-        self.index = DesktopIndex(Path(self.config.desktop.path))
+        elif DesktopRecoveryGuard(self.takeover_service).recover_if_needed(self.config):
+            self.save()
+        self.index = self._make_desktop_index(self.config.desktop.path)
         self._panels: dict[str, PanelGroupWidget] = {}
         for group in self.config.panel_groups:
             self._ensure_panel_widget(group.id)
@@ -157,14 +355,33 @@ class DesktopCleanerApplication:
         self.watcher = DesktopWatcher(self.index)
         self.watcher.changed.connect(self._on_desktop_changed)
         self._sync_panel_snap_targets()
+        _active_desktop_apps.add(self)
         application = QApplication.instance()
+        global _focus_hook_installed, _mouse_filter
         if application is not None:
             application.aboutToQuit.connect(self._on_about_to_quit)
+            if not _focus_hook_installed:
+                application.focusChanged.connect(_dispatch_application_focus_changed)
+                _focus_hook_installed = True
+            if _mouse_filter is None:
+                _mouse_filter = _GlobalMouseFilter(application)
+                application.installEventFilter(_mouse_filter)
         self._connect_tray()
         self.activation_server.activated.connect(self._show_panels_from_tray)
 
     def panel_widgets(self) -> list[PanelGroupWidget]:
         return list(self._panels.values())
+
+    def _make_desktop_index(self, desktop_path: str | Path) -> DesktopIndex:
+        primary = Path(desktop_path)
+        extras: list[Path] = []
+        try:
+            public = windows_public_desktop()
+        except Exception:
+            public = None
+        if public is not None and public.resolve() != primary.resolve():
+            extras.append(public)
+        return DesktopIndex(primary, extra_desktops=extras)
 
     def detach_tab_to_new_group(self, tab_id: str, geometry: PanelGeometry) -> None:
         new_group = self.model.detach_tab(tab_id, geometry)
@@ -206,6 +423,23 @@ class DesktopCleanerApplication:
         return True
 
     def save(self) -> None:
+        if hasattr(self, "_deferred_save_timer") and self._deferred_save_timer.isActive():
+            self._deferred_save_timer.stop()
+        self._deferred_save_pending = False
+        self.store.save(self.model.config)
+
+    def _schedule_deferred_save(self, delay_ms: int = 450) -> None:
+        if self._shutdown_started:
+            return
+        self._deferred_save_pending = True
+        self._deferred_save_timer.start(max(0, delay_ms))
+
+    def _flush_deferred_save(self) -> None:
+        if hasattr(self, "_deferred_save_timer") and self._deferred_save_timer.isActive():
+            self._deferred_save_timer.stop()
+        if not self._deferred_save_pending:
+            return
+        self._deferred_save_pending = False
         self.store.save(self.model.config)
 
     def save_with_history(self, reason: str, *, merge_key: str = "") -> None:
@@ -234,14 +468,139 @@ class DesktopCleanerApplication:
             return "layout-adjustment"
         return ""
 
+    def _emergency_restore_desktop_takeover(self) -> None:
+        try:
+            self.takeover_service.restore_explorer_icons()
+            self.takeover_service.detach_panels()
+            self._takeover_marker.clear()
+        except Exception:
+            pass
+
+    def _on_application_focus_changed(
+        self, _old: QWidget | None, new: QWidget | None
+    ) -> None:
+        if self._shutdown_started or self._closing_group_from_focus:
+            return
+        if new is not None and self._widget_belongs_to_app(new):
+            return
+        QTimer.singleShot(0, self._close_all_group_folders_safe)
+
+    def _on_global_mouse_press(self, widget: QWidget) -> None:
+        if self._shutdown_started or self._closing_group_from_focus:
+            return
+        if self._widget_is_inside_group_popup(widget):
+            return
+        clicked_grid = self._item_grid_for_widget(widget)
+        if clicked_grid is not None and self._group_id_for_widget(widget):
+            self._close_group_folders_except(clicked_grid)
+            return
+        self._close_all_group_folders_safe()
+
+    def _close_all_group_folders_safe(self) -> None:
+        if self._shutdown_started or self._closing_group_from_focus:
+            return
+        has_open = any(
+            panel.item_grid._open_group_id
+            for panel in self._panels.values()
+        )
+        if not has_open:
+            return
+        self._closing_group_from_focus = True
+        try:
+            self._close_all_group_folders()
+        finally:
+            self._closing_group_from_focus = False
+
+    def _close_group_folders_except(self, excluded_grid: ItemGridWidget) -> None:
+        if self._shutdown_started or self._closing_group_from_focus:
+            return
+        self._closing_group_from_focus = True
+        try:
+            for panel in self._panels.values():
+                if panel.item_grid is excluded_grid:
+                    continue
+                try:
+                    panel.item_grid.close_open_group_folder()
+                except RuntimeError:
+                    pass
+        finally:
+            self._closing_group_from_focus = False
+
+    def _widget_belongs_to_app(self, widget: QWidget) -> bool:
+        current: QWidget | None = widget
+        while current is not None:
+            for panel in self._panels.values():
+                if current is panel or current.window() is panel.window():
+                    return True
+            if self._settings_window is not None:
+                try:
+                    settings_valid = isValid(self._settings_window)
+                    if settings_valid and (
+                        current is self._settings_window
+                        or current.window() is self._settings_window.window()
+                    ):
+                        return True
+                    if not settings_valid:
+                        self._settings_window = None
+                except RuntimeError:
+                    self._settings_window = None
+            current = current.parentWidget()
+        return False
+
+    def _widget_is_inside_group_popup(self, widget: QWidget) -> bool:
+        current: QWidget | None = widget
+        while current is not None:
+            try:
+                if current.objectName() == "groupFolderPopupRoot":
+                    return True
+                current = current.parentWidget()
+            except RuntimeError:
+                return False
+        return False
+
+    def _item_grid_for_widget(self, widget: QWidget) -> ItemGridWidget | None:
+        current: QWidget | None = widget
+        while current is not None:
+            if isinstance(current, ItemGridWidget):
+                return current
+            try:
+                current = current.parentWidget()
+            except RuntimeError:
+                return None
+        return None
+
+    def _group_id_for_widget(self, widget: QWidget) -> str:
+        current: QWidget | None = widget
+        while current is not None:
+            try:
+                group_id = str(current.property("_group_id") or "")
+                if group_id:
+                    return group_id
+                current = current.parentWidget()
+            except RuntimeError:
+                return ""
+        return ""
+
+    def _close_all_group_folders(self) -> None:
+        for panel in self._panels.values():
+            try:
+                panel.item_grid.close_open_group_folder()
+            except RuntimeError:
+                pass
+
     def _on_about_to_quit(self) -> None:
         if self._shutdown_started:
             return
         self._shutdown_started = True
+        _active_desktop_apps.discard(self)
         for panel in self._panels.values():
             panel._persist_geometry_from_widget(update_rh=not panel.is_collapsed)
-        self._restore_desktop_takeover_if_needed()
-        self.save_with_history("merge-group")
+        self._flush_deferred_save()
+        restored = self._restore_desktop_takeover_if_needed()
+        self._takeover_marker.clear()
+        if not restored:
+            get_logger().warning("退出时恢复 Explorer 桌面图标失败,下次启动会继续尝试")
+        self.save_with_history("app-exit")
 
     def _connect_tray(self) -> None:
         self.tray.show_panels_requested.connect(self._show_panels_from_tray)
@@ -290,26 +649,43 @@ class DesktopCleanerApplication:
             application.quit()
 
     def handle_paths_dropped(self, paths: list[Path], tab_id: str) -> None:
-        self.model.add_paths_to_tab(paths, tab_id)
+        self.model.move_paths_to_tab(
+            paths,
+            tab_id,
+            desktop_roots=self.index.directories(),
+        )
         self.save()
         self.refresh()
 
     def refresh(self, _changes: IndexChanges | None = None) -> None:
+        issues = self.model.repair_metadata(desktop_roots=self.index.directories())
+        if issues:
+            get_logger().info("元数据修复: %s", "; ".join(issues))
+            self.save()
         for panel in self._panels.values():
-            active_tab_id = panel.active_tab_id
-            panel.item_grid.set_active_tab_id(active_tab_id)
-            tab = self.model.tab(active_tab_id)
-            if tab.content_kind != "items":
-                continue
-            entries = visible_entries_for_active_tab(
-                self.model.config,
-                self.index,
-                active_tab_id=active_tab_id,
-            )
-            panel.item_grid.set_entries(
-                entries,
-                restorable_paths=self._restorable_paths_for_tab(entries, active_tab_id),
-            )
+            self._refresh_panel_item_grid(panel)
+
+    def _refresh_panel_item_grid(self, panel: PanelGroupWidget) -> None:
+        active_tab_id = panel.active_tab_id
+        panel.item_grid.set_active_tab_id(active_tab_id)
+        tab = self.model.tab(active_tab_id)
+        panel.item_grid.set_reorder_enabled(tab.content_kind == "items")
+        if tab.content_kind != "items":
+            return
+        entries = visible_entries_for_active_tab(
+            self.model.config,
+            self.index,
+            active_tab_id=active_tab_id,
+        )
+        entries = arrange_entries_for_tab(self.model.config, entries, active_tab_id)
+        group_blocks = group_blocks_for_tab(
+            self.model.config, entries, active_tab_id
+        )
+        panel.item_grid.set_entries(
+            entries,
+            restorable_paths=self._restorable_paths_for_tab(entries, active_tab_id),
+            groups=group_blocks,
+        )
 
     def _ensure_panel_widget(self, group_id: str) -> PanelGroupWidget:
         existing = self._panels.get(group_id)
@@ -328,6 +704,8 @@ class DesktopCleanerApplication:
 
     def _connect_panel(self, panel: PanelGroupWidget) -> None:
         panel.changed.connect(self._on_panel_changed)
+        panel.active_tab_changed.connect(self._on_panel_active_tab_changed)
+        panel.state_changed.connect(self._on_panel_state_changed)
         panel.appearance_changed.connect(self._on_panel_appearance_changed)
         panel.geometry_changed.connect(self._on_panel_geometry_changed)
         panel.layout_gesture_started.connect(self._on_panel_layout_gesture_started)
@@ -336,9 +714,19 @@ class DesktopCleanerApplication:
         panel.item_grid.paths_dropped.connect(self._on_paths_dropped)
         panel.item_grid.restore_auto_requested.connect(self._on_restore_auto_requested)
         panel.item_grid.item_activated.connect(self._on_item_activated)
+        panel.item_grid.items_reordered.connect(self._on_items_reordered)
+        panel.item_grid.group_create_requested.connect(self._on_group_create_requested)
+        panel.item_grid.group_join_requested.connect(self._on_group_join_requested)
+        panel.item_grid.group_remove_requested.connect(self._on_group_remove_requested)
+        panel.item_grid.group_rename_requested.connect(self._on_group_rename_requested)
+        panel.item_grid.group_dissolve_requested.connect(self._on_group_dissolve_requested)
+        panel.item_grid.set_group_accent_color(self.ui_preferences.group_accent_color)
         panel.tab_detach_requested.connect(self._on_tab_detach_requested)
         panel.tab_reordered.connect(self._on_panel_tab_reordered)
+        panel.item_dropped_on_tab.connect(self._on_item_dropped_on_tab)
+        panel.item_drag_over_tab.connect(self._on_item_drag_over_tab)
         panel.group_merge_requested.connect(self._on_group_merge_requested)
+        panel.close_requested.connect(self._quit_from_tray)
 
     def _apply_panel_geometry(self, panel: PanelGroupWidget) -> None:
         panel._apply_geometry_from_model()
@@ -385,6 +773,16 @@ class DesktopCleanerApplication:
         self.save_with_history("panel-change")
         self.refresh()
 
+    def _on_panel_active_tab_changed(self, group_id: str, _tab_id: str) -> None:
+        panel = self._panels.get(group_id)
+        if panel is None:
+            return
+        self._refresh_panel_item_grid(panel)
+        self._schedule_deferred_save()
+
+    def _on_panel_state_changed(self, _group_id: str) -> None:
+        self._schedule_deferred_save()
+
     def _on_panel_geometry_changed(self) -> None:
         self.save_with_history("geometry-change")
 
@@ -394,6 +792,119 @@ class DesktopCleanerApplication:
     def _on_panel_tab_reordered(self, _group_id: str) -> None:
         self.save_with_history("tab-reorder")
         self.refresh()
+
+    def _on_items_reordered(self, tab_id: str, paths: object) -> None:
+        ordered = [Path(entry) for entry in paths]  # type: ignore[union-attr]
+        try:
+            self.model.reorder_tab_items(tab_id, ordered)
+        except (KeyError, ValueError):
+            return
+        # 仅持久化显示顺序;不进布局历史,避免历史被排序操作刷屏。
+        self.save()
+        self.refresh()
+
+    def _refresh_panels_for_tab(self, tab_id: str) -> None:
+        for panel in self._panels.values():
+            if panel.active_tab_id == tab_id:
+                self._refresh_panel_item_grid(panel)
+
+    def _item_group_tab_id(self, group_id: str) -> str:
+        for group in self.model.config.item_groups:
+            if group.id == group_id:
+                return group.tab_id
+        raise KeyError(group_id)
+
+    def _tabs_containing_group_members(self, paths: list[Path]) -> set[str]:
+        keys = {canonical_key(path) for path in paths}
+        if not keys:
+            return set()
+        return {
+            group.tab_id
+            for group in self.model.config.item_groups
+            if any(member in keys for member in group.member_paths)
+        }
+
+    def _on_group_create_requested(self, tab_id: str, paths: object) -> None:
+        members = [Path(entry) for entry in paths]  # type: ignore[union-attr]
+        suggested_name = members[0].stem if members else "新建分组"
+        try:
+            self.model.create_item_group(tab_id, members, name=suggested_name)
+        except (KeyError, ValueError) as exc:
+            get_logger().warning(
+                "图标分组创建失败: tab=%s count=%d error=%s",
+                tab_id,
+                len(members),
+                exc,
+            )
+            return
+        get_logger().info("图标分组创建: tab=%s count=%d", tab_id, len(members))
+        self.save()
+        self._refresh_panels_for_tab(tab_id)
+
+    def _on_group_join_requested(self, group_id: str, paths: object) -> None:
+        members = [Path(entry) for entry in paths]  # type: ignore[union-attr]
+        try:
+            tab_id = self._item_group_tab_id(group_id)
+            self.model.add_items_to_group(group_id, members)
+        except (KeyError, ValueError) as exc:
+            get_logger().warning(
+                "图标分组加入失败: group=%s count=%d error=%s",
+                group_id,
+                len(members),
+                exc,
+            )
+            return
+        get_logger().info(
+            "图标分组加入: group=%s tab=%s count=%d",
+            group_id,
+            tab_id,
+            len(members),
+        )
+        self.save()
+        self._refresh_panels_for_tab(tab_id)
+
+    def _on_group_remove_requested(self, paths: object) -> None:
+        members = [Path(entry) for entry in paths]  # type: ignore[union-attr]
+        affected_tabs = self._tabs_containing_group_members(members)
+        self.model.remove_items_from_group(members)
+        get_logger().info(
+            "图标分组移出: tabs=%s count=%d",
+            ",".join(sorted(affected_tabs)) or "-",
+            len(members),
+        )
+        self.save()
+        for tab_id in affected_tabs:
+            self._refresh_panels_for_tab(tab_id)
+
+    def _on_group_rename_requested(self, group_id: str, name: str) -> None:
+        try:
+            tab_id = self._item_group_tab_id(group_id)
+            self.model.rename_item_group(group_id, name)
+        except KeyError as exc:
+            get_logger().warning(
+                "图标分组重命名失败: group=%s error=%s",
+                group_id,
+                exc,
+            )
+            return
+        get_logger().info("图标分组重命名: group=%s tab=%s", group_id, tab_id)
+        self.save()
+        self._refresh_panels_for_tab(tab_id)
+
+    def _on_group_dissolve_requested(self, group_id: str) -> None:
+        try:
+            tab_id = self._item_group_tab_id(group_id)
+        except KeyError as exc:
+            get_logger().warning(
+                "图标分组解散失败: group=%s error=%s",
+                group_id,
+                exc,
+            )
+            return
+        self.model.dissolve_item_group(group_id)
+        get_logger().info("图标分组解散: group=%s tab=%s", group_id, tab_id)
+        self.save()
+        self._refresh_panels_for_tab(tab_id)
 
     def _on_panel_layout_gesture_started(self, group_id: str) -> None:
         panel = self._panels.get(group_id)
@@ -437,6 +948,36 @@ class DesktopCleanerApplication:
     def _on_paths_dropped(self, paths: object, tab_id: str) -> None:
         self.handle_paths_dropped(list(paths), tab_id)
 
+    def _on_item_dropped_on_tab(self, paths: object, tab_id: str) -> None:
+        tab = next(
+            (tab for tab in self.model.config.panel_tabs if tab.id == tab_id),
+            None,
+        )
+        if tab is None or tab.content_kind != "items":
+            return
+        if isinstance(paths, Path):
+            dropped = [paths]
+        else:
+            dropped = [Path(str(path)) for path in paths]
+        self.handle_paths_dropped(dropped, tab_id)
+
+    def _on_item_drag_over_tab(self, tab_id: str) -> None:
+        tab = next(
+            (tab for tab in self.model.config.panel_tabs if tab.id == tab_id),
+            None,
+        )
+        if tab is None or tab.content_kind != "items":
+            return
+        for panel in self._panels.values():
+            if tab_id not in panel.tab_button_ids():
+                continue
+            if panel.active_tab_id == tab_id:
+                self._refresh_panel_item_grid(panel)
+                return
+            panel.activate_tab(tab_id, notify=False)
+            self._refresh_panel_item_grid(panel)
+            return
+
     def _restorable_paths_for_tab(
         self,
         entries: list[IndexedItem],
@@ -467,7 +1008,13 @@ class DesktopCleanerApplication:
         self.refresh()
 
     def _on_organize_requested(self, _group_id: str) -> None:
-        self.model.organize_by_rules()
+        issues = self.model.organize_by_rules(desktop_roots=self.index.directories())
+        if issues:
+            get_logger().info("整理时修复: %s", "; ".join(issues))
+            preview = "; ".join(issues[:3])
+            if len(issues) > 3:
+                preview = f"{preview} 等 {len(issues)} 项"
+            self._notify_user("整理完成", f"已修复：{preview}")
         self.save()
         self.refresh()
 
@@ -545,6 +1092,9 @@ class DesktopCleanerApplication:
             self._settings_window.diagnostics_refresh_takeover_requested.connect(
                 self._on_diagnostics_refresh_takeover_requested
             )
+            self._settings_window.takeover_live_changed.connect(
+                self._on_settings_takeover_live_changed
+            )
             self._settings_window.diagnostics_open_logs_requested.connect(
                 self._on_diagnostics_open_logs_requested
             )
@@ -571,6 +1121,8 @@ class DesktopCleanerApplication:
         self._settings_window.set_history_snapshots(self.history_store.load())
         self._refresh_settings_diagnostics()
         self._refresh_settings_update_state()
+        if self._settings_window.windowState() & Qt.WindowState.WindowMinimized:
+            self._settings_window.showNormal()
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
@@ -583,7 +1135,7 @@ class DesktopCleanerApplication:
             except RuntimeError:
                 pass
             self.watcher.deleteLater()
-            self.index = DesktopIndex(new_desktop)
+            self.index = self._make_desktop_index(new_desktop)
             self.watcher = DesktopWatcher(self.index)
             self.watcher.changed.connect(self._on_desktop_changed)
         self._apply_startup_preference()
@@ -595,7 +1147,24 @@ class DesktopCleanerApplication:
         self.refresh()
 
     def _restore_desktop_from_settings(self) -> None:
-        self._restore_desktop_from_tray()
+        # 设置里的「恢复桌面图标」语义是:把图标找回来并让它留住,
+        # 因此关闭桌面接管,避免恢复后立刻又被重新接管隐藏。
+        # (托盘按钮保留「刷新接管」语义,见 _restore_desktop_from_tray。)
+        restored = self._restore_desktop_takeover_if_needed()
+        self.model.config.desktop.takeover_enabled = False
+        self._takeover_active = False
+        if restored:
+            self.model.config.desktop.restore_required = False
+            self.model.config.desktop.explorer_icons_hidden = False
+        else:
+            self.model.config.desktop.restore_required = True
+        self.save()
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(self.model.config)
+        if restored:
+            self._notify_user("桌面图标恢复", "已恢复 Explorer 桌面图标，并关闭桌面接管。")
+        else:
+            self._notify_user("桌面图标恢复", "恢复 Explorer 桌面图标失败，下次启动会继续尝试。")
 
     def _on_add_item_panel_requested(self) -> None:
         group = self.model.add_item_panel()
@@ -655,16 +1224,14 @@ class DesktopCleanerApplication:
         color: str,
         opacity: float,
     ) -> None:
+        # 颜色/透明度是全局外观：同时写入默认值和所有面板组,
+        # 并刷新所有面板 widget,避免出现"只有当前面板生效"的视觉不一致。
         self.model.config.appearance_defaults.background_color = color
         self.model.config.appearance_defaults.background_opacity = opacity
-        try:
-            group = self.model.group(group_id)
-        except KeyError:
-            return
-        group.appearance.background_color = color
-        group.appearance.background_opacity = opacity
-        panel = self._panels.get(group_id)
-        if panel is not None:
+        for group in self.model.config.panel_groups:
+            group.appearance.background_color = color
+            group.appearance.background_opacity = opacity
+        for panel in self._panels.values():
             panel.reload_from_model()
             panel.update()
 
@@ -732,6 +1299,12 @@ class DesktopCleanerApplication:
 
     def _save_ui_preferences(self) -> None:
         self.ui_preferences_store.save(self.ui_preferences)
+        self._apply_group_accent_preferences()
+
+    def _apply_group_accent_preferences(self) -> None:
+        accent = self.ui_preferences.group_accent_color
+        for panel in self._panels.values():
+            panel.item_grid.set_group_accent_color(accent)
 
     def _on_add_widget_panel_requested(self, widget_type: str) -> None:
         group = self.model.add_widget_panel(widget_type)
@@ -749,10 +1322,23 @@ class DesktopCleanerApplication:
         self.refresh()
 
     def _on_history_restore_requested(self, snapshot_id: str) -> None:
-        restored = self.history_store.restore(snapshot_id)
+        try:
+            restored = self.history_store.restore(snapshot_id)
+        except KeyError:
+            get_logger().warning("忽略未知布局快照: %s", snapshot_id)
+            if self._settings_window is not None:
+                self._settings_window.set_history_snapshots(self.history_store.load())
+            return
         self._replace_configuration(restored)
         self.save()
         self.refresh()
+        if self._settings_window is not None:
+            # 历史恢复重建了 self.model,设置窗口必须改指向新配置对象,
+            # 否则后续在设置里的编辑/保存会写到已废弃的旧配置。
+            self._settings_window.set_configuration(
+                self.model.config, group_id=self.panel.group_id
+            )
+            self._settings_window.set_history_snapshots(self.history_store.load())
 
     def _replace_configuration(self, config: Configuration) -> None:
         self.model = WorkspaceModel(config)
@@ -770,7 +1356,7 @@ class DesktopCleanerApplication:
             panel.hide()
             panel.deleteLater()
         self._panels.clear()
-        self.index = DesktopIndex(Path(self.config.desktop.path))
+        self.index = self._make_desktop_index(self.config.desktop.path)
         self.watcher = DesktopWatcher(self.index)
         self.watcher.changed.connect(self._on_desktop_changed)
         for group in self.config.panel_groups:
@@ -814,6 +1400,18 @@ class DesktopCleanerApplication:
         result = self.diagnostics_service.refresh_takeover_if_enabled()
         self._takeover_active = result.success
         self._show_diagnostics_result(result)
+
+    def _on_settings_takeover_live_changed(self, enabled: bool) -> None:
+        # 设置里勾选/取消「启用桌面接管」时立刻生效,无需点击保存。
+        self.model.config.desktop.takeover_enabled = bool(enabled)
+        self._apply_desktop_takeover_preference()
+        self.save()
+        if self._settings_window is not None:
+            self._settings_window.set_configuration(self.model.config)
+        if self.model.config.desktop.takeover_enabled and self._takeover_active:
+            self._notify_user("桌面接管", "已进入桌面层，Explorer 桌面图标已隐藏。")
+        elif not self.model.config.desktop.takeover_enabled:
+            self._notify_user("桌面接管", "已退出桌面接管，Explorer 桌面图标已恢复。")
 
     def _on_diagnostics_open_logs_requested(self) -> None:
         try:
@@ -1011,6 +1609,7 @@ class DesktopCleanerApplication:
             self._notify_user("开机启动设置失败", detail)
 
     def _apply_desktop_takeover_preference(self) -> None:
+        self._flush_deferred_save()
         if not self.model.config.desktop.takeover_enabled:
             self._restore_desktop_takeover_if_needed()
             return
@@ -1035,6 +1634,7 @@ class DesktopCleanerApplication:
             return
         self._takeover_active = True
         self.model.config.desktop.explorer_icons_hidden = True
+        self._takeover_marker.mark_active()
         self.save()
 
     def _disable_desktop_takeover_after_failure(self, *, restore: bool) -> None:
@@ -1043,6 +1643,7 @@ class DesktopCleanerApplication:
         else:
             restored = True
         self.takeover_service.detach_panels()
+        self._reassert_panel_desktop_layer()
         self._takeover_active = False
         self.model.config.desktop.takeover_enabled = False
         if restored:
@@ -1052,16 +1653,24 @@ class DesktopCleanerApplication:
             self.model.config.desktop.restore_required = True
         self.save()
 
+    def _reassert_panel_desktop_layer(self) -> None:
+        for panel in self._panels.values():
+            panel.reassert_desktop_layer()
+
     def _restore_desktop_takeover_if_needed(self) -> bool:
+        self._flush_deferred_save()
         if not (
             self._takeover_active
             or self.model.config.desktop.restore_required
             or self.model.config.desktop.explorer_icons_hidden
+            or self._takeover_marker.is_active()
         ):
             return True
         restored = self.takeover_service.restore_explorer_icons()
         self.takeover_service.detach_panels()
+        self._reassert_panel_desktop_layer()
         self._takeover_active = False
+        self._takeover_marker.clear()
         if restored:
             self.model.config.desktop.restore_required = False
             self.model.config.desktop.explorer_icons_hidden = False

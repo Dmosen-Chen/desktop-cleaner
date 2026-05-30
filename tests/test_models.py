@@ -9,6 +9,7 @@ from desktop_tidy.domain.models import (
     Configuration,
     DesktopIntegrationState,
     InvalidConfiguration,
+    ItemGroup,
     ItemRef,
     ManualOverride,
     PanelGeometry,
@@ -22,7 +23,7 @@ class ModelTests(unittest.TestCase):
     def test_default_configuration_has_required_group_tabs_appearance_and_rules(self) -> None:
         config = build_default_configuration(r"C:\Users\Example\Desktop")
 
-        self.assertEqual(config.schema_version, 4)
+        self.assertEqual(config.schema_version, 5)
         self.assertEqual(config.desktop.path, r"C:\Users\Example\Desktop")
         self.assertEqual(config.desktop.primary_screen_id, "primary")
         self.assertEqual(len(config.panel_groups), 1)
@@ -188,6 +189,39 @@ class ModelTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(InvalidConfiguration, "targets a widget tab"):
+            validate_configuration(config)
+
+    def test_schema_five_round_trip_preserves_orders_groups_and_placement(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.manual_orders["tab-images"] = [r"d:\desktop\a.png", r"d:\desktop\b.png"]
+        config.item_groups.append(
+            ItemGroup(id="g1", tab_id="tab-images", name="工作", order=0, member_paths=[r"d:\desktop\a.png"])
+        )
+        config.new_item_placement = "prepend_front"
+
+        restored = Configuration.from_dict(config.to_dict())
+
+        self.assertEqual(restored.manual_orders, config.manual_orders)
+        self.assertEqual(restored.new_item_placement, "prepend_front")
+        self.assertEqual(len(restored.item_groups), 1)
+        self.assertEqual(restored.item_groups[0].name, "工作")
+        self.assertEqual(restored.item_groups[0].member_paths, [r"d:\desktop\a.png"])
+        validate_configuration(restored)
+
+    def test_invalid_new_item_placement_is_rejected(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.new_item_placement = "sideways"
+
+        with self.assertRaisesRegex(InvalidConfiguration, "new_item_placement"):
+            validate_configuration(config)
+
+    def test_item_group_targeting_unknown_tab_is_rejected(self) -> None:
+        config = build_default_configuration(r"D:\Desktop")
+        config.item_groups.append(
+            ItemGroup(id="g1", tab_id="tab-missing", name="组", order=0, member_paths=[])
+        )
+
+        with self.assertRaisesRegex(InvalidConfiguration, "unknown item tab"):
             validate_configuration(config)
 
 
