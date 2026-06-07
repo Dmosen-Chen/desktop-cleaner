@@ -30,6 +30,7 @@ class ClockWidget(QWidget):
         self.setObjectName("ClockWidgetRoot")
         self.setMinimumSize(CLOCK_VISUAL.min_width, CLOCK_VISUAL.min_height)
         self.setMaximumSize(CLOCK_VISUAL.max_width, CLOCK_VISUAL.max_height)
+
         self._time_label = QLabel(self)
         self._date_label = QLabel(self)
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -40,12 +41,14 @@ class ClockWidget(QWidget):
         self._date_label.setStyleSheet(
             f"color: {CLOCK_VISUAL.secondary_foreground}; font-size: 15px;"
         )
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.addStretch(1)
         layout.addWidget(self._time_label)
         layout.addWidget(self._date_label)
         layout.addStretch(1)
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(1000)
@@ -66,7 +69,7 @@ class ClockWidgetPlugin:
         return WidgetDefinition(
             id=self.id,
             display_name=self.display_name,
-            description="显示本地时间和日期",
+            description="显示本地时间和日期。",
             preview_title="12:34",
             preview_body="2026-05-28",
             visual=CLOCK_VISUAL,

@@ -564,6 +564,64 @@ class WorkspaceModel:
         group.active_tab_id = tab.id
         return tab
 
+    def home_tab(self) -> PanelTab | None:
+        for tab in self.config.panel_tabs:
+            if tab.content_kind == "widget" and tab.widget_type == "home":
+                return tab
+        return None
+
+    def ensure_home_tab(self, group_id: str | None = None) -> PanelTab:
+        home_tabs = [
+            tab
+            for tab in self.config.panel_tabs
+            if tab.content_kind == "widget" and tab.widget_type == "home"
+        ]
+        primary = home_tabs[0] if home_tabs else None
+        for duplicate in home_tabs[1:]:
+            duplicate_group = self.group(duplicate.group_id)
+            duplicate_group.tab_ids = [
+                tab_id for tab_id in duplicate_group.tab_ids if tab_id != duplicate.id
+            ]
+            if duplicate_group.active_tab_id == duplicate.id:
+                duplicate_group.active_tab_id = (
+                    duplicate_group.tab_ids[0] if duplicate_group.tab_ids else ""
+                )
+            self.config.panel_tabs = [
+                tab for tab in self.config.panel_tabs if tab.id != duplicate.id
+            ]
+        self.config.panel_groups = [
+            group for group in self.config.panel_groups if group.tab_ids
+        ]
+        target_group = self.group(group_id) if group_id else self.ensure_minimum_default_group()
+
+        if primary is None:
+            existing_ids = {tab.id for tab in self.config.panel_tabs}
+            tab_id = "tab-home" if "tab-home" not in existing_ids else f"tab-home-{uuid.uuid4().hex}"
+            primary = PanelTab(
+                id=tab_id,
+                group_id=target_group.id,
+                name="主标签页",
+                order=0,
+                category_role="home",
+                content_kind="widget",
+                widget_type="home",
+                widget_settings={},
+            )
+            self.config.panel_tabs.append(primary)
+            target_group.tab_ids.insert(0, primary.id)
+        else:
+            target_group = self.group(primary.group_id)
+            target_group.tab_ids = [
+                tab_id for tab_id in target_group.tab_ids if tab_id != primary.id
+            ]
+            target_group.tab_ids.insert(0, primary.id)
+            primary.name = primary.name.strip() or "主标签页"
+            primary.category_role = primary.category_role or "home"
+
+        target_group.active_tab_id = primary.id
+        self._reindex_tabs()
+        return primary
+
     def add_widget_panel(
         self,
         widget_type: str,
@@ -627,6 +685,8 @@ class WorkspaceModel:
         return group
 
     def _default_widget_name(self, widget_type: str) -> str:
+        if widget_type == "home":
+            return "主标签页"
         if widget_type == "clock":
             return "时间"
         return widget_type or "功能"

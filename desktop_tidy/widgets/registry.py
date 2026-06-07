@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from desktop_tidy.widgets.clock import ClockWidgetPlugin
+from desktop_tidy.widgets.home import HomeWidgetPlugin
 from desktop_tidy.widgets.models import WidgetDefinition, WidgetPlugin, WidgetVisualPreset
 
 _UNKNOWN_VISUAL = WidgetVisualPreset(
@@ -27,7 +28,7 @@ class UnknownWidgetPlugin:
         return WidgetDefinition(
             id=self.id,
             display_name=self.display_name,
-            description="此功能面板当前不可用",
+            description="此功能面板当前不可用。",
             preview_title="未知",
             preview_body=self.id,
             visual=_UNKNOWN_VISUAL,
@@ -49,6 +50,7 @@ class UnknownWidgetPlugin:
 class BuiltinWidgetRegistry:
     def __init__(self) -> None:
         self._plugins: dict[str, WidgetPlugin] = {
+            HomeWidgetPlugin.id: HomeWidgetPlugin(),
             ClockWidgetPlugin.id: ClockWidgetPlugin(),
         }
 

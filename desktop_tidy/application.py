@@ -47,6 +47,7 @@ from desktop_tidy.services.logging_setup import (
 from desktop_tidy.services.screens import available_screen_geometries, available_screens
 from desktop_tidy.services.startup import StartupService
 from desktop_tidy.services.updates import DownloadResult, UpdateInfo, UpdateService
+from desktop_tidy.ui.app_icons import apply_application_icon
 from desktop_tidy.ui.item_grid import GroupBlock, ItemGridWidget
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
@@ -57,6 +58,30 @@ from desktop_tidy.version import APP_VERSION
 APP_DIR_NAME = "DesktopCleaner"
 APP_CONFIG_NAME = "config.json"
 APP_APPEARANCE_DEFAULTS = AppearanceSettings("#000000", 0.60)
+
+
+def resolve_startup_executable_path(
+    *,
+    frozen: bool | None = None,
+    executable: Path | None = None,
+    project_root: Path | None = None,
+) -> Path | None:
+    """Return the executable that should be registered for Windows startup.
+
+    In packaged mode the running executable is correct. In development mode,
+    registering ``main.py`` causes Windows to open the source file at login, so
+    only the built release executable is acceptable.
+    """
+
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    current_executable = executable or Path(sys.executable)
+    if is_frozen:
+        return current_executable.resolve()
+    root = project_root or Path(__file__).resolve().parents[1]
+    candidate = root / "dist" / "DesktopCleaner.exe"
+    if candidate.is_file():
+        return candidate.resolve()
+    return None
 
 
 def application_store() -> ConfigurationStore:
@@ -80,6 +105,7 @@ def ensure_application(argv: list[str] | None = None) -> QApplication:
     if application is None:
         application = QApplication(argv if argv is not None else sys.argv)
         install_global_exception_hook()
+    apply_application_icon(application)
     QApplication.setQuitOnLastWindowClosed(False)
     return application
 
@@ -301,6 +327,19 @@ class DesktopCleanerApplication:
             is_new_config = store is not None and not self.store.path.is_file()
         if is_new_config:
             apply_application_appearance_defaults(self.model.config)
+        existing_home = self.model.home_tab()
+        existing_home_group = self.model.group(existing_home.group_id) if existing_home else None
+        existing_home_active = existing_home_group.active_tab_id if existing_home_group else ""
+        existing_home_first = (
+            bool(existing_home_group and existing_home_group.tab_ids)
+            and existing_home_group.tab_ids[0] == existing_home.id
+        )
+        self._home_tab = self.model.ensure_home_tab()
+        self._home_startup_dirty = (
+            existing_home is None
+            or existing_home_active != self._home_tab.id
+            or not existing_home_first
+        )
         self.config = self.model.config
         self.takeover_service = takeover_service or DesktopTakeoverService()
         self._takeover_marker = TakeoverSessionMarker(
@@ -340,7 +379,7 @@ class DesktopCleanerApplication:
         self._panels: dict[str, PanelGroupWidget] = {}
         for group in self.config.panel_groups:
             self._ensure_panel_widget(group.id)
-        self.panel = self._panels[self.config.panel_groups[0].id]
+        self.panel = self._panels.get(self._home_tab.group_id) or self._panels[self.config.panel_groups[0].id]
         self._last_layout_history_fingerprint = self.history_store.fingerprint(
             self.model.config
         )
@@ -1579,6 +1618,9 @@ class DesktopCleanerApplication:
             panel.show()
         self._sync_panel_snap_targets()
         self.refresh()
+        if self._home_startup_dirty:
+            self._schedule_deferred_save()
+        self._apply_startup_preference()
         self._apply_desktop_takeover_preference()
         return self.panel
 
@@ -1592,15 +1634,19 @@ class DesktopCleanerApplication:
     def _panel_native_handles(self) -> list[int]:
         return [int(panel.winId()) for panel in self._panels.values()]
 
-    def _startup_executable_path(self) -> Path:
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve()
-        return Path(sys.argv[0]).resolve()
+    def _startup_executable_path(self) -> Path | None:
+        return resolve_startup_executable_path()
 
     def _apply_startup_preference(self) -> None:
+        startup_path = self._startup_executable_path()
+        if self.model.config.desktop.startup_enabled and startup_path is None:
+            detail = "开发模式下未找到 dist\\DesktopCleaner.exe，未写入开机启动项。"
+            log_exception("startup registration failed", RuntimeError(detail))
+            self._notify_user("开机启动设置失败", detail)
+            return
         result = self.startup_service.set_enabled(
             self.model.config.desktop.startup_enabled,
-            self._startup_executable_path(),
+            startup_path or Path(sys.executable).resolve(),
         )
         success = bool(getattr(result, "success", result))
         if not success and self.model.config.desktop.startup_enabled:

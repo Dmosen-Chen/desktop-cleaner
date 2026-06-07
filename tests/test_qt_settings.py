@@ -21,7 +21,7 @@ from desktop_tidy.persistence.ui_preferences import UiPreferences
 from desktop_tidy.services.screens import ScreenInfo
 from desktop_tidy.version import APP_VERSION
 from desktop_tidy.ui.panel_preview import PanelPreviewWidget
-from desktop_tidy.ui.settings_window import SettingsWindow
+from desktop_tidy.ui.settings_window import ScreenLayoutWidget, SettingsWindow
 from desktop_tidy.widgets.registry import BuiltinWidgetRegistry as ModularWidgetRegistry
 
 _SUPPORTED_SECTIONS = ["面板", "分类规则"]
@@ -96,6 +96,19 @@ class SettingsWindowTests(unittest.TestCase):
 
         self.assertEqual(config.panel_groups[0].screen_id, "screen-1")
         self.assertEqual(config.desktop.primary_screen_id, "screen-1")
+
+    def test_screen_layout_button_styles_are_valid_qss(self) -> None:
+        widget = ScreenLayoutWidget(
+            [
+                ScreenInfo("screen-1", "副屏 1", QRect(-1280, 120, 1280, 720)),
+                ScreenInfo("primary", "主屏", QRect(0, 0, 1920, 1080)),
+            ],
+            "primary",
+        )
+
+        for button in widget.buttons.values():
+            self.assertNotIn("}}QPushButton:hover", button.styleSheet())
+            self.assertIn("}QPushButton:hover", button.styleSheet())
 
     def test_visible_sections_match_supported_settings_surface(self) -> None:
         window = self._make_window()

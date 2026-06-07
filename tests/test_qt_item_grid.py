@@ -8,10 +8,18 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QContextMenuEvent, QMouseEvent, QWheelEvent
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QContextMenuEvent, QDropEvent, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QToolButton, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsOpacityEffect,
+    QLabel,
+    QLineEdit,
+    QToolButton,
+    QWidget,
+)
+from shiboken6 import delete, isValid
 
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.services.desktop_index import IndexedItem
@@ -205,6 +213,30 @@ class ItemGridWidgetTests(unittest.TestCase):
         widget.item_grid.set_entries([])
         self.assertTrue(widget.item_grid.shows_empty_state())
         self.assertTrue(widget.item_grid.empty_state_text().strip())
+
+    def test_drag_style_application_ignores_stale_deleted_cells(self) -> None:
+        widget = make_item_grid()
+        stale_path = Path(r"D:\Preview\Desktop\stale.pdf").resolve()
+        stale_cell = QWidget()
+        widget._cells_by_path[stale_path] = stale_cell
+        widget._dragging_paths = {stale_path}
+        delete(stale_cell)
+        self.assertFalse(isValid(stale_cell))
+
+        widget._apply_dragging_cell_styles(True)
+
+        self.assertNotIn(stale_path, widget._cells_by_path)
+
+    def test_drag_style_cleanup_ignores_stale_deleted_effect_cells(self) -> None:
+        widget = make_item_grid()
+        stale_cell = QWidget()
+        widget._drag_opacity_effects[stale_cell] = QGraphicsOpacityEffect(stale_cell)
+        delete(stale_cell)
+        self.assertFalse(isValid(stale_cell))
+
+        widget._apply_dragging_cell_styles(False)
+
+        self.assertEqual(widget._drag_opacity_effects, {})
 
     def test_item_grid_accepts_url_drops(self) -> None:
         widget = make_item_grid()
@@ -1303,6 +1335,452 @@ class ItemGroupRenderingTests(unittest.TestCase):
             self.assertEqual(group_id, "g1")
             self.assertEqual([Path(p) for p in members], [entries[0].path.resolve()])
 
+    def test_group_right_click_then_left_click_opens_folder(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            center = folder_cell.rect().center()
+            global_center = folder_cell.mapToGlobal(center)
+
+            widget.eventFilter(
+                folder_cell,
+                QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(center),
+                    QPointF(global_center),
+                    Qt.MouseButton.RightButton,
+                    Qt.MouseButton.RightButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            widget.eventFilter(
+                folder_cell,
+                QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    QPointF(center),
+                    QPointF(global_center),
+                    Qt.MouseButton.RightButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            widget._dismiss_context_menu()
+
+            widget.eventFilter(
+                folder_cell,
+                QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(center),
+                    QPointF(global_center),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            widget.eventFilter(
+                folder_cell,
+                QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    QPointF(center),
+                    QPointF(global_center),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "g1")
+            self.assertIsNone(widget._open_group_popup)
+            expansion = widget._scroll_area.viewport().findChild(
+                QWidget,
+                "inlineGroupExpansion",
+            )
+            self.assertIsNotNone(expansion)
+            self.assertTrue(expansion.isVisible())
+
+    def test_double_click_group_does_not_start_rename_or_delay_opening(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            QTest.mouseDClick(folder_cell, Qt.MouseButton.LeftButton, pos=folder_cell.rect().center())
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "g1")
+            editor = widget._folder_rename_editors_by_group_id.get("g1")
+            self.assertTrue(editor is None or not isValid(editor))
+
+    def test_single_click_group_opens_inline_expansion_immediately(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            center = folder_cell.rect().center()
+            global_center = folder_cell.mapToGlobal(center)
+            widget.eventFilter(
+                folder_cell,
+                QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(center),
+                    QPointF(global_center),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            widget.eventFilter(
+                folder_cell,
+                QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    QPointF(center),
+                    QPointF(global_center),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            self.app.processEvents()
+            self.assertEqual(widget._open_group_id, "g1")
+            expansion = widget._scroll_area.viewport().findChild(
+                QWidget,
+                "inlineGroupExpansion",
+            )
+            self.assertIsNotNone(expansion)
+            self.assertTrue(expansion.isVisible())
+
+    def test_single_click_group_opens_inline_expansion_without_top_level_widget(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            before = {
+                id(top_level)
+                for top_level in QApplication.topLevelWidgets()
+                if top_level.isVisible()
+            }
+            folder_cell = widget._cells_by_group_id["g1"]
+            QTest.mouseClick(
+                folder_cell,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                folder_cell.rect().center(),
+            )
+            self.app.processEvents()
+
+            after = {
+                id(top_level)
+                for top_level in QApplication.topLevelWidgets()
+                if top_level.isVisible()
+            }
+            expansion = widget._scroll_area.viewport().findChild(
+                QWidget,
+                "inlineGroupExpansion",
+            )
+            self.assertEqual(before, after)
+            self.assertIsNotNone(expansion)
+            self.assertEqual(widget._open_group_id, "g1")
+            self.assertIsNone(widget._open_group_popup)
+            self.assertIsNone(widget._group_backdrop)
+
+    def test_f2_renames_open_group_without_dialog(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            QTest.mouseClick(
+                folder_cell,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                folder_cell.rect().center(),
+            )
+            self.app.processEvents()
+            self.assertEqual(widget._open_group_id, "g1")
+
+            with patch("desktop_tidy.ui.item_grid.QInputDialog.getText") as dialog:
+                dialog.side_effect = AssertionError("F2 group rename should be inline")
+                QTest.keyClick(widget, Qt.Key.Key_F2)
+                self.app.processEvents()
+
+            editor = widget._folder_rename_editors_by_group_id.get("g1")
+            self.assertIsNotNone(editor)
+            assert editor is not None
+            self.assertTrue(isValid(editor))
+            self.assertTrue(editor.isVisible())
+
+    def test_reopening_same_group_reuses_expansion_without_rebuilding_unchanged_grid(
+        self,
+    ) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png", "c.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            widget._switch_group_folder("g1")
+            self.app.processEvents()
+            expansion = widget._inline_group_expansion
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+
+            widget._close_group_folder()
+            self.app.processEvents()
+
+            with patch.object(
+                expansion,
+                "_rebuild_member_grid",
+                wraps=expansion._rebuild_member_grid,
+            ) as rebuild:
+                widget._switch_group_folder("g1")
+                self.app.processEvents()
+
+            self.assertIs(widget._inline_group_expansion, expansion)
+            rebuild.assert_not_called()
+
+    def test_escape_closes_inline_group_expansion_immediately(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            widget._switch_group_folder("g1")
+            self.app.processEvents()
+            expansion = widget._inline_group_expansion
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+            self.assertTrue(expansion.isVisible())
+
+            QTest.keyClick(widget, Qt.Key.Key_Escape)
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "")
+            self.assertFalse(expansion.isVisible())
+
+    def test_clicking_blank_viewport_closes_inline_group_expansion(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            widget._switch_group_folder("g1")
+            self.app.processEvents()
+            self.assertEqual(widget._open_group_id, "g1")
+
+            viewport = widget._scroll_area.viewport()
+            QTest.mouseClick(
+                viewport,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                viewport.rect().bottomRight() - QPoint(8, 8),
+            )
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "")
+            expansion = viewport.findChild(QWidget, "inlineGroupExpansion")
+            self.assertTrue(expansion is None or not expansion.isVisible())
+
+    def test_blank_click_after_group_click_closes_inline_group_expansion(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            folder_cell = widget._cells_by_group_id["g1"]
+            QTest.mouseClick(
+                folder_cell,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                folder_cell.rect().center(),
+            )
+            self.app.processEvents()
+            self.assertEqual(widget._open_group_id, "g1")
+
+            viewport = widget._scroll_area.viewport()
+            QTest.mouseClick(
+                viewport,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                viewport.rect().bottomRight() - QPoint(8, 8),
+            )
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "")
+            expansion = viewport.findChild(QWidget, "inlineGroupExpansion")
+            self.assertTrue(expansion is None or not expansion.isVisible())
+
+    def test_drop_on_inline_group_expansion_joins_group(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock, ITEM_MIME_TYPE
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["outside.png", "inside-a.png", "inside-b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entries[1].path.resolve(), entries[2].path.resolve()],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+            widget._switch_group_folder("g1")
+            self.app.processEvents()
+            expansion = widget._scroll_area.viewport().findChild(
+                QWidget,
+                "inlineGroupExpansion",
+            )
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+
+            mime = QMimeData()
+            mime.setData(ITEM_MIME_TYPE, str(entries[0].path.resolve()).encode("utf-8"))
+            event = QDropEvent(
+                QPointF(expansion.rect().center()),
+                Qt.DropAction.CopyAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            spy = QSignalSpy(widget.group_join_requested)
+
+            expansion.dropEvent(event)
+
+            self.assertEqual(spy.count(), 1)
+            group_id, paths = spy.at(0)[0], spy.at(0)[1]
+            self.assertEqual(group_id, "g1")
+            self.assertEqual([Path(path) for path in paths], [entries[0].path.resolve()])
+
+    def test_group_drag_mime_marks_payload_as_group(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock, item_drag_group_id
+
+        widget = make_item_grid(active_tab_id="tab-documents")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [root / name for name in ("a.txt", "b.txt")]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[path.resolve() for path in paths],
+            )
+            widget.set_entries([IndexedItem(path) for path in paths], groups=[block])
+            widget._drag_from_folder_group_id = "g1"
+
+            drag = widget._build_item_drag(paths[0].resolve())
+            mime = drag.mimeData()
+
+            self.assertEqual(item_drag_group_id(mime), "g1")
+
     def test_dragging_folder_slot_reorders_without_dissolving_group(self) -> None:
         from desktop_tidy.ui.item_grid import GroupBlock
 
@@ -1467,7 +1945,7 @@ class ItemGroupRenderingTests(unittest.TestCase):
             self.assertLessEqual(popup.geometry().bottom(), host.rect().bottom() - 8)
             self.assertGreater(popup.height(), 72)
 
-    def test_double_click_folder_cell_requests_group_rename(self) -> None:
+    def test_double_click_folder_cell_does_not_request_group_rename(self) -> None:
         from desktop_tidy.ui.item_grid import GroupBlock
 
         widget = make_item_grid(active_tab_id="tab-images")
@@ -1498,7 +1976,8 @@ class ItemGroupRenderingTests(unittest.TestCase):
             )
             process_qt_events()
 
-            self.assertEqual(calls, [("g1", "游戏")])
+            self.assertEqual(calls, [])
+            self.assertEqual(widget._open_group_id, "g1")
 
     def test_group_context_menu_is_deduplicated_for_context_and_right_release(self) -> None:
         from desktop_tidy.ui.item_grid import GroupBlock

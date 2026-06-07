@@ -56,6 +56,7 @@ from desktop_tidy.domain.workspace import WorkspaceModel
 from desktop_tidy.persistence.ui_preferences import DEFAULT_GROUP_ACCENT_COLOR, UiPreferences
 from desktop_tidy.services.screens import ScreenInfo, available_screens
 from desktop_tidy.version import APP_VERSION
+from desktop_tidy.ui.app_icons import application_icon
 from desktop_tidy.ui.panel_preview import (
     PanelPreviewWidget,
     layout_preview_tab_names as shared_layout_preview_tab_names,
@@ -314,7 +315,10 @@ class SettingsTitleBar(QWidget):
         icon_label.setObjectName("SettingsTitleIcon")
         icon_label.setFixedSize(32, 32)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon).pixmap(18, 18))
+        icon = application_icon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        icon_label.setPixmap(icon.pixmap(18, 18))
         self.title_label = QLabel("设置", self)
         self.title_label.setObjectName("SettingsTitleText")
         layout.addWidget(icon_label)
@@ -465,7 +469,7 @@ class ScreenLayoutWidget(QWidget):
             background = "#934A69" if checked else "#2F2F2F"
             button.setStyleSheet(
                 f"QPushButton {{ color: #ffffff; background: {background}; "
-                "border: 1px solid #555; border-radius: 8px; font-size: 28px; }}"
+                "border: 1px solid #555; border-radius: 8px; font-size: 28px; }"
                 "QPushButton:hover { border-color: #d7b0c2; }"
             )
 

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DesktopCleaner v1.0.21 桌面控制台 UI 视觉稿</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080a0f;
+      --shell: rgba(14,17,23,.9);
+      --card: rgba(29,34,44,.94);
+      --card-soft: rgba(38,43,55,.82);
+      --line: rgba(255,255,255,.14);
+      --text: #f8fafc;
+      --muted: #a6b0c0;
+      --pink: #f2a7d2;
+      --cyan: #50d4df;
+      --amber: #d9bc76;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+      color: var(--text);
+      background:
+        linear-gradient(180deg, rgba(8,9,13,.14), rgba(8,9,13,.82)),
+        radial-gradient(circle at 18% 10%, rgba(242,167,210,.18), transparent 28%),
+        radial-gradient(circle at 82% 18%, rgba(80,212,223,.12), transparent 30%),
+        linear-gradient(180deg, #3c2336 0 18%, #8f526b 18% 38%, #382332 38% 64%, #101921 64% 100%);
+    }
+    button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+    .page { width: min(1500px, calc(100vw - 36px)); margin: 0 auto; padding: 24px 0 42px; }
+    .top { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 16px; }
+    h1, h2, h3, p { margin-top: 0; }
+    p { color: var(--muted); line-height: 1.65; }
+    .switch { display: flex; gap: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: rgba(8,10,15,.72); }
+    .switch button { padding: 9px 14px; border-radius: 10px; background: transparent; }
+    .switch button.active { background: rgba(242,167,210,.22); box-shadow: inset 0 0 0 1px rgba(242,167,210,.45); }
+    .stage { border: 1px solid rgba(255,255,255,.18); border-radius: 22px; background: rgba(8,10,15,.74); backdrop-filter: blur(16px); overflow: hidden; box-shadow: 0 24px 80px rgba(0,0,0,.42); }
+    .view { display: none; min-height: 800px; }
+    .view.active { display: block; }
+    .settings { display: grid; grid-template-columns: 230px 1fr; min-height: 800px; }
+    .nav { padding: 18px; border-right: 1px solid var(--line); background: rgba(18,21,28,.78); }
+    .titlebar { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border: 1px solid var(--line); border-radius: 16px; background: rgba(28,32,42,.92); margin-bottom: 16px; }
+    .win { display: flex; gap: 8px; }
+    .win span { width: 32px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: rgba(255,255,255,.08); }
+    .nav-item { display: flex; justify-content: space-between; padding: 12px 12px; border-radius: 12px; color: #dbe2ef; }
+    .nav-item.active { color: var(--text); background: rgba(242,167,210,.16); box-shadow: inset 4px 0 0 var(--pink); }
+    .content { padding: 18px; display: grid; grid-template-columns: 340px 1fr; gap: 16px; }
+    .card { border: 1px solid var(--line); border-radius: 18px; background: var(--card); padding: 16px; }
+    .list { display: grid; gap: 8px; }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-radius: 12px; background: rgba(255,255,255,.04); }
+    .row.active { color: var(--text); background: rgba(242,167,210,.16); box-shadow: inset 4px 0 0 var(--pink); }
+    .map { height: 280px; position: relative; border-radius: 16px; background: #0b0d11; overflow: hidden; border: 1px solid rgba(255,255,255,.08); }
+    .screen { position: absolute; border: 1px solid rgba(255,255,255,.28); border-radius: 16px; }
+    .screen.primary { left: 34%; top: 22%; width: 42%; height: 48%; }
+    .screen.secondary { left: 15%; top: 28%; width: 31%; height: 36%; opacity: .78; }
+    .mini-panel { position: absolute; border-radius: 12px; border: 2px solid var(--pink); background: rgba(0,0,0,.55); display: grid; place-items: center; font-weight: 700; }
+    .mini-panel.one { left: 58%; top: 31%; width: 18%; height: 18%; }
+    .mini-panel.two { left: 72%; top: 34%; width: 8%; height: 28%; }
+    .detail { margin-top: 12px; border: 1px solid rgba(242,167,210,.45); border-radius: 16px; padding: 14px; background: rgba(10,10,14,.62); }
+    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .tab { min-width: 72px; padding: 7px 12px; border-radius: 9px; text-align: center; background: rgba(255,255,255,.09); }
+    .tab.active { background: var(--pink); color: #1a1118; font-weight: 700; }
+    .appearance { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .swatch { width: 36px; height: 36px; border-radius: 10px; border: 2px solid rgba(255,255,255,.28); }
+    .home { padding: 28px; min-height: 800px; display: grid; grid-template-columns: 1.2fr .8fr; gap: 16px; }
+    .home-hero { display: grid; place-items: center; min-height: 520px; border-radius: 22px; background: rgba(10,9,13,.62); border: 1px solid var(--line); }
+    .clock { text-align: center; }
+    .clock strong { font-size: 74px; letter-spacing: 0; }
+    .module-grid { display: grid; gap: 14px; }
+    .module { padding: 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--card); }
+    .group-demo { position: relative; min-height: 800px; padding: 28px; }
+    .file-panel { height: 740px; border: 1px solid rgba(242,167,210,.42); border-radius: 22px; background: rgba(38,28,44,.72); }
+    .file-tabs { display: flex; gap: 28px; padding: 18px 24px; border-bottom: 1px solid var(--line); }
+    .file-tabs b { border-bottom: 3px solid var(--text); padding-bottom: 10px; }
+    .icons { display: grid; grid-template-columns: repeat(6, 112px); gap: 34px; padding: 34px; }
+    .icon { text-align: center; color: #f5f7fb; }
+    .glyph { width: 58px; height: 58px; margin: 0 auto 8px; border-radius: 13px; background: linear-gradient(135deg, #fff, #d8dde8); display: block; }
+    .expanded { position: absolute; left: 50%; top: 48%; transform: translate(-50%, -50%); width: min(620px, 62vw); padding: 22px; border: 1px solid rgba(242,167,210,.52); border-radius: 22px; background: rgba(56,25,43,.9); box-shadow: 0 28px 90px rgba(0,0,0,.38); }
+    .widgets { padding: 26px; display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 16px; }
+    .widget-preview { height: 150px; border-radius: 18px; display: grid; place-items: center; background: linear-gradient(135deg, #1b2030, #53334c); border: 1px solid rgba(242,167,210,.45); }
+    .token { display: flex; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="top">
+      <div>
+        <h1>DesktopCleaner 桌面控制台</h1>
+        <p>v1.0.21 统一视觉稿：设置中心、主标签页、分组页内展开和功能面板。</p>
+      </div>
+      <nav class="switch" aria-label="视觉稿页面">
+        <button class="active" data-view="settings">设置中心</button>
+        <button data-view="home">主标签页</button>
+        <button data-view="group">分组展开</button>
+        <button data-view="widgets">功能面板</button>
+      </nav>
+    </header>
+
+    <section class="stage">
+      <article id="settings" class="view active">
+        <div class="settings">
+          <aside class="nav">
+            <div class="titlebar"><strong>设置</strong><div class="win"><span>-</span><span>□</span><span>×</span></div></div>
+            <div class="nav-item active">面板 <small>2</small></div>
+            <div class="nav-item">分类规则 <small>7</small></div>
+            <div class="nav-item">面板历史 <small>10</small></div>
+            <div class="nav-item">功能面板 <small>3</small></div>
+            <div class="nav-item">诊断与恢复</div>
+            <div class="nav-item">其他</div>
+          </aside>
+          <div class="content">
+            <section class="card">
+              <h2>面板</h2>
+              <div class="list">
+                <div class="row active"><span>面板 1</span><b>7</b></div>
+                <div class="row"><span>面板 2</span><b>6</b></div>
+                <div class="row"><span>主标签页</span><b>1</b></div>
+              </div>
+            </section>
+            <section>
+              <div class="card">
+                <h2>位置：主屏</h2>
+                <div class="map">
+                  <div class="screen secondary"></div>
+                  <div class="screen primary"></div>
+                  <div class="mini-panel one">1</div>
+                  <div class="mini-panel two">2</div>
+                </div>
+                <div class="detail">
+                  <strong>面板 1</strong>
+                  <p>当前：文档。小地图只表达位置，标签细节放在这里。</p>
+                  <div class="tabs"><span class="tab active">文档</span><span class="tab">图片</span><span class="tab">应用</span><span class="tab">+4</span></div>
+                </div>
+                <div class="appearance">
+                  <span>背景颜色</span>
+                  <span class="swatch" style="background:#000"></span>
+                  <span class="swatch" style="background:#172033"></span>
+                  <span class="swatch" style="background:#51344a"></span>
+                  <span class="swatch" style="background:#2f6f76"></span>
+                  <span>透明度 60%</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article id="home" class="view">
+        <div class="home">
+          <section class="home-hero">
+            <div class="clock"><strong>23:05</strong><p>2026-06-07 Sunday</p></div>
+          </section>
+          <section class="module-grid">
+            <div class="module"><h3>最近使用</h3><p>显示最近打开的入口。</p></div>
+            <div class="module"><h3>日程提醒</h3><p>后续接日历或本地提醒。</p></div>
+            <div class="module"><h3>网络收藏</h3><p>收藏网页入口占位。</p></div>
+            <div class="module"><h3>天气 / 日历</h3><p>模块可替换、排序和隐藏。</p></div>
+          </section>
+        </div>
+      </article>
+
+      <article id="group" class="view">
+        <div class="group-demo">
+          <div class="file-panel">
+            <div class="file-tabs"><span>文件夹</span><b>文档</b><span>压缩包</span><span>图片</span></div>
+            <div class="icons">
+              <div class="icon"><span class="glyph"></span>Task01</div>
+              <div class="icon"><span class="glyph"></span>group</div>
+              <div class="icon"><span class="glyph"></span>hsbc</div>
+              <div class="icon"><span class="glyph"></span>翻译 2</div>
+              <div class="icon"><span class="glyph"></span>文献翻译</div>
+              <div class="icon"><span class="glyph"></span>大纲</div>
+            </div>
+            <section class="expanded">
+              <h2>翻译 2</h2>
+              <p>页内展开层，不再创建独立弹窗。单击展开，F2 或右键重命名，Esc 或空白点击关闭。</p>
+              <div class="icons" style="grid-template-columns:repeat(4,90px);padding:10px;gap:20px">
+                <div class="icon"><span class="glyph"></span>翻译 1</div>
+                <div class="icon"><span class="glyph"></span>翻译 2</div>
+                <div class="icon"><span class="glyph"></span>翻译 3</div>
+                <div class="icon"><span class="glyph"></span>翻译 4</div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </article>
+
+      <article id="widgets" class="view">
+        <div class="widgets">
+          <section class="card">
+            <h2>时间面板</h2>
+            <div class="widget-preview"><div style="text-align:center"><strong style="font-size:42px">23:05</strong><p>2026-06-07</p></div></div>
+            <p>使用 WidgetVisualPreset，推荐尺寸固定，适合作为独立功能面板。</p>
+          </section>
+          <section class="card">
+            <h2>WidgetVisualPreset</h2>
+            <div class="token"><b>accent_color</b><span>焦点、边框、主按钮色</span></div>
+            <div class="token"><b>background</b><span>实际功能面板背景</span></div>
+            <div class="token"><b>foreground</b><span>主文字色</span></div>
+            <div class="token"><b>card_background</b><span>设置页预览卡背景</span></div>
+            <div class="token"><b>size</b><span>推荐、最小、最大尺寸</span></div>
+          </section>
+          <section class="card"><h2>天气面板</h2><div class="widget-preview" style="background:linear-gradient(135deg,#13202a,#21464d)"><strong style="font-size:34px">22°</strong></div><p>后续插件只需注册 metadata。</p></section>
+          <section class="card"><h2>待办面板</h2><div class="widget-preview" style="background:linear-gradient(135deg,#181d2d,#46305b)"><strong style="font-size:34px">3 项</strong></div><p>和主标签页模块共享视觉语言，但生命周期不同。</p></section>
+        </div>
+      </article>
+    </section>
+  </main>
+  <script>
+    const buttons = [...document.querySelectorAll(".switch button")];
+    const views = [...document.querySelectorAll(".view")];
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        buttons.forEach((item) => item.classList.remove("active"));
+        views.forEach((view) => view.classList.remove("active"));
+        button.classList.add("active");
+        document.getElementById(button.dataset.view).classList.add("active");
+      });
+    });
+  </script>
+</body>
+</html>

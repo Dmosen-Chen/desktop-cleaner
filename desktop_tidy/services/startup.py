@@ -32,6 +32,8 @@ class StartupService:
     def set_enabled(self, enabled: bool, exe_path: Path) -> StartupResult:
         if self._platform != "win32":
             return StartupResult(False, "startup registration is unsupported on this platform")
+        if enabled and exe_path.suffix.lower() != ".exe":
+            return StartupResult(False, "startup executable must be a .exe file")
         registry = self._registry
         if registry is None:
             import winreg as registry  # type: ignore[no-redef]

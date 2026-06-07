@@ -20,6 +20,7 @@ from desktop_tidy.application import (
     DesktopCleanerApplication,
     application_store,
     arrange_entries_for_tab,
+    resolve_startup_executable_path,
     visible_entries_for_active_tab,
 )
 from desktop_tidy.domain.classification import classify_path
@@ -173,6 +174,27 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 app.store.path,
                 Path(tmp) / "DesktopCleaner" / "config.json",
             )
+
+    def test_startup_creates_and_activates_single_home_tab(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            app.show()
+            type(self).app.processEvents()
+
+            home_tabs = [
+                tab
+                for tab in app.model.config.panel_tabs
+                if tab.content_kind == "widget" and tab.widget_type == "home"
+            ]
+            self.assertEqual(len(home_tabs), 1)
+            home = home_tabs[0]
+            self.assertEqual(app.model.group(home.group_id).active_tab_id, home.id)
+            self.assertEqual(app.panel.active_tab_id, home.id)
+            self.assertFalse(app.panel.item_grid.isVisible())
 
     def test_update_check_and_download_are_exposed_through_settings(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -551,6 +573,43 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             enabled, exe_path = startup.calls[0]
             self.assertTrue(enabled)
             self.assertTrue(exe_path.is_absolute())
+
+    def test_development_startup_path_uses_packaged_exe_not_main_py(self) -> None:
+        with TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            packaged = project_root / "dist" / "DesktopCleaner.exe"
+            packaged.parent.mkdir()
+            packaged.write_bytes(b"exe")
+
+            resolved = resolve_startup_executable_path(
+                frozen=False,
+                executable=Path(r"D:\Python\python.exe"),
+                project_root=project_root,
+            )
+
+            self.assertEqual(resolved, packaged.resolve())
+
+    def test_show_reapplies_enabled_startup_preference(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            config = build_default_configuration(desktop)
+            config.desktop.startup_enabled = True
+            startup = FakeStartupService()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store, startup_service=startup)
+
+            packaged = Path(tmp) / "dist" / "DesktopCleaner.exe"
+            with patch(
+                "desktop_tidy.application.resolve_startup_executable_path",
+                return_value=packaged,
+            ):
+                app.show()
+
+            self.assertTrue(startup.calls)
+            enabled, exe_path = startup.calls[-1]
+            self.assertTrue(enabled)
+            self.assertEqual(exe_path.name, "DesktopCleaner.exe")
 
     def test_startup_registration_failure_keeps_user_checkbox_enabled(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1157,6 +1216,10 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             desktop.mkdir()
             app = DesktopCleanerApplication(build_default_configuration(desktop))
             app.show()
+            type(self).app.processEvents()
+
+            app.panel.activate_tab("tab-folders")
+            app.refresh()
             type(self).app.processEvents()
 
             app.panel.set_locked(True)
@@ -2126,7 +2189,9 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             type(self).app.processEvents()
 
             widget_tabs = [
-                tab for tab in app.model.config.panel_tabs if tab.content_kind == "widget"
+                tab
+                for tab in app.model.config.panel_tabs
+                if tab.content_kind == "widget" and tab.widget_type == "clock"
             ]
             self.assertEqual([tab.widget_type for tab in widget_tabs], ["clock"])
             widget_tab_ids = {tab.id for tab in widget_tabs}

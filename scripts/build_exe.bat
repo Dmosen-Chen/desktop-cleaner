@@ -15,7 +15,7 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 echo [4/4] Building one-file windowed executable...
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name DesktopCleaner --hidden-import=pythoncom --hidden-import=pywintypes --hidden-import=win32gui --hidden-import=win32con --hidden-import=win32com.shell main.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name DesktopCleaner --icon assets\icons\app.ico --add-data "assets\icons;assets\icons" --hidden-import=pythoncom --hidden-import=pywintypes --hidden-import=win32gui --hidden-import=win32con --hidden-import=win32com.shell main.py
 if errorlevel 1 exit /b 1
 
 echo.

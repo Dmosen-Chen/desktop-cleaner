@@ -400,6 +400,30 @@ class PanelGroupWidgetTests(unittest.TestCase):
         self.assertTrue(widget.inline_title_editor.isVisible())
         self.assertEqual(widget.findChildren(QDialog), [])
 
+    def test_inline_title_editor_overlays_tab_button_without_pushing_content_down(self) -> None:
+        widget, model = make_group_widget()
+        tab_id = model.group("group-default").active_tab_id
+        widget.resize(720, 420)
+        widget.show()
+        type(self).app.processEvents()
+        before_content_top = widget._content_host.geometry().top()
+        tab_button = widget._tab_buttons[tab_id]
+        tab_rect = QRect(tab_button.mapTo(widget, QPoint(0, 0)), tab_button.size())
+
+        widget.start_inline_title_edit(tab_id)
+        type(self).app.processEvents()
+
+        self.assertEqual(widget._content_host.geometry().top(), before_content_top)
+        self.assertTrue(widget.inline_title_editor.isVisible())
+        self.assertTrue(
+            tab_rect.adjusted(-2, -2, 2, 2).contains(widget.inline_title_editor.geometry().center()),
+            msg=(
+                "inline tab editor should sit on the tab button, not below the "
+                f"header/content area; editor={widget.inline_title_editor.geometry()} "
+                f"tab={tab_rect}"
+            ),
+        )
+
     def test_inline_title_edit_commits_metadata_only_rename(self) -> None:
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "desktop"

@@ -52,6 +52,18 @@ class StartupServiceTests(unittest.TestCase):
         self.assertEqual(registry.value_kind, registry.REG_SZ)
         self.assertEqual(len(registry.opened), 1)
 
+    def test_enable_rejects_non_executable_paths(self) -> None:
+        registry = FakeWinreg()
+        service = StartupService(platform_name="win32", registry=registry)
+
+        result = service.set_enabled(True, Path(r"D:\code\tool\main.py"))
+
+        self.assertFalse(result)
+        self.assertFalse(result.success)
+        self.assertIn(".exe", result.message)
+        self.assertEqual(registry.values, {})
+        self.assertEqual(registry.opened, [])
+
     def test_disable_removes_run_key_and_treats_missing_value_as_success(self) -> None:
         class MissingValueWinreg(FakeWinreg):
             def DeleteValue(self, _key, name: str) -> None:

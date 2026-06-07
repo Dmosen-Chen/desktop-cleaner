@@ -294,6 +294,16 @@ class PanelGroupWidget(QWidget):
 
         self.inline_title_editor = QLineEdit(self)
         self.inline_title_editor.hide()
+        self.inline_title_editor.setObjectName("inlineTabTitleEditor")
+        self.inline_title_editor.setStyleSheet(
+            "QLineEdit#inlineTabTitleEditor {"
+            "  color: #ffffff;"
+            "  background: rgba(18, 18, 22, 0.92);"
+            "  border: 1px solid rgba(255, 255, 255, 0.72);"
+            "  border-radius: 6px;"
+            "  padding: 2px 8px;"
+            "}"
+        )
         self.inline_title_editor.returnPressed.connect(self.commit_inline_title_edit)
         self.inline_title_editor.editingFinished.connect(self._on_inline_edit_finished)
 
@@ -315,7 +325,6 @@ class PanelGroupWidget(QWidget):
         self._layout.setContentsMargins(16, 14, 16, 16)
         self._layout.setSpacing(10)
         self._layout.addLayout(header_row)
-        self._layout.addWidget(self.inline_title_editor)
         self._layout.addWidget(self._content_host, stretch=1)
 
         self.add_button.clicked.connect(self._on_add_clicked)
@@ -618,9 +627,18 @@ class PanelGroupWidget(QWidget):
             return
         self._editing_tab_id = tab_id
         self.inline_title_editor.setText(tab.name)
+        self._position_inline_title_editor(tab_id)
         self.inline_title_editor.show()
+        self.inline_title_editor.raise_()
         self.inline_title_editor.setFocus()
         self.inline_title_editor.selectAll()
+
+    def _position_inline_title_editor(self, tab_id: str) -> None:
+        button = self._tab_buttons.get(tab_id)
+        if button is None:
+            return
+        tab_rect = QRect(button.mapTo(self, QPoint(0, 0)), button.size())
+        self.inline_title_editor.setGeometry(tab_rect.adjusted(0, 0, 0, 0))
 
     def commit_inline_title_edit(self) -> None:
         if not self._editing_tab_id:
@@ -752,7 +770,10 @@ class PanelGroupWidget(QWidget):
     def _apply_collapsed_state(self) -> None:
         show_content = not self._collapsed
         self._content_host.setVisible(show_content)
-        self.inline_title_editor.setVisible(show_content and self.inline_title_editor.isVisible())
+        if self._collapsed:
+            self.inline_title_editor.hide()
+        elif self._editing_tab_id and self.inline_title_editor.isVisible():
+            self._position_inline_title_editor(self._editing_tab_id)
         for button in self._tab_buttons.values():
             button.setVisible(True)
         if self._collapsed:
@@ -1566,6 +1587,8 @@ class PanelGroupWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
+        if self._editing_tab_id and self.inline_title_editor.isVisible():
+            self._position_inline_title_editor(self._editing_tab_id)
         if not self._resize_active and not self._header_drag_active:
             if not self._collapsed:
                 self._expanded_content_height = self.height()

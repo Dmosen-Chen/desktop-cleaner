@@ -138,6 +138,33 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(tab.group_id, group.id)
         validate_configuration(model.config)
 
+    def test_ensure_home_tab_creates_one_global_widget_tab_and_activates_it(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+
+        first = model.ensure_home_tab()
+        second = model.ensure_home_tab()
+
+        home_tabs = [
+            tab
+            for tab in model.config.panel_tabs
+            if tab.content_kind == "widget" and tab.widget_type == "home"
+        ]
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(len(home_tabs), 1)
+        self.assertEqual(first.name, "主标签页")
+        self.assertEqual(first.order, 0)
+        self.assertEqual(model.group(first.group_id).tab_ids[0], first.id)
+        self.assertEqual(model.group(first.group_id).active_tab_id, first.id)
+        validate_configuration(model.config)
+
+    def test_ensure_home_tab_does_not_make_classification_rules_target_widgets(self) -> None:
+        model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
+
+        home = model.ensure_home_tab()
+
+        self.assertNotIn(home.id, [rule.target_tab_id for rule in model.config.rules])
+        validate_configuration(model.config)
+
     def test_files_cannot_be_dropped_on_widget_tab(self) -> None:
         model = WorkspaceModel(build_default_configuration(r"D:\Desktop"))
         tab = model.add_widget_tab("group-default", "clock", name="时间")
@@ -495,6 +522,24 @@ class ItemGroupTests(unittest.TestCase):
                 [canonical_key(paths[2]), canonical_key(paths[1])],
             )
             validate_configuration(model.config)
+
+    def test_add_items_to_group_preserves_existing_group_anchor_position(self) -> None:
+        with TemporaryDirectory() as tmp:
+            model, paths = self._model_with_files(tmp)
+            group = model.create_item_group("tab-images", [paths[1], paths[2]])
+            model.config.manual_orders["tab-images"] = [
+                canonical_key(paths[0]),
+                canonical_key(paths[1]),
+                canonical_key(paths[2]),
+            ]
+
+            model.add_items_to_group(group.id, [paths[0]])
+
+            self.assertEqual(group.member_paths[0], canonical_key(paths[1]))
+            self.assertEqual(
+                model.config.manual_orders["tab-images"],
+                [canonical_key(paths[1])],
+            )
 
     def test_remove_item_prunes_emptied_group(self) -> None:
         with TemporaryDirectory() as tmp:

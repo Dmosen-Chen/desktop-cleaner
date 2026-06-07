@@ -5,7 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from desktop_tidy.widgets.models import WidgetDefinition, WidgetVisualPreset
 from desktop_tidy.widgets.registry import BuiltinWidgetRegistry as ModularWidgetRegistry
@@ -39,7 +39,6 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertIsNotNone(label)
         self.assertIn("未知功能面板", label.text())
         self.assertIn("missing-widget", label.text())
-
 
     def test_modular_registry_exposes_widget_definitions(self) -> None:
         registry = ModularWidgetRegistry()
@@ -81,6 +80,22 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertNotIn(definition.visual.background, widget.styleSheet())
         self.assertEqual(widget.minimumWidth(), definition.visual.min_width)
         self.assertEqual(widget.maximumWidth(), definition.visual.max_width)
+
+    def test_home_dashboard_plugin_is_registered_and_creates_modules(self) -> None:
+        registry = ModularWidgetRegistry()
+
+        plugin = registry.get("home")
+        definition = plugin.definition()
+        widget = plugin.create_widget(plugin.default_settings())
+
+        self.assertEqual(plugin.id, "home")
+        self.assertEqual(definition.display_name, "主标签页")
+        self.assertEqual(definition.visual.preset_id, "home-dashboard")
+        self.assertIsInstance(widget, QWidget)
+        self.assertEqual(widget.objectName(), "HomeDashboardWidgetRoot")
+        label_text = "\n".join(label.text() for label in widget.findChildren(QLabel))
+        for expected in ("时间", "最近使用", "日程提醒", "网络收藏", "日历", "天气"):
+            self.assertIn(expected, label_text)
 
 
 if __name__ == "__main__":

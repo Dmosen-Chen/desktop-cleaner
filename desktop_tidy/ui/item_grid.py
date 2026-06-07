@@ -34,6 +34,7 @@ from desktop_tidy.services.item_visuals import ItemVisualProvider
 from desktop_tidy.services.logging_setup import log_exception
 from desktop_tidy.services.shell_context_menu import ShellContextMenuService
 from desktop_tidy.ui.group_folder_popup import GroupFolderPopup
+from desktop_tidy.ui.inline_group_expansion import InlineGroupExpansionWidget
 from desktop_tidy.ui.item_grouping import DisplaySlot, GroupBlock, debug_drag
 
 _FOLDER_PREVIEW_STYLE = (
@@ -71,12 +72,22 @@ FallbackContextMenu = Callable[[Path, object], None]
 
 ITEM_MIME_TYPE = "application/x-desktop-tidy-item-path"
 ITEM_MIME_ORIGIN_TAB = "application/x-desktop-tidy-item-origin-tab"
+ITEM_MIME_GROUP_ID = "application/x-desktop-tidy-item-group-id"
 
 
 def item_drag_origin_tab(mime) -> str:  # type: ignore[no-untyped-def]
     if mime.hasFormat(ITEM_MIME_ORIGIN_TAB):
         try:
             return bytes(mime.data(ITEM_MIME_ORIGIN_TAB)).decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    return ""
+
+
+def item_drag_group_id(mime) -> str:  # type: ignore[no-untyped-def]
+    if mime.hasFormat(ITEM_MIME_GROUP_ID):
+        try:
+            return bytes(mime.data(ITEM_MIME_GROUP_ID)).decode("utf-8")
         except UnicodeDecodeError:
             return ""
     return ""
@@ -152,12 +163,17 @@ class ItemGridWidget(QWidget):
         self._folder_rename_editors_by_group_id: dict[str, QLineEdit] = {}
         self._open_group_popup: GroupFolderPopup | None = None
         self._group_backdrop: _GroupPopupBackdrop | None = None
+        self._inline_group_expansion: InlineGroupExpansionWidget | None = None
         self._open_group_id = ""
         self._folder_hover_id = ""
         self._folder_drop_target_id = ""
         self._folder_press_group_id = ""
         self._folder_drag_started = False
         self._suppress_folder_click = False
+        self._pending_group_open_id = ""
+        self._pending_group_open_timer = QTimer(self)
+        self._pending_group_open_timer.setSingleShot(True)
+        self._pending_group_open_timer.timeout.connect(self._open_pending_group_folder)
         self._folder_keep_open_until = 0.0
         self._drag_from_folder_group_id = ""
         self._dragging_paths: set[Path] = set()
@@ -190,6 +206,7 @@ class ItemGridWidget(QWidget):
         else:
             self._fallback_context_menu = lambda _path, _global_pos: None
         self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(self.backgroundRole(), Qt.GlobalColor.transparent)
@@ -267,12 +284,14 @@ class ItemGridWidget(QWidget):
         return self._active_tab_id
 
     def set_active_tab_id(self, tab_id: str) -> None:
+        if tab_id != self._active_tab_id:
+            self._close_group_folder(immediate=True)
         self._active_tab_id = tab_id
 
     def set_group_accent_color(self, accent_color: str) -> None:
         self._group_accent_color = accent_color.upper()
-        if self._open_group_popup is not None:
-            self._open_group_popup.set_accent_color(self._group_accent_color)
+        if self._inline_group_expansion is not None:
+            self._inline_group_expansion.set_accent_color(self._group_accent_color)
 
     def set_reorder_enabled(self, enabled: bool) -> None:
         self._reorder_enabled = bool(enabled)
@@ -427,35 +446,21 @@ class ItemGridWidget(QWidget):
     ) -> None:
         """用 Qt 原生 QDrag 发起标签内拖动(可靠地走系统拖放管线)。"""
         folder_drag_id = self._drag_from_folder_group_id
-        if folder_drag_id:
-            block = self._group_block(folder_drag_id)
-            drag_paths = [block.members[0]] if block and block.members else [source_path]
-        else:
-            drag_paths = self._drag_paths_for(source_path)
-        self._close_group_folder()
+        drag_paths = self._drag_paths_for_source(
+            source_path,
+            folder_drag_id=folder_drag_id,
+        )
+        self._close_group_folder(immediate=True)
         self._reset_drag_state()
         self._drag_from_folder_group_id = folder_drag_id
         self._item_drag_origin_tab_id = self._active_tab_id
         self._dragging_paths = {path.resolve() for path in drag_paths}
         self._apply_dragging_cell_styles(True)
-        drag = QDrag(self)
-        mime = QMimeData()
-        payload = "\n".join(str(path) for path in drag_paths).encode("utf-8")
-        mime.setData(ITEM_MIME_TYPE, payload)
-        mime.setData(ITEM_MIME_ORIGIN_TAB, self._active_tab_id.encode("utf-8"))
-        drag.setMimeData(mime)
-        cell = ghost_widget or self._cells_by_path.get(source_path.resolve())
-        if cell is None and folder_drag_id:
-            cell = self._cells_by_group_id.get(folder_drag_id)
-        if cell is None:
-            for group_id, folder_cell in self._cells_by_group_id.items():
-                block = self._group_block(group_id)
-                if block is not None and block.members and block.members[0] == source_path.resolve():
-                    cell = folder_cell
-                    break
-        ghost = self._make_drag_ghost_pixmap(drag_paths, cell)
-        drag.setPixmap(ghost)
-        drag.setHotSpot(QPoint(ghost.width() // 2, ghost.height() // 2))
+        drag = self._build_item_drag(
+            source_path,
+            drag_paths=drag_paths,
+            ghost_widget=ghost_widget,
+        )
         _drag_dbg(
             "start_item_drag",
             ",".join(path.name for path in drag_paths),
@@ -469,9 +474,61 @@ class ItemGridWidget(QWidget):
         self._drag_from_folder_group_id = ""
         self._item_drag_origin_tab_id = ""
 
+    def _drag_paths_for_source(
+        self,
+        source_path: Path,
+        *,
+        folder_drag_id: str = "",
+    ) -> list[Path]:
+        if folder_drag_id:
+            block = self._group_block(folder_drag_id)
+            return [block.members[0]] if block and block.members else [source_path.resolve()]
+        return self._drag_paths_for(source_path)
+
+    def _build_item_drag(
+        self,
+        source_path: Path,
+        *,
+        drag_paths: list[Path] | None = None,
+        ghost_widget: QWidget | None = None,
+    ) -> QDrag:
+        folder_drag_id = self._drag_from_folder_group_id
+        resolved_source = source_path.resolve()
+        paths = drag_paths or self._drag_paths_for_source(
+            resolved_source,
+            folder_drag_id=folder_drag_id,
+        )
+        paths = [path.resolve() for path in paths]
+        drag = QDrag(self)
+        mime = QMimeData()
+        payload = "\n".join(str(path) for path in paths).encode("utf-8")
+        mime.setData(ITEM_MIME_TYPE, payload)
+        mime.setData(
+            ITEM_MIME_ORIGIN_TAB,
+            (self._item_drag_origin_tab_id or self._active_tab_id).encode("utf-8"),
+        )
+        if folder_drag_id:
+            mime.setData(ITEM_MIME_GROUP_ID, folder_drag_id.encode("utf-8"))
+        drag.setMimeData(mime)
+        cell = ghost_widget or self._cells_by_path.get(resolved_source)
+        if cell is None and folder_drag_id:
+            cell = self._cells_by_group_id.get(folder_drag_id)
+        if cell is None:
+            for group_id, folder_cell in self._cells_by_group_id.items():
+                block = self._group_block(group_id)
+                if block is not None and block.members and block.members[0] == resolved_source:
+                    cell = folder_cell
+                    break
+        ghost = self._make_drag_ghost_pixmap(paths, cell)
+        drag.setPixmap(ghost)
+        drag.setHotSpot(QPoint(ghost.width() // 2, ghost.height() // 2))
+        return drag
+
     def _make_drag_ghost_pixmap(
         self, paths: list[Path], cell: QWidget | None
     ) -> QPixmap:
+        if cell is not None and not isValid(cell):
+            cell = None
         width = cell.width() if cell is not None and cell.width() > 0 else self._cell_width()
         height = cell.height() if cell is not None and cell.height() > 0 else self._cell_icon_size() + 48
         if len(paths) > 1:
@@ -521,19 +578,26 @@ class ItemGridWidget(QWidget):
     def _apply_dragging_cell_styles(self, dragging: bool) -> None:
         if not dragging:
             for cell, effect in list(self._drag_opacity_effects.items()):
-                cell.setGraphicsEffect(None)
+                if isValid(cell):
+                    cell.setGraphicsEffect(None)
             self._drag_opacity_effects.clear()
             self._dragging_paths.clear()
             return
-        for path in self._dragging_paths:
+        for path in list(self._dragging_paths):
             cell = self._cells_by_path.get(path)
             if cell is None:
+                continue
+            if not isValid(cell):
+                self._cells_by_path.pop(path, None)
                 continue
             effect = QGraphicsOpacityEffect(cell)
             effect.setOpacity(0.38)
             cell.setGraphicsEffect(effect)
             self._drag_opacity_effects[cell] = effect
-        for group_id, cell in self._cells_by_group_id.items():
+        for group_id, cell in list(self._cells_by_group_id.items()):
+            if not isValid(cell):
+                self._cells_by_group_id.pop(group_id, None)
+                continue
             block = self._group_block(group_id)
             if block is None or not block.members:
                 continue
@@ -576,6 +640,25 @@ class ItemGridWidget(QWidget):
         self._drop_ghost.show()
         self._drop_ghost.raise_()
 
+    def _cancel_pending_group_open(self) -> None:
+        self._pending_group_open_id = ""
+        self._pending_group_open_timer.stop()
+
+    def _schedule_group_folder_open(self, group_id: str) -> None:
+        if not group_id:
+            return
+        self._cancel_pending_group_open()
+        self._switch_group_folder(group_id)
+
+    def _open_pending_group_folder(self) -> None:
+        group_id = self._pending_group_open_id
+        self._pending_group_open_id = ""
+        if not group_id:
+            return
+        if group_id not in self._cells_by_group_id:
+            return
+        self._switch_group_folder(group_id)
+
     def _activate_folder_on_press(self, group_id: str) -> None:
         self._switch_group_folder(group_id)
 
@@ -586,6 +669,7 @@ class ItemGridWidget(QWidget):
         *,
         origin_tab: str | None = None,
         drag_paths: list[Path] | None = None,
+        drag_group_id: str | None = None,
     ) -> None:
         if source is None or not self._reorder_enabled:
             return
@@ -620,7 +704,7 @@ class ItemGridWidget(QWidget):
             self.paths_dropped.emit(paths, self._active_tab_id)
             return
         # 同标签多选拖动: 排序/建组/加入组均携带完整选区。
-        folder_drag_id = self._drag_from_folder_group_id
+        folder_drag_id = drag_group_id or self._drag_from_folder_group_id
         if folder_drag_id:
             block = self._group_block(folder_drag_id)
             anchor = block.members[0] if block and block.members else source
@@ -686,34 +770,17 @@ class ItemGridWidget(QWidget):
                 child.deleteLater()
 
     def _reposition_open_group_popup(self) -> None:
-        if self._open_group_popup is None or not self._open_group_id:
+        if self._inline_group_expansion is None or not self._open_group_id:
             return
-        folder_cell = self._cells_by_group_id.get(self._open_group_id)
-        if folder_cell is None:
-            return
-        host = self._scroll_area.viewport()
-        self._open_group_popup.reposition_from(
-            folder_cell,
-            host,
-            host_width=host.rect().width(),
-        )
+        self._inline_group_expansion.reposition_in(self._scroll_area.viewport())
 
     def _schedule_reposition_open_group_popup(self, _value: int = 0) -> None:
-        if self._open_group_popup is None:
+        if self._inline_group_expansion is None:
             return
         self._group_reposition_timer.start()
 
     def _show_group_backdrop(self) -> None:
-        self._cleanup_orphan_group_popups()
-        viewport = self._scroll_area.viewport()
-        if self._group_backdrop is None:
-            self._group_backdrop = _GroupPopupBackdrop(self, viewport)
-        self._group_backdrop.setGeometry(viewport.rect())
-        self._group_backdrop.show()
-        self._grid_host.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._group_backdrop.raise_()
-        if self._open_group_popup is not None:
-            self._open_group_popup.raise_()
+        self._hide_group_backdrop()
 
     def _hide_group_backdrop(self) -> None:
         self._grid_host.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
@@ -744,11 +811,18 @@ class ItemGridWidget(QWidget):
         self._hide_group_backdrop()
 
     def close_open_group_folder(self) -> None:
-        self._close_group_folder()
+        self._close_group_folder(immediate=True)
 
-    def _close_group_folder(self) -> None:
+    def _close_group_folder(self, *, immediate: bool = True) -> None:
+        self._cancel_pending_group_open()
         closed_group_id = self._open_group_id
         self._open_group_id = ""
+        expansion = self._inline_group_expansion
+        if expansion is not None:
+            if immediate:
+                expansion.hide_immediately()
+            else:
+                expansion.hide_animated()
         self._purge_stale_group_popups()
         if closed_group_id:
             self._update_folder_cell_style(closed_group_id)
@@ -766,23 +840,19 @@ class ItemGridWidget(QWidget):
                     self._apply_all_selection_styles()
 
     def _switch_group_folder(self, group_id: str) -> None:
+        self._cancel_pending_group_open()
         self._folder_keep_open_until = 0.0
         self._cleanup_orphan_group_popups()
         folder_cell = self._cells_by_group_id.get(group_id)
         if folder_cell is None:
             self._close_group_folder()
             return
-        popup = self._open_group_popup
-        if popup is not None and not popup.isVisible():
-            self._open_group_popup = None
-            self._open_group_id = ""
-            popup = None
         if (
             self._open_group_id == group_id
-            and popup is not None
-            and popup.isVisible()
+            and self._inline_group_expansion is not None
+            and self._inline_group_expansion.isVisible()
         ):
-            self._close_group_folder()
+            self._close_group_folder(immediate=False)
             return
         block = self._group_block(group_id)
         if block is None or not block.members:
@@ -792,84 +862,49 @@ class ItemGridWidget(QWidget):
             )
             self._close_group_folder()
             return
-        host = self._scroll_area.viewport()
-        host_width = host.rect().width()
-        if self._open_group_popup is not None:
-            previous = self._open_group_id
-            self._open_group_id = group_id
-            if previous:
-                self._update_folder_cell_style(previous)
-            self._update_folder_cell_style(group_id)
+        previous = self._open_group_id
+        self._open_group_id = group_id
+        if previous and previous != group_id:
+            self._update_folder_cell_style(previous)
+        self._update_folder_cell_style(group_id)
+        if self._inline_group_expansion is None:
             try:
-                self._open_group_popup.update_group(
+                expansion = InlineGroupExpansionWidget(
                     group_id=group_id,
                     name=block.name,
                     members=block.members,
                     icon_size=self._cell_icon_size(),
                     accent_color=self._group_accent_color,
-                    host_width=host_width,
+                    parent=self._scroll_area.viewport(),
+                    visuals=self._visuals,
                 )
             except Exception as exc:
-                from desktop_tidy.services.logging_setup import log_exception
-
-                log_exception(f"update group folder {group_id}", exc)
+                log_exception(f"open inline group {group_id}", exc)
                 self._open_group_id = previous or ""
-                self._purge_stale_group_popups()
-                self._open_group_folder(group_id, folder_cell)
+                if previous:
+                    self._update_folder_cell_style(previous)
                 return
-            self._open_group_popup.reposition_from(
-                folder_cell,
-                host,
-                host_width=host_width,
-            )
-            self._show_group_backdrop()
-            self._open_group_popup.raise_()
-            return
-        self._open_group_folder(group_id, folder_cell)
-
-    def _open_group_folder(self, group_id: str, anchor_widget: QWidget) -> None:
-        block = self._group_block(group_id)
-        if block is None or not block.members:
-            return
-        host = self._scroll_area.viewport()
-        self._purge_stale_group_popups(host)
-        try:
-            popup = GroupFolderPopup(
+            expansion.set_drag_host(self)
+            expansion.item_activated.connect(self.item_activated.emit)
+            expansion.rename_requested.connect(self._prompt_rename_group)
+            expansion.dissolve_requested.connect(self.group_dissolve_requested.emit)
+            expansion.members_dropped.connect(self.group_join_requested.emit)
+            self._inline_group_expansion = expansion
+        else:
+            self._inline_group_expansion.update_group(
                 group_id=group_id,
                 name=block.name,
                 members=block.members,
                 icon_size=self._cell_icon_size(),
                 accent_color=self._group_accent_color,
-                parent=host,
-                visuals=self._visuals,
             )
-        except Exception as exc:
-            log_exception(f"open group folder {group_id}", exc)
-            return
-        popup.set_drag_host(self)
-        popup.item_activated.connect(self.item_activated.emit)
-        popup.rename_requested.connect(self._prompt_rename_group)
-        popup.dissolve_requested.connect(self.group_dissolve_requested.emit)
-        popup.destroyed.connect(self._on_group_popup_destroyed)
-        self._open_group_popup = popup
-        self._open_group_id = group_id
-        self._update_folder_cell_style(group_id)
-        self._show_group_backdrop()
-        preview = anchor_widget.property("_folder_preview")
-        preview_widget = preview if isinstance(preview, QWidget) else None
-        if preview_widget is not None:
-            preview_widget.setStyleSheet(_FOLDER_PREVIEW_OPENING_STYLE)
-            QTimer.singleShot(
-                40,
-                lambda widget=preview_widget: widget.setStyleSheet(_FOLDER_PREVIEW_STYLE),
-            )
-        popup.show_expanded_from(
-            anchor_widget,
-            preview_widget=preview_widget,
-            position_host=host,
-            animate=False,
-        )
-        popup.raise_()
+        self._inline_group_expansion.show_animated(self._scroll_area.viewport())
+        self._open_group_popup = None
+        self._group_backdrop = None
+
+    def _open_group_folder(self, group_id: str, anchor_widget: QWidget) -> None:
+        del anchor_widget
+        self._switch_group_folder(group_id)
 
     def _on_group_popup_destroyed(self, *_args: object) -> None:
         sender = self.sender()
@@ -1038,6 +1073,7 @@ class ItemGridWidget(QWidget):
                 host_point,
                 origin_tab=origin_tab or None,
                 drag_paths=drag_paths,
+                drag_group_id=item_drag_group_id(md) or None,
             )
             event.acceptProposedAction()
             return
@@ -1203,6 +1239,7 @@ class ItemGridWidget(QWidget):
         self._grid_host.updateGeometry()
 
     def _rebuild_cells(self) -> None:
+        self._cancel_pending_group_open()
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item is None:
@@ -1666,6 +1703,17 @@ class ItemGridWidget(QWidget):
     def eventFilter(self, watched, event) -> bool:  # type: ignore[no-untyped-def]
         if event.type() == event.Type.Wheel and self._handle_zoom_wheel_event(event):
             return True
+        if (
+            watched is self._scroll_area.viewport()
+            and event.type() == event.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            expansion = self._inline_group_expansion
+            if expansion is None or not expansion.isVisible():
+                self._cancel_pending_group_open()
+            elif not expansion.geometry().contains(event.position().toPoint()):
+                self._close_group_folder(immediate=True)
+                return False
         path = watched.property("_item_path")
         group_id = str(watched.property("_group_id") or "")
         if group_id and event.type() in (event.Type.Enter, event.Type.Leave):
@@ -1773,11 +1821,13 @@ class ItemGridWidget(QWidget):
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._dismiss_context_menu()
                     resolved = resolved_path.resolve()
+                    if not group_id:
+                        self._cancel_pending_group_open()
                     if (
-                        self._open_group_popup is not None
+                        self._inline_group_expansion is not None
                         and not group_id
                     ):
-                        self._close_group_folder()
+                        self._close_group_folder(immediate=True)
                     if group_id and not self._suppress_folder_click:
                         self._drag_source_path = resolved
                         self._folder_press_group_id = group_id
@@ -1818,9 +1868,8 @@ class ItemGridWidget(QWidget):
             ):
                 if group_id:
                     if not self._folder_drag_started and not self._suppress_folder_click:
-                        if self._open_group_popup is None:
-                            self._clear_selection()
-                        self._switch_group_folder(group_id)
+                        self._select_single_path(resolved_path)
+                        self._schedule_group_folder_open(group_id)
                     self._suppress_folder_click = False
                     self._folder_press_group_id = ""
                     self._folder_drag_started = False
@@ -1832,16 +1881,43 @@ class ItemGridWidget(QWidget):
                 return False
             if event.type() == event.Type.MouseButtonDblClick:
                 if group_id:
-                    block = self._group_block(group_id)
-                    self._prompt_rename_group(
-                        group_id,
-                        block.name if block is not None else "",
-                    )
+                    self._cancel_pending_group_open()
+                    if self._open_group_id != group_id:
+                        self._switch_group_folder(group_id)
                     return True
                 self._select_single_path(resolved_path)
                 self.item_activated.emit(Path(str(path)))
                 return True
         return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.key() == Qt.Key.Key_Escape:
+            if (
+                self._inline_group_expansion is not None
+                and self._inline_group_expansion.isVisible()
+            ):
+                self._close_group_folder(immediate=True)
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_F2:
+            group_id = self._group_id_for_keyboard_rename()
+            if group_id:
+                block = self._group_block(group_id)
+                self._prompt_rename_group(
+                    group_id,
+                    block.name if block is not None else "",
+                )
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _group_id_for_keyboard_rename(self) -> str:
+        if self._open_group_id:
+            return self._open_group_id
+        for group_id, block in self._group_blocks_by_id.items():
+            if block.members and block.members[0] in self._selected_paths:
+                return group_id
+        return ""
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)

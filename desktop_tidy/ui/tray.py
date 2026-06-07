@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
+
+from desktop_tidy.ui.app_icons import tray_icon, tray_icon_path
 
 
 class TrayController(QObject):
@@ -28,7 +32,9 @@ class TrayController(QObject):
         self._tray.setToolTip("Desktop Cleaner")
         self._tray.setContextMenu(self._menu)
         self._tray.activated.connect(self._on_activated)
-        icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        icon = tray_icon()
+        if icon.isNull():
+            icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self._tray.setIcon(icon)
         if auto_show and QSystemTrayIcon.isSystemTrayAvailable():
             self.show()
@@ -44,6 +50,12 @@ class TrayController(QObject):
 
     def action_texts(self) -> list[str]:
         return [action.text() for action in self._actions.values()]
+
+    def icon(self) -> QIcon:
+        return self._tray.icon()
+
+    def icon_path(self) -> Path:
+        return tray_icon_path()
 
     def trigger_action(self, action_id: str) -> None:
         self._actions[action_id].trigger()

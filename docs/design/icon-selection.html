@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DesktopCleaner 图标选择</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090b10;
+      --panel: #151922;
+      --card: #202530;
+      --line: rgba(255,255,255,.14);
+      --text: #f8fafc;
+      --muted: #aab3c2;
+      --pink: #f2a7d2;
+      --cyan: #50d4df;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 18% 10%, rgba(242,167,210,.18), transparent 28%),
+        radial-gradient(circle at 82% 12%, rgba(80,212,223,.13), transparent 30%),
+        var(--bg);
+    }
+    main { width: min(1180px, calc(100vw - 36px)); margin: 0 auto; padding: 34px 0 48px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 18px; margin-bottom: 22px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    p { color: var(--muted); line-height: 1.65; }
+    .badge { padding: 8px 12px; border: 1px solid rgba(242,167,210,.45); border-radius: 999px; color: var(--pink); background: rgba(242,167,210,.12); }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 16px; }
+    .card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02)), var(--panel);
+      box-shadow: 0 18px 50px rgba(0,0,0,.26);
+    }
+    .card.selected { border-color: rgba(242,167,210,.72); box-shadow: 0 0 0 1px rgba(242,167,210,.35), 0 18px 50px rgba(0,0,0,.34); }
+    .preview { display: grid; place-items: center; height: 178px; border-radius: 16px; background: #0d1118; margin-bottom: 14px; }
+    .sizes { display: flex; align-items: center; gap: 12px; margin: 12px 0 6px; }
+    .sizes svg { border-radius: 8px; background: #0c1017; padding: 4px; }
+    h2 { margin: 0; font-size: 17px; }
+    .note { margin-top: 28px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: rgba(32,37,48,.78); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>DesktopCleaner 图标方案</h1>
+        <p>当前正式采用 C「桌面入口」方向：深色面板轮廓、入口方块、粉色与青色强调。主应用和托盘图标都基于同一套识别语言。</p>
+      </div>
+      <div class="badge">已选择：C</div>
+    </header>
+
+    <svg width="0" height="0" aria-hidden="true">
+      <symbol id="icon-c" viewBox="0 0 256 256">
+        <rect x="28" y="34" width="200" height="164" rx="38" fill="#121722" stroke="#f2a7d2" stroke-width="10"/>
+        <rect x="58" y="68" width="62" height="48" rx="12" fill="#50d4df"/>
+        <rect x="136" y="68" width="62" height="48" rx="12" fill="#f2a7d2"/>
+        <rect x="58" y="132" width="62" height="42" rx="12" fill="#2b3445"/>
+        <rect x="136" y="132" width="62" height="42" rx="12" fill="#d9bc76"/>
+        <rect x="86" y="210" width="84" height="14" rx="7" fill="#6f7a8d"/>
+      </symbol>
+      <symbol id="icon-simple" viewBox="0 0 256 256">
+        <rect x="42" y="44" width="172" height="150" rx="34" fill="#141923" stroke="#8892a6" stroke-width="8"/>
+        <rect x="74" y="80" width="46" height="42" rx="10" fill="#50d4df"/>
+        <rect x="136" y="80" width="46" height="42" rx="10" fill="#f2a7d2"/>
+        <rect x="74" y="138" width="108" height="18" rx="9" fill="#697488"/>
+      </symbol>
+    </svg>
+
+    <section class="grid">
+      <article class="card selected">
+        <div class="preview"><svg width="128" height="128"><use href="#icon-c"/></svg></div>
+        <h2>C 桌面入口</h2>
+        <p>主应用图标。识别度比显示器图标高，适合 exe、任务栏、窗口标题栏和快捷方式。</p>
+        <div class="sizes">
+          <svg width="64" height="64"><use href="#icon-c"/></svg>
+          <svg width="32" height="32"><use href="#icon-c"/></svg>
+          <svg width="24" height="24"><use href="#icon-c"/></svg>
+          <svg width="16" height="16"><use href="#icon-c"/></svg>
+        </div>
+      </article>
+
+      <article class="card selected">
+        <div class="preview"><svg width="128" height="128"><use href="#icon-simple"/></svg></div>
+        <h2>C 托盘简化版</h2>
+        <p>托盘图标。减少细节，保留面板轮廓和两个色块，避免 16px 下糊成一团。</p>
+        <div class="sizes">
+          <svg width="64" height="64"><use href="#icon-simple"/></svg>
+          <svg width="32" height="32"><use href="#icon-simple"/></svg>
+          <svg width="24" height="24"><use href="#icon-simple"/></svg>
+          <svg width="16" height="16"><use href="#icon-simple"/></svg>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="preview"><svg width="128" height="128"><use href="#icon-c"/></svg></div>
+        <h2>接入状态</h2>
+        <p>正式资产位于 <code>assets/icons/app.ico</code> 和 <code>assets/icons/tray.ico</code>。构建脚本已经使用主图标。</p>
+      </article>
+    </section>
+
+    <section class="note">
+      <strong>验收点</strong>
+      <p>资源管理器、任务栏、设置窗口左上角应显示主应用图标；系统托盘应显示简化图标。普通文件、文件夹和快捷方式继续使用 Windows 原生图标。</p>
+    </section>
+  </main>
+</body>
+</html>
