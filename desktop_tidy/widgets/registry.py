@@ -49,13 +49,23 @@ class UnknownWidgetPlugin:
 
 class BuiltinWidgetRegistry:
     def __init__(self) -> None:
-        self._plugins: dict[str, WidgetPlugin] = {
-            HomeWidgetPlugin.id: HomeWidgetPlugin(),
+        self._home_plugin = HomeWidgetPlugin()
+        self._standalone_plugins: dict[str, WidgetPlugin] = {
             ClockWidgetPlugin.id: ClockWidgetPlugin(),
+        }
+        self._plugins: dict[str, WidgetPlugin] = {
+            self._home_plugin.id: self._home_plugin,
+            **self._standalone_plugins,
         }
 
     def get(self, widget_type: str) -> WidgetPlugin:
         return self._plugins.get(widget_type) or UnknownWidgetPlugin(widget_type)
 
+    def home_plugin(self) -> HomeWidgetPlugin:
+        return self._home_plugin
+
+    def available_standalone_widgets(self) -> list[WidgetDefinition]:
+        return [plugin.definition() for plugin in self._standalone_plugins.values()]
+
     def available(self) -> list[WidgetDefinition]:
-        return [plugin.definition() for plugin in self._plugins.values()]
+        return self.available_standalone_widgets()

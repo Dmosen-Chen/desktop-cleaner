@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGraphicsOpacityEffect,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -33,7 +32,6 @@ from desktop_tidy.services.desktop_index import IndexedItem
 from desktop_tidy.services.item_visuals import ItemVisualProvider
 from desktop_tidy.services.logging_setup import log_exception
 from desktop_tidy.services.shell_context_menu import ShellContextMenuService
-from desktop_tidy.ui.group_folder_popup import GroupFolderPopup
 from desktop_tidy.ui.inline_group_expansion import InlineGroupExpansionWidget
 from desktop_tidy.ui.item_grouping import DisplaySlot, GroupBlock, debug_drag
 
@@ -112,29 +110,6 @@ def _drag_dbg(*parts: object) -> None:
     debug_drag(_DRAG_DEBUG, *parts)
 
 
-class _GroupPopupBackdrop(QWidget):
-    """透明遮罩:点击分组切换,点击空白关闭。"""
-
-    def __init__(self, grid: "ItemGridWidget", parent: QWidget) -> None:
-        super().__init__(parent)
-        self._grid = grid
-        self.setObjectName("groupPopupBackdrop")
-        self.setStyleSheet("background: transparent;")
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        if event.button() != Qt.MouseButton.LeftButton:
-            super().mousePressEvent(event)
-            return
-        folder_id = self._grid._folder_id_at_viewport_point(
-            event.position().toPoint()
-        )
-        if folder_id:
-            self._grid._switch_group_folder(folder_id)
-        else:
-            self._grid._close_group_folder()
-        event.accept()
-
-
 class ItemGridWidget(QWidget):
     paths_dropped = Signal(object, str)
     restore_auto_requested = Signal(object)
@@ -161,8 +136,8 @@ class ItemGridWidget(QWidget):
         self._cells_by_group_id: dict[str, QWidget] = {}
         self._folder_labels_by_group_id: dict[str, QLabel] = {}
         self._folder_rename_editors_by_group_id: dict[str, QLineEdit] = {}
-        self._open_group_popup: GroupFolderPopup | None = None
-        self._group_backdrop: _GroupPopupBackdrop | None = None
+        self._open_group_popup: QWidget | None = None
+        self._group_backdrop: QWidget | None = None
         self._inline_group_expansion: InlineGroupExpansionWidget | None = None
         self._open_group_id = ""
         self._folder_hover_id = ""
@@ -648,7 +623,7 @@ class ItemGridWidget(QWidget):
         if not group_id:
             return
         self._cancel_pending_group_open()
-        self._switch_group_folder(group_id)
+        self._switch_group_folder(group_id, toggle_if_open=False)
 
     def _open_pending_group_folder(self) -> None:
         group_id = self._pending_group_open_id
@@ -657,10 +632,10 @@ class ItemGridWidget(QWidget):
             return
         if group_id not in self._cells_by_group_id:
             return
-        self._switch_group_folder(group_id)
+        self._switch_group_folder(group_id, toggle_if_open=False)
 
     def _activate_folder_on_press(self, group_id: str) -> None:
-        self._switch_group_folder(group_id)
+        self._switch_group_folder(group_id, toggle_if_open=False)
 
     def _handle_item_drop(
         self,
@@ -763,8 +738,6 @@ class ItemGridWidget(QWidget):
         kept = self._open_group_popup
         for child in viewport.findChildren(QWidget):
             if child.objectName() == "groupFolderPopupRoot" and child is not kept:
-                if isinstance(child, GroupFolderPopup):
-                    child._reset_presented_state()
                 child.hide()
                 child.setParent(None)
                 child.deleteLater()
@@ -779,13 +752,13 @@ class ItemGridWidget(QWidget):
             return
         self._group_reposition_timer.start()
 
-    def _show_group_backdrop(self) -> None:
-        self._hide_group_backdrop()
-
     def _hide_group_backdrop(self) -> None:
         self._grid_host.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         if self._group_backdrop is not None:
             self._group_backdrop.hide()
+            self._group_backdrop.setParent(None)
+            self._group_backdrop.deleteLater()
+            self._group_backdrop = None
 
     def _purge_stale_group_popups(self, host: QWidget | None = None) -> None:
         if not isValid(self._scroll_area):
@@ -797,14 +770,11 @@ class ItemGridWidget(QWidget):
         popup = self._open_group_popup
         self._open_group_popup = None
         if popup is not None:
-            popup._reset_presented_state()
             popup.hide()
             popup.setParent(None)
             popup.deleteLater()
         for child in viewport.findChildren(QWidget):
             if child.objectName() == "groupFolderPopupRoot" and child is not popup:
-                if isinstance(child, GroupFolderPopup):
-                    child._reset_presented_state()
                 child.hide()
                 child.setParent(None)
                 child.deleteLater()
@@ -839,7 +809,12 @@ class ItemGridWidget(QWidget):
                         self._selection_anchor = self._focus_path
                     self._apply_all_selection_styles()
 
-    def _switch_group_folder(self, group_id: str) -> None:
+    def _switch_group_folder(
+        self,
+        group_id: str,
+        *,
+        toggle_if_open: bool = True,
+    ) -> None:
         self._cancel_pending_group_open()
         self._folder_keep_open_until = 0.0
         self._cleanup_orphan_group_popups()
@@ -852,7 +827,13 @@ class ItemGridWidget(QWidget):
             and self._inline_group_expansion is not None
             and self._inline_group_expansion.isVisible()
         ):
-            self._close_group_folder(immediate=False)
+            if toggle_if_open:
+                self._close_group_folder(immediate=False)
+            else:
+                self._inline_group_expansion.reposition_in(
+                    self._scroll_area.viewport()
+                )
+                self._inline_group_expansion.raise_()
             return
         block = self._group_block(group_id)
         if block is None or not block.members:
@@ -904,20 +885,7 @@ class ItemGridWidget(QWidget):
 
     def _open_group_folder(self, group_id: str, anchor_widget: QWidget) -> None:
         del anchor_widget
-        self._switch_group_folder(group_id)
-
-    def _on_group_popup_destroyed(self, *_args: object) -> None:
-        sender = self.sender()
-        if isinstance(sender, GroupFolderPopup):
-            if self._open_group_popup is sender:
-                self._open_group_popup = None
-        else:
-            self._open_group_popup = None
-        closed = self._open_group_id
-        self._open_group_id = ""
-        if closed:
-            self._update_folder_cell_style(closed)
-        self._folder_keep_open_until = 0.0
+        self._switch_group_folder(group_id, toggle_if_open=False)
 
     def _toggle_group_folder(self, group_id: str, anchor_widget: QWidget) -> None:
         self._switch_group_folder(group_id)
@@ -1685,7 +1653,7 @@ class ItemGridWidget(QWidget):
         rename_action = menu.addAction("重命名")
         dissolve_action = menu.addAction("解散分组")
         open_action.triggered.connect(
-            lambda: self._toggle_group_folder(
+            lambda: self._open_group_folder(
                 group_id,
                 self._cells_by_group_id[group_id],
             )
@@ -1921,8 +1889,6 @@ class ItemGridWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
-        if self._group_backdrop is not None and self._group_backdrop.isVisible():
-            self._group_backdrop.setGeometry(self._scroll_area.viewport().rect())
         self._reposition_open_group_popup()
         if not self._entries:
             return

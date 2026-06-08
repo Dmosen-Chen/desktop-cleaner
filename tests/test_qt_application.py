@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -117,6 +118,40 @@ class FakeUpdateService:
         return script
 
 
+class FakeWeatherService:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def fetch_current(self, city: str):
+        self.calls.append(city)
+        if self.fail:
+            raise RuntimeError("weather unavailable")
+        return SimpleNamespace(
+            city=city.title(),
+            summary="Cloudy · 18°C",
+            provider="fake",
+            temperature_c=18.0,
+            condition="Cloudy",
+        )
+
+
+class SlowWeatherService:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def fetch_current(self, city: str):
+        self.calls.append(city)
+        time.sleep(0.25)
+        return SimpleNamespace(
+            city=city.title(),
+            summary="Cloudy · 18°C",
+            provider="slow-fake",
+            temperature_c=18.0,
+            condition="Cloudy",
+        )
+
+
 class FakeTrayController(QObject):
     show_panels_requested = Signal()
     hide_panels_requested = Signal()
@@ -128,6 +163,7 @@ class FakeTrayController(QObject):
         super().__init__()
         self.shown = False
         self.hidden = False
+        self.messages: list[tuple[str, str]] = []
 
     def show(self) -> None:
         self.shown = True
@@ -137,6 +173,7 @@ class FakeTrayController(QObject):
 
     def show_message(self, title: str, message: str) -> None:
         self.last_message = (title, message)
+        self.messages.append((title, message))
 
 
 class FakeActivationServer(QObject):
@@ -154,6 +191,16 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def _wait_until(self, condition, *, timeout_ms: int = 1000) -> bool:
+        deadline = time.perf_counter() + timeout_ms / 1000
+        while time.perf_counter() < deadline:
+            if condition():
+                return True
+            type(self).app.processEvents()
+            QTest.qWait(10)
+        type(self).app.processEvents()
+        return bool(condition())
 
     def test_application_store_uses_application_config(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
@@ -195,6 +242,310 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             self.assertEqual(app.model.group(home.group_id).active_tab_id, home.id)
             self.assertEqual(app.panel.active_tab_id, home.id)
             self.assertFalse(app.panel.item_grid.isVisible())
+
+    def test_opening_item_records_local_recent_without_showing_on_home_dashboard(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            target = desktop / "paper.pdf"
+            target.write_text("pdf", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+            with patch("desktop_tidy.application.open_item") as opened:
+                app._on_item_activated(target)
+
+            opened.assert_called_once_with(target)
+            recent = app.recent_items_store.snapshot(limit=5)
+            self.assertEqual(recent[0]["name"], "paper.pdf")
+            home = app.model.home_tab()
+            assert home is not None
+            self.assertEqual(home.widget_settings["recent_items"], [])
+
+    def test_home_dashboard_reads_windows_recent_items_on_startup(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            desktop.mkdir()
+            recent_dir = root / "Recent"
+            recent_dir.mkdir()
+            target = root / "windows-report.docx"
+            target.write_text("doc", encoding="utf-8")
+            shortcut = recent_dir / "windows-report.docx.url"
+            shortcut.write_text(
+                "[InternetShortcut]\nURL=" + target.resolve().as_uri() + "\n",
+                encoding="utf-8",
+            )
+            store = ConfigurationStore(root / "DesktopCleaner" / "config.json")
+
+            with patch("desktop_tidy.application.default_windows_recent_dir", return_value=recent_dir):
+                app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+            home = app.model.home_tab()
+            assert home is not None
+            self.assertEqual(
+                home.widget_settings["recent_items"][0],
+                {
+                    "name": "windows-report.docx",
+                    "path": str(target.resolve()),
+                    "kind": "file",
+                    "source": "windows",
+                },
+            )
+
+    def test_home_dashboard_refreshes_windows_recent_when_home_tab_is_activated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            desktop.mkdir()
+            recent_dir = root / "Recent"
+            recent_dir.mkdir()
+            store = ConfigurationStore(root / "DesktopCleaner" / "config.json")
+
+            with patch("desktop_tidy.application.default_windows_recent_dir", return_value=recent_dir):
+                app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+            home = app.model.home_tab()
+            assert home is not None
+            other_tab = next(tab for tab in app.model.config.panel_tabs if tab.id != home.id)
+            app.panel.activate_tab(other_tab.id)
+            type(self).app.processEvents()
+
+            target = root / "after-start.pdf"
+            target.write_text("pdf", encoding="utf-8")
+            shortcut = recent_dir / "after-start.pdf.url"
+            shortcut.write_text(
+                "[InternetShortcut]\nURL=" + target.resolve().as_uri() + "\n",
+                encoding="utf-8",
+            )
+
+            app.panel.activate_tab(home.id)
+            type(self).app.processEvents()
+
+            self.assertEqual(home.widget_settings["recent_items"][0]["name"], "after-start.pdf")
+            self.assertEqual(home.widget_settings["recent_items"][0]["path"], str(target.resolve()))
+
+    def test_home_recent_refresh_request_reads_windows_recent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            desktop.mkdir()
+            recent_dir = root / "Recent"
+            recent_dir.mkdir()
+            store = ConfigurationStore(root / "DesktopCleaner" / "config.json")
+
+            with patch("desktop_tidy.application.default_windows_recent_dir", return_value=recent_dir):
+                app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+            home = app.model.home_tab()
+            assert home is not None
+            self.assertEqual(home.widget_settings["recent_items"], [])
+
+            target = root / "manual-refresh.docx"
+            target.write_text("doc", encoding="utf-8")
+            shortcut = recent_dir / "manual-refresh.docx.url"
+            shortcut.write_text(
+                "[InternetShortcut]\nURL=" + target.resolve().as_uri() + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("desktop_tidy.application.default_windows_recent_dir", return_value=recent_dir):
+                app._on_widget_recent_refresh_requested()
+
+            self.assertEqual(home.widget_settings["recent_items"][0]["name"], "manual-refresh.docx")
+            self.assertEqual(home.widget_settings["recent_items"][0]["path"], str(target.resolve()))
+
+    def test_home_recent_clear_request_removes_local_records_but_keeps_windows_recent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "desktop"
+            desktop.mkdir()
+            recent_dir = root / "Recent"
+            recent_dir.mkdir()
+            store = ConfigurationStore(root / "DesktopCleaner" / "config.json")
+
+            with patch("desktop_tidy.application.default_windows_recent_dir", return_value=recent_dir):
+                app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+            local_target = root / "local.pdf"
+            local_target.write_text("pdf", encoding="utf-8")
+            app.recent_items_store.record(local_target)
+            app._sync_home_dashboard_settings()
+            home = app.model.home_tab()
+            assert home is not None
+            self.assertEqual(home.widget_settings["recent_items"], [])
+
+            windows_target = root / "windows.docx"
+            windows_target.write_text("doc", encoding="utf-8")
+            shortcut = recent_dir / "windows.docx.url"
+            shortcut.write_text(
+                "[InternetShortcut]\nURL=" + windows_target.resolve().as_uri() + "\n",
+                encoding="utf-8",
+            )
+
+            app._on_widget_recent_clear_requested()
+
+            self.assertEqual(app.recent_items_store.snapshot(limit=5), [])
+            self.assertEqual(home.widget_settings["recent_items"][0]["name"], "windows.docx")
+            self.assertEqual(home.widget_settings["recent_items"][0]["source"], "windows")
+
+    def test_home_url_request_opens_browser_without_recent_file_record(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+
+            with patch("desktop_tidy.application.open_url") as opened:
+                app._on_widget_url_open_requested("https://example.com")
+
+            opened.assert_called_once_with("https://example.com")
+            self.assertEqual(app.recent_items_store.snapshot(), [])
+
+    def test_home_widget_settings_change_persists_module_configuration(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            target = desktop / "paper.pdf"
+            target.write_text("pdf", encoding="utf-8")
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            home = app.model.home_tab()
+            assert home is not None
+            app.recent_items_store.record(target)
+            app._sync_home_dashboard_settings()
+
+            app._on_widget_settings_changed(
+                home.id,
+                {
+                    "modules": ["recent", "calendar"],
+                    "module_settings": {"calendar": {"compact": True}},
+                    "reduced_motion": True,
+                },
+            )
+            app._flush_deferred_save()
+
+            self.assertEqual(home.widget_settings["modules"], ["recent", "calendar"])
+            self.assertEqual(home.widget_settings["module_settings"]["calendar"], {"compact": True})
+            self.assertTrue(home.widget_settings["reduced_motion"])
+            self.assertEqual(home.widget_settings["recent_items"], [])
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            saved_home = next(tab for tab in payload["panel_tabs"] if tab["id"] == home.id)
+            self.assertEqual(saved_home["widget_settings"]["modules"], ["recent", "calendar"])
+
+    def test_due_home_reminder_notifies_once_and_ignores_future_items(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            tray = FakeTrayController()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                tray_controller=tray,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            today = datetime(2026, 6, 7, 9, 5)
+            tomorrow = today.date() + timedelta(days=1)
+            home.widget_settings["reminders"] = [
+                {"date": today.date().isoformat(), "text": "09:00 standup"},
+                {"date": today.date().isoformat(), "text": "23:59 later"},
+                {"date": tomorrow.isoformat(), "text": "08:00 tomorrow"},
+                {"date": today.date().isoformat(), "text": "untimed note"},
+            ]
+
+            app._check_due_home_reminders(today)
+            app._check_due_home_reminders(today)
+
+            self.assertEqual(tray.messages, [("日程提醒", "09:00 standup")])
+            self.assertEqual(
+                home.widget_settings["notified_reminders"],
+                [f"{today.date().isoformat()}|09:00 standup"],
+            )
+
+    def test_due_home_reminder_ignores_done_items(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            tray = FakeTrayController()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                tray_controller=tray,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            now = datetime(2026, 6, 7, 9, 5)
+            home.widget_settings["module_settings"] = {
+                "schedule": {
+                    "reminders": [
+                        {
+                            "date": now.date().isoformat(),
+                            "text": "09:00 already handled",
+                            "done": True,
+                        },
+                    ],
+                },
+            }
+
+            app._check_due_home_reminders(now)
+
+            self.assertEqual(tray.messages, [])
+            self.assertNotIn("notified_reminders", home.widget_settings)
+
+    def test_due_home_reminder_reads_schedule_module_settings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            tray = FakeTrayController()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                tray_controller=tray,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            now = datetime(2026, 6, 7, 9, 5)
+            home.widget_settings["module_settings"] = {
+                "schedule": {
+                    "reminders": [
+                        {"date": now.date().isoformat(), "text": "09:00 module standup"},
+                    ],
+                },
+            }
+
+            app._check_due_home_reminders(now)
+
+            self.assertEqual(tray.messages, [("日程提醒", "09:00 module standup")])
+            self.assertEqual(
+                home.widget_settings["notified_reminders"],
+                [f"{now.date().isoformat()}|09:00 module standup"],
+            )
+
+    def test_due_home_reminder_accepts_date_prefix_before_time(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            tray = FakeTrayController()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                tray_controller=tray,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            now = datetime(2026, 6, 7, 9, 5)
+            home.widget_settings["reminders"] = [
+                {"date": now.date().isoformat(), "text": "06-07 09:00 standup"},
+            ]
+
+            app._check_due_home_reminders(now)
+
+            self.assertEqual(tray.messages, [("日程提醒", "06-07 09:00 standup")])
 
     def test_update_check_and_download_are_exposed_through_settings(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2568,6 +2919,210 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             app._on_global_mouse_press(app.panel)
 
             self.assertEqual(app.panel.item_grid._open_group_id, "")
+
+    def test_clicking_inside_inline_group_expansion_keeps_open_group_folder(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            first = desktop / "a.png"
+            second = desktop / "b.png"
+            first.write_text("a", encoding="utf-8")
+            second.write_text("b", encoding="utf-8")
+            config = build_default_configuration(desktop)
+            config.item_groups.append(
+                ItemGroup(
+                    id="item-group-test",
+                    tab_id="tab-images",
+                    name="图片组",
+                    member_paths=[canonical_key(first), canonical_key(second)],
+                    order=0,
+                )
+            )
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(config, store=store)
+            app.show()
+            app.panel.activate_tab("tab-images")
+            type(self).app.processEvents()
+
+            app.panel.item_grid._switch_group_folder("item-group-test")
+            expansion = app.panel.item_grid._inline_group_expansion
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+            self.assertEqual(app.panel.item_grid._open_group_id, "item-group-test")
+
+            app._on_global_mouse_press(expansion)
+
+            self.assertEqual(app.panel.item_grid._open_group_id, "item-group-test")
+
+
+    def test_home_weather_refresh_updates_home_settings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            home.widget_settings["module_settings"] = {
+                "weather": {"weather": {"city": "Old", "summary": "Old"}}
+            }
+
+            app._on_widget_weather_refresh_requested("london")
+            self.assertTrue(
+                self._wait_until(
+                    lambda: home.widget_settings.get("weather", {}).get("provider") == "fake"
+                )
+            )
+            app._flush_deferred_save()
+
+            self.assertEqual(weather.calls, ["london"])
+            self.assertEqual(home.widget_settings["weather"]["city"], "London")
+            nested_weather = home.widget_settings["module_settings"]["weather"]["weather"]
+            self.assertEqual(nested_weather["city"], "London")
+            self.assertEqual(nested_weather["provider"], "fake")
+            self.assertEqual(home.widget_settings["weather"]["summary"], "Cloudy · 18°C")
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            saved_home = next(tab for tab in payload["panel_tabs"] if tab["id"] == home.id)
+            self.assertEqual(saved_home["widget_settings"]["weather"]["provider"], "fake")
+            saved_nested = saved_home["widget_settings"]["module_settings"]["weather"]["weather"]
+            self.assertEqual(saved_nested["provider"], "fake")
+
+    def test_home_weather_auto_refreshes_on_show_when_city_has_no_summary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            home.widget_settings["weather"] = {"city": "london"}
+            home.widget_settings["module_settings"] = {
+                "weather": {"weather": {"city": "london"}}
+            }
+
+            app.show()
+
+            self.assertTrue(
+                self._wait_until(
+                    lambda: home.widget_settings.get("weather", {}).get("provider") == "fake"
+                )
+            )
+            self.assertEqual(weather.calls, ["london"])
+            self.assertEqual(home.widget_settings["weather"]["city"], "London")
+
+    def test_home_weather_auto_refresh_skips_when_summary_exists(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            cached = {"city": "London", "summary": "Cloudy 路 18掳C", "provider": "cached"}
+            home.widget_settings["weather"] = cached
+            home.widget_settings["module_settings"] = {
+                "weather": {"weather": dict(cached)}
+            }
+
+            app.show()
+            QTest.qWait(100)
+            type(self).app.processEvents()
+
+            self.assertEqual(weather.calls, [])
+            self.assertEqual(home.widget_settings["weather"]["provider"], "cached")
+
+    def test_home_weather_refresh_failure_keeps_existing_weather_settings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService(fail=True)
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            home.widget_settings["weather"] = {"city": "Paris", "summary": "Sunny · 20°C"}
+
+            app._on_widget_weather_refresh_requested("paris")
+            self.assertTrue(self._wait_until(lambda: weather.calls == ["paris"]))
+
+            self.assertEqual(weather.calls, ["paris"])
+            self.assertEqual(home.widget_settings["weather"]["city"], "Paris")
+            self.assertEqual(home.widget_settings["weather"]["summary"], "Sunny · 20°C")
+
+
+    def test_home_weather_refresh_failure_sets_visible_error_state(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService(fail=True)
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            home.widget_settings["weather"] = {"city": "Paris", "summary": "Sunny · 20°C"}
+            home.widget_settings["module_settings"] = {
+                "weather": {"weather": {"city": "Paris", "summary": "Sunny · 20°C"}}
+            }
+
+            app._on_widget_weather_refresh_requested("paris")
+            self.assertTrue(self._wait_until(lambda: weather.calls == ["paris"]))
+
+            self.assertEqual(home.widget_settings["weather"]["city"], "Paris")
+            self.assertEqual(home.widget_settings["weather"]["summary"], "Sunny · 20°C")
+            self.assertIn("error", home.widget_settings["weather"])
+            nested_weather = home.widget_settings["module_settings"]["weather"]["weather"]
+            self.assertEqual(nested_weather["city"], "Paris")
+            self.assertEqual(nested_weather["summary"], "Sunny · 20°C")
+            self.assertIn("error", nested_weather)
+
+    def test_home_weather_refresh_does_not_block_ui_thread(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = SlowWeatherService()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+
+            started = time.perf_counter()
+            app._on_widget_weather_refresh_requested("london")
+            elapsed = time.perf_counter() - started
+
+            self.assertLess(elapsed, 0.12)
+            self.assertTrue(
+                self._wait_until(
+                    lambda: home.widget_settings.get("weather", {}).get("provider") == "slow-fake",
+                    timeout_ms=1000,
+                )
+            )
 
 
 class ArrangeEntriesForTabTests(unittest.TestCase):

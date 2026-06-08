@@ -1,0 +1,881 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DesktopCleaner v1.0.24 主标签页布局方案</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080a0f;
+      --panel: rgba(62, 51, 77, .82);
+      --panel-strong: rgba(22, 24, 33, .91);
+      --surface: rgba(25, 29, 39, .94);
+      --surface-soft: rgba(34, 39, 51, .86);
+      --line: rgba(255, 255, 255, .15);
+      --line-strong: rgba(255, 255, 255, .26);
+      --text: #f8fafc;
+      --muted: rgba(248, 250, 252, .68);
+      --faint: rgba(248, 250, 252, .45);
+      --pink: #f4aad7;
+      --pink-soft: rgba(244, 170, 215, .18);
+      --cyan: #51d4df;
+      --amber: #d8bb76;
+      --green: #74d99f;
+      --danger: #ff8da7;
+      --radius: 20px;
+      --shadow: 0 20px 70px rgba(0, 0, 0, .42);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+      background:
+        linear-gradient(180deg, rgba(36, 30, 49, .78), rgba(36, 20, 35, .74) 36%, rgba(10, 21, 25, .88) 100%),
+        radial-gradient(circle at 70% 34%, rgba(225, 218, 189, .32) 0 7%, transparent 8%),
+        linear-gradient(180deg, #a55a76 0 20%, #b86d77 20% 38%, #644051 38% 61%, #16252c 61% 100%);
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .42;
+      background:
+        linear-gradient(90deg, transparent 0 8%, rgba(47, 28, 48, .5) 8% 10%, transparent 10% 20%, rgba(79, 40, 63, .55) 20% 23%, transparent 23% 33%, rgba(36, 29, 49, .72) 33% 36%, transparent 36% 100%),
+        linear-gradient(0deg, transparent 0 78%, rgba(22, 22, 31, .92) 78% 100%);
+      background-size: 220px 100%, 100% 100%;
+      mask-image: linear-gradient(to bottom, transparent 0 42%, black 52% 100%);
+    }
+
+    button {
+      border: 0;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .page {
+      width: min(1560px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 22px 0 42px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .meta h1 {
+      margin: 0 0 6px;
+      font-size: 24px;
+      letter-spacing: 0;
+      font-weight: 750;
+    }
+
+    .meta p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .segmented {
+      display: flex;
+      gap: 7px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: rgba(13, 16, 23, .76);
+      box-shadow: inset 0 1px rgba(255,255,255,.05);
+    }
+
+    .segmented button {
+      min-width: 180px;
+      padding: 10px 14px;
+      border-radius: 11px;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .segmented button.active {
+      color: #1a1118;
+      background: var(--pink);
+      font-weight: 700;
+    }
+
+    .workspace {
+      border: 1px solid rgba(244, 170, 215, .52);
+      border-radius: 24px;
+      background: rgba(34, 26, 44, .68);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-height: 890px;
+      backdrop-filter: blur(10px);
+    }
+
+    .desktop-tabs {
+      height: 78px;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr) auto;
+      align-items: center;
+      gap: 18px;
+      padding: 0 24px;
+      background: rgba(66, 55, 83, .9);
+      border-bottom: 1px solid rgba(255,255,255,.09);
+    }
+
+    .tab {
+      color: rgba(248,250,252,.72);
+      text-align: center;
+      font-size: 15px;
+      padding: 17px 0 14px;
+      border-bottom: 3px solid transparent;
+    }
+
+    .tab.active {
+      color: var(--text);
+      border-color: var(--text);
+      font-weight: 750;
+    }
+
+    .tools {
+      display: flex;
+      gap: 9px;
+    }
+
+    .icon-button {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      background: rgba(255,255,255,.09);
+      color: rgba(248,250,252,.9);
+      box-shadow: inset 0 1px rgba(255,255,255,.08);
+    }
+
+    .view {
+      display: none;
+      padding: 30px 34px 36px;
+    }
+
+    .view.active {
+      display: block;
+    }
+
+    .home-shell {
+      width: min(1120px, 100%);
+      margin: 0 auto;
+    }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .span-all {
+      grid-column: 1 / -1;
+    }
+
+    .stack {
+      display: grid;
+      gap: 16px;
+    }
+
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: inset 0 1px rgba(255,255,255,.05);
+      overflow: hidden;
+    }
+
+    .card.soft {
+      background: var(--surface-soft);
+    }
+
+    .hero {
+      min-height: 230px;
+      display: grid;
+      grid-template-columns: 1.35fr .9fr;
+      gap: 16px;
+      padding: 28px 30px;
+    }
+
+    .hero-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 18px rgba(116,217,159,.42);
+    }
+
+    .time {
+      font-size: 78px;
+      line-height: .95;
+      letter-spacing: 0;
+      font-weight: 760;
+    }
+
+    .date {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 12px;
+      align-content: center;
+    }
+
+    .summary-line {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 14px;
+      background: rgba(255,255,255,.04);
+    }
+
+    .summary-line b {
+      display: block;
+      font-size: 14px;
+    }
+
+    .summary-line span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 2px;
+    }
+
+    .module {
+      min-height: 180px;
+      padding: 20px;
+    }
+
+    .module-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .module h2 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+
+    .module h3 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .ghost-button,
+    .pill {
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 12px;
+      padding: 8px 12px;
+      background: rgba(255,255,255,.07);
+      color: rgba(248,250,252,.86);
+      font-size: 13px;
+    }
+
+    .pill.active {
+      background: var(--pink-soft);
+      border-color: rgba(244,170,215,.54);
+      color: var(--text);
+    }
+
+    .recent-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(78px, 1fr));
+      gap: 12px;
+    }
+
+    .entry {
+      min-width: 0;
+      padding: 12px 8px;
+      border-radius: 14px;
+      text-align: center;
+      background: rgba(255,255,255,.045);
+      border: 1px solid rgba(255,255,255,.08);
+    }
+
+    .entry-icon {
+      width: 42px;
+      height: 42px;
+      margin: 0 auto 8px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: #0b1018;
+      font-weight: 800;
+      background: linear-gradient(135deg, #f7fafc, #8eb8ff);
+      box-shadow: 0 8px 24px rgba(0,0,0,.22);
+    }
+
+    .entry span {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      min-height: 36px;
+      font-size: 13px;
+      line-height: 1.35;
+      color: rgba(248,250,252,.9);
+    }
+
+    .agenda-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .agenda-item {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.045);
+    }
+
+    .agenda-time {
+      min-width: 50px;
+      color: var(--pink);
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .empty {
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .calendar {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+      color: rgba(248,250,252,.75);
+      font-size: 13px;
+    }
+
+    .calendar b,
+    .calendar span {
+      min-height: 26px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+    }
+
+    .calendar .today {
+      background: var(--pink);
+      color: #1a1118;
+      font-weight: 800;
+    }
+
+    .bookmark-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .bookmark {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,.045);
+    }
+
+    .site-dot {
+      width: 24px;
+      height: 24px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--cyan), var(--pink));
+    }
+
+    .weather-visual {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .weather-mark {
+      width: 62px;
+      height: 62px;
+      border-radius: 20px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(81,212,223,.24), rgba(244,170,215,.24));
+      border: 1px solid rgba(255,255,255,.14);
+      font-size: 28px;
+    }
+
+    .quick-home {
+      display: grid;
+      grid-template-columns: 310px 1fr;
+      gap: 18px;
+      width: min(1180px, 100%);
+      margin: 0 auto;
+    }
+
+    .quick-rail {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .mini-status {
+      padding: 22px;
+      min-height: 170px;
+    }
+
+    .mini-time {
+      font-size: 52px;
+      line-height: 1;
+      font-weight: 760;
+      margin-bottom: 10px;
+    }
+
+    .launcher-card {
+      padding: 20px;
+      min-height: 624px;
+    }
+
+    .search {
+      height: 52px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 16px;
+      border-radius: 17px;
+      background: rgba(255,255,255,.09);
+      border: 1px solid rgba(255,255,255,.16);
+      color: var(--muted);
+      margin-bottom: 18px;
+    }
+
+    .section-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin: 18px 0 12px;
+      color: rgba(248,250,252,.9);
+      font-weight: 700;
+    }
+
+    .app-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(86px, 1fr));
+      gap: 16px 14px;
+    }
+
+    .app {
+      min-width: 0;
+      padding: 10px 6px;
+      border-radius: 14px;
+      text-align: center;
+    }
+
+    .app:hover {
+      background: rgba(255,255,255,.08);
+    }
+
+    .app-icon {
+      width: 52px;
+      height: 52px;
+      display: grid;
+      place-items: center;
+      margin: 0 auto 8px;
+      border-radius: 15px;
+      background: linear-gradient(135deg, #101923, #f4aad7);
+      border: 1px solid rgba(255,255,255,.16);
+      font-weight: 800;
+    }
+
+    .app span {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      min-height: 36px;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .edit-strip {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .note {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(0,0,0,.24);
+      border: 1px solid rgba(255,255,255,.1);
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    .motion {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .motion-card {
+      border: 1px solid rgba(255,255,255,.11);
+      border-radius: 16px;
+      background: rgba(255,255,255,.045);
+      padding: 14px;
+    }
+
+    .motion-card b {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .motion-card span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .view-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .view-title h2 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+
+    .view-title p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 1100px) {
+      .dashboard-grid,
+      .quick-home {
+        grid-template-columns: 1fr;
+      }
+
+      .bottom-grid,
+      .motion {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .app-grid {
+        grid-template-columns: repeat(4, minmax(80px, 1fr));
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        width: calc(100vw - 18px);
+      }
+
+      .meta {
+        grid-template-columns: 1fr;
+      }
+
+      .segmented {
+        overflow-x: auto;
+      }
+
+      .desktop-tabs {
+        grid-template-columns: repeat(3, 1fr);
+        height: auto;
+        padding: 14px;
+      }
+
+      .tools {
+        display: none;
+      }
+
+      .view {
+        padding: 18px;
+      }
+
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .time {
+        font-size: 56px;
+      }
+
+      .recent-grid,
+      .bottom-grid,
+      .motion,
+      .app-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="meta">
+      <div>
+        <h1>主标签页 v1.0.24 布局方向</h1>
+        <p>目标：让主标签从“占位卡片列表”变成真正可用、可替换、可自适应的桌面首页。</p>
+      </div>
+      <div class="segmented" aria-label="切换设计方案">
+        <button class="active" data-target="scheme-a">A 桌面仪表盘</button>
+        <button data-target="scheme-b">B 快速启动首页</button>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <nav class="desktop-tabs" aria-label="桌面面板标签">
+        <div class="tab active">主标签页</div>
+        <div class="tab">时间</div>
+        <div class="tab">常用</div>
+        <div class="tab">应用</div>
+        <div class="tab">游戏</div>
+        <div class="tab">编程</div>
+        <div class="tools">
+          <button class="icon-button" title="收起">⌃</button>
+          <button class="icon-button" title="锁定">⌘</button>
+          <button class="icon-button" title="新增">＋</button>
+          <button class="icon-button" title="整理">整</button>
+          <button class="icon-button" title="删除">▥</button>
+          <button class="icon-button" title="更多">⋯</button>
+        </div>
+      </nav>
+
+      <section id="scheme-a" class="view active">
+        <div class="view-title">
+          <div>
+            <h2>方案 A：桌面仪表盘</h2>
+            <p>推荐方向。重点是状态、最近使用、今天事项。空模块压缩，不抢主视觉。</p>
+          </div>
+          <button class="ghost-button">编辑首页</button>
+        </div>
+
+        <div class="home-shell dashboard-grid">
+          <article class="card hero span-all">
+            <div>
+              <div class="hero-title"><i class="status-dot"></i><span>桌面接管中，主标签已激活</span></div>
+              <div class="time">04:22</div>
+              <div class="date">2026-06-07 · Sunday</div>
+            </div>
+            <aside class="hero-side">
+              <div class="summary-line">
+                <b>天</b>
+                <div><b>天气待设置</b><span>设置城市后显示温度和天气。</span></div>
+              </div>
+              <div class="summary-line">
+                <b>今</b>
+                <div><b>今天没有提醒</b><span>日程为空时保持轻量提示。</span></div>
+              </div>
+              <div class="summary-line">
+                <b>新</b>
+                <div><b>最近没有打开记录</b><span>通过 DesktopCleaner 打开后自动出现。</span></div>
+              </div>
+            </aside>
+          </article>
+
+          <article class="card module">
+            <div class="module-header">
+              <h2>最近使用</h2>
+              <button class="ghost-button">全部</button>
+            </div>
+            <div class="recent-grid">
+              <div class="entry"><div class="entry-icon">W</div><span>毕业材料信息表</span></div>
+              <div class="entry"><div class="entry-icon">P</div><span>group.pdf</span></div>
+              <div class="entry"><div class="entry-icon">D</div><span>draft 文件夹</span></div>
+              <div class="entry"><div class="entry-icon">C</div><span>VS Code</span></div>
+              <div class="entry"><div class="entry-icon">E</div><span>个人 Edge</span></div>
+            </div>
+            <div class="note">空状态只保留一句说明；有数据后变成真正的入口区。</div>
+          </article>
+
+          <aside class="stack">
+            <article class="card module soft">
+              <div class="module-header">
+                <h3>今日日程</h3>
+                <button class="ghost-button">添加</button>
+              </div>
+              <div class="agenda-list">
+                <div class="agenda-item"><div class="agenda-time">今天</div><div class="empty">没有提醒。</div></div>
+                <div class="agenda-item"><div class="agenda-time">后续</div><div>可接入本地提醒，不接外部账号。</div></div>
+              </div>
+            </article>
+            <article class="card module soft">
+              <div class="module-header">
+                <h3>天气摘要</h3>
+                <button class="ghost-button">设置城市</button>
+              </div>
+              <div class="weather-visual">
+                <div class="weather-mark">天</div>
+                <div class="empty">未配置城市。这里应该小而明确，不重复占一张大卡。</div>
+              </div>
+            </article>
+          </aside>
+
+          <div class="bottom-grid span-all">
+            <article class="card module">
+              <div class="module-header"><h3>网络收藏</h3><button class="ghost-button">添加</button></div>
+              <div class="bookmark-list">
+                <div class="bookmark"><i class="site-dot"></i><span>GitHub 项目</span></div>
+                <div class="bookmark"><i class="site-dot"></i><span>常用文档入口</span></div>
+              </div>
+            </article>
+            <article class="card module">
+              <div class="module-header"><h3>月历</h3><span class="pill active">今天 06-07</span></div>
+              <div class="calendar">
+                <b>一</b><b>二</b><b>三</b><b>四</b><b>五</b><b>六</b><b>日</b>
+                <span>01</span><span>02</span><span>03</span><span>04</span><span>05</span><span>06</span><span class="today">07</span>
+                <span>08</span><span>09</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span>
+              </div>
+            </article>
+            <article class="card module">
+              <div class="module-header"><h3>模块管理</h3><button class="ghost-button">编辑</button></div>
+              <div class="edit-strip">
+                <span class="pill active">最近使用</span>
+                <span class="pill active">日程</span>
+                <span class="pill">天气</span>
+                <span class="pill">收藏</span>
+                <span class="pill">月历</span>
+              </div>
+              <div class="note">这里表达模块可隐藏、排序、替换。真正实现时放进“编辑首页”。</div>
+            </article>
+          </div>
+        </div>
+
+        <div class="motion">
+          <div class="motion-card"><b>进入</b><span>120ms 淡入，不做整页编排动画。</span></div>
+          <div class="motion-card"><b>模块状态</b><span>空转有数据时 crossfade，避免突兀跳动。</span></div>
+          <div class="motion-card"><b>悬浮</b><span>只提亮边框和背景，不改变尺寸。</span></div>
+          <div class="motion-card"><b>重排</b><span>断点切换时即时重排，最多短淡入。</span></div>
+        </div>
+      </section>
+
+      <section id="scheme-b" class="view">
+        <div class="view-title">
+          <div>
+            <h2>方案 B：快速启动首页</h2>
+            <p>更像轻量开始菜单。重点是打开东西，适合你主要想把主标签当“入口首页”的场景。</p>
+          </div>
+          <button class="ghost-button">编辑首页</button>
+        </div>
+
+        <div class="quick-home">
+          <aside class="quick-rail">
+            <article class="card mini-status">
+              <div class="mini-time">04:22</div>
+              <div class="date">2026-06-07 · Sunday</div>
+              <div class="edit-strip">
+                <span class="pill active">接管中</span>
+                <span class="pill">天气待设置</span>
+              </div>
+            </article>
+            <article class="card module">
+              <div class="module-header"><h3>今日日程</h3><button class="ghost-button">添加</button></div>
+              <p class="empty">今天没有提醒。</p>
+            </article>
+            <article class="card module">
+              <div class="module-header"><h3>月历</h3><span class="pill active">06-07</span></div>
+              <p class="empty">窄侧栏只显示今日摘要。</p>
+            </article>
+          </aside>
+
+          <article class="card launcher-card">
+            <div class="search"><span>⌕</span><span>搜索应用、文件、收藏和模块</span></div>
+            <div class="section-title"><span>最近使用</span><button class="ghost-button">清理记录</button></div>
+            <div class="app-grid">
+              <div class="app"><div class="app-icon">W</div><span>毕业材料信息表</span></div>
+              <div class="app"><div class="app-icon">P</div><span>group.pdf</span></div>
+              <div class="app"><div class="app-icon">D</div><span>draft</span></div>
+              <div class="app"><div class="app-icon">C</div><span>VS Code</span></div>
+              <div class="app"><div class="app-icon">E</div><span>个人 Edge</span></div>
+              <div class="app"><div class="app-icon">R</div><span>RStudio</span></div>
+            </div>
+
+            <div class="section-title"><span>常用模块</span><button class="ghost-button">管理模块</button></div>
+            <div class="app-grid">
+              <div class="app"><div class="app-icon">时</div><span>时间</span></div>
+              <div class="app"><div class="app-icon">日</div><span>日程提醒</span></div>
+              <div class="app"><div class="app-icon">收</div><span>网络收藏</span></div>
+              <div class="app"><div class="app-icon">历</div><span>月历</span></div>
+              <div class="app"><div class="app-icon">天</div><span>天气</span></div>
+              <div class="app"><div class="app-icon">＋</div><span>添加模块</span></div>
+            </div>
+
+            <div class="note">
+              方案 B 的优势是启动快、入口密度高；缺点是它更像启动器，主标签页“信息首页”的感觉弱一些。
+            </div>
+          </article>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const buttons = document.querySelectorAll("[data-target]");
+    const views = document.querySelectorAll(".view");
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        buttons.forEach((item) => item.classList.remove("active"));
+        views.forEach((view) => view.classList.remove("active"));
+        button.classList.add("active");
+        document.getElementById(button.dataset.target).classList.add("active");
+      });
+    });
+  </script>
+</body>
+</html>

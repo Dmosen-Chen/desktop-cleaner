@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import unittest
 from pathlib import Path
@@ -1201,6 +1202,22 @@ class ItemGroupRenderingTests(unittest.TestCase):
             entries.append(IndexedItem(path))
         return entries
 
+    def test_item_grid_main_class_does_not_depend_on_legacy_group_popup(self) -> None:
+        from desktop_tidy.ui import item_grid as item_grid_module
+
+        source = inspect.getsource(item_grid_module)
+
+        self.assertNotIn("GroupFolderPopup", source)
+        self.assertNotIn("_GroupPopupBackdrop", source)
+        self.assertNotIn("groupPopupBackdrop", source)
+
+    def test_item_grid_group_rename_does_not_depend_on_input_dialog(self) -> None:
+        from desktop_tidy.ui import item_grid as item_grid_module
+
+        source = inspect.getsource(item_grid_module)
+
+        self.assertNotIn("QInputDialog", source)
+
     def test_group_block_renders_folder_cell_instead_of_inline_members(self) -> None:
         from desktop_tidy.ui.item_grid import GroupBlock
 
@@ -1535,6 +1552,67 @@ class ItemGroupRenderingTests(unittest.TestCase):
             self.assertIsNone(widget._open_group_popup)
             self.assertIsNone(widget._group_backdrop)
 
+    def test_pending_group_open_keeps_existing_inline_expansion_open(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            widget._switch_group_folder("g1")
+            self.app.processEvents()
+            expansion = widget._inline_group_expansion
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+            self.assertTrue(expansion.isVisible())
+
+            widget._pending_group_open_id = "g1"
+            widget._open_pending_group_folder()
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "g1")
+            self.assertTrue(expansion.isVisible())
+
+    def test_press_activation_keeps_existing_inline_expansion_open(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = self._entries(root, ["a.png", "b.png"])
+            widget.resize(640, 400)
+            widget.show()
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            self.app.processEvents()
+
+            widget._switch_group_folder("g1")
+            self.app.processEvents()
+            expansion = widget._inline_group_expansion
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+            self.assertTrue(expansion.isVisible())
+
+            widget._activate_folder_on_press("g1")
+            self.app.processEvents()
+
+            self.assertEqual(widget._open_group_id, "g1")
+            self.assertTrue(expansion.isVisible())
+
     def test_f2_renames_open_group_without_dialog(self) -> None:
         from desktop_tidy.ui.item_grid import GroupBlock
 
@@ -1562,10 +1640,8 @@ class ItemGroupRenderingTests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(widget._open_group_id, "g1")
 
-            with patch("desktop_tidy.ui.item_grid.QInputDialog.getText") as dialog:
-                dialog.side_effect = AssertionError("F2 group rename should be inline")
-                QTest.keyClick(widget, Qt.Key.Key_F2)
-                self.app.processEvents()
+            QTest.keyClick(widget, Qt.Key.Key_F2)
+            self.app.processEvents()
 
             editor = widget._folder_rename_editors_by_group_id.get("g1")
             self.assertIsNotNone(editor)
@@ -2062,6 +2138,45 @@ class ItemGroupRenderingTests(unittest.TestCase):
             self.assertIsNone(widget._context_menu)
             self.assertEqual(widget._open_group_id, "g1")
 
+    def test_left_click_open_group_keeps_inline_expansion_open(self) -> None:
+        from desktop_tidy.ui.item_grid import GroupBlock
+
+        widget = make_item_grid(active_tab_id="tab-images")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [IndexedItem(root / f"{name}.png") for name in ["a", "b"]]
+            for entry in entries:
+                entry.path.write_text("x", encoding="utf-8")
+            block = GroupBlock(
+                group_id="g1",
+                name="Group",
+                members=[entry.path.resolve() for entry in entries],
+            )
+            widget.set_entries(entries, groups=[block])
+            widget.resize(420, 260)
+            widget.show()
+            process_qt_events()
+            folder_cell = widget._cells_by_group_id["g1"]
+            local = folder_cell.rect().center()
+
+            widget._switch_group_folder("g1")
+            process_qt_events()
+            expansion = widget._inline_group_expansion
+            self.assertIsNotNone(expansion)
+            assert expansion is not None
+            self.assertTrue(expansion.isVisible())
+
+            QTest.mouseClick(
+                folder_cell,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                local,
+            )
+            process_qt_events()
+
+            self.assertEqual(widget._open_group_id, "g1")
+            self.assertTrue(expansion.isVisible())
+
     def test_group_rename_uses_inline_editor_without_dialog(self) -> None:
         from desktop_tidy.ui.item_grid import GroupBlock
 
@@ -2081,9 +2196,7 @@ class ItemGroupRenderingTests(unittest.TestCase):
             process_qt_events()
             spy = QSignalSpy(widget.group_rename_requested)
 
-            with patch("desktop_tidy.ui.item_grid.QInputDialog.getText") as dialog:
-                dialog.side_effect = AssertionError("group rename should be inline")
-                widget._prompt_rename_group("g1", "旧名字")
+            widget._prompt_rename_group("g1", "旧名字")
 
             editor = widget._cells_by_group_id["g1"].findChild(QLineEdit)
             self.assertIsNotNone(editor)

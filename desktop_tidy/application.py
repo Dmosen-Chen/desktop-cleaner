@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import atexit
 import weakref
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
@@ -37,27 +40,34 @@ from desktop_tidy.services.desktop_takeover import (
 )
 from desktop_tidy.services.diagnostics import DiagnosticsService, RecoveryResult
 from desktop_tidy.services.activation import ActivationServer
-from desktop_tidy.services.item_launcher import open_item
+from desktop_tidy.services.item_launcher import open_item, open_url
 from desktop_tidy.services.logging_setup import (
     configure_logging,
     get_logger,
     install_global_exception_hook,
     log_exception,
 )
+from desktop_tidy.services.recent_items import RecentItemsStore, default_windows_recent_dir
 from desktop_tidy.services.screens import available_screen_geometries, available_screens
 from desktop_tidy.services.startup import StartupService
 from desktop_tidy.services.updates import DownloadResult, UpdateInfo, UpdateService
+from desktop_tidy.services.weather import OpenMeteoWeatherService, WeatherLookupError
 from desktop_tidy.ui.app_icons import apply_application_icon
 from desktop_tidy.ui.item_grid import GroupBlock, ItemGridWidget
 from desktop_tidy.ui.panel_group import PanelGroupWidget
 from desktop_tidy.ui.settings_window import SettingsWindow
 from desktop_tidy.ui.tray import TrayController
 from desktop_tidy.version import APP_VERSION
+from desktop_tidy.widgets.dashboard_modules import default_dashboard_modules
 
 
 APP_DIR_NAME = "DesktopCleaner"
 APP_CONFIG_NAME = "config.json"
 APP_APPEARANCE_DEFAULTS = AppearanceSettings("#000000", 0.60)
+_REMINDER_TIME_RE = re.compile(
+    r"^\s*(?:(?:\d{4}[-/])?\d{1,2}[-/]\d{1,2}\s+)?"
+    r"(?P<hour>[0-2]?\d):(?P<minute>[0-5]\d)\b"
+)
 
 
 def resolve_startup_executable_path(
@@ -301,6 +311,10 @@ def _app_can_manage_group_folders(app: DesktopCleanerApplication) -> bool:
     return isValid(panel)
 
 
+class _WeatherRefreshSignals(QObject):
+    completed = Signal(int, str, object, object)
+
+
 class DesktopCleanerApplication:
     """Qt desktop panel application that reads the desktop without takeover."""
 
@@ -315,6 +329,7 @@ class DesktopCleanerApplication:
         activation_server: ActivationServer | None = None,
         history_store: LayoutHistoryStore | None = None,
         update_service: UpdateService | None = None,
+        weather_service: OpenMeteoWeatherService | None = None,
     ) -> None:
         should_configure_logging = config is None or store is not None
         if config is None:
@@ -327,6 +342,10 @@ class DesktopCleanerApplication:
             is_new_config = store is not None and not self.store.path.is_file()
         if is_new_config:
             apply_application_appearance_defaults(self.model.config)
+        self.recent_items_store = RecentItemsStore(
+            self.store.path.with_name("recent-items.json"),
+            windows_recent_dir=default_windows_recent_dir(),
+        )
         existing_home = self.model.home_tab()
         existing_home_group = self.model.group(existing_home.group_id) if existing_home else None
         existing_home_active = existing_home_group.active_tab_id if existing_home_group else ""
@@ -340,6 +359,8 @@ class DesktopCleanerApplication:
             or existing_home_active != self._home_tab.id
             or not existing_home_first
         )
+        if self._sync_home_dashboard_settings():
+            self._home_startup_dirty = True
         self.config = self.model.config
         self.takeover_service = takeover_service or DesktopTakeoverService()
         self._takeover_marker = TakeoverSessionMarker(
@@ -369,6 +390,9 @@ class DesktopCleanerApplication:
         self._deferred_save_timer.setSingleShot(True)
         self._deferred_save_timer.setInterval(450)
         self._deferred_save_timer.timeout.connect(self._flush_deferred_save)
+        self._reminder_timer = QTimer()
+        self._reminder_timer.setInterval(30_000)
+        self._reminder_timer.timeout.connect(self._check_due_home_reminders)
         if recover_abandoned_takeover(self.takeover_service, self._takeover_marker):
             self.model.config.desktop.restore_required = False
             self.model.config.desktop.explorer_icons_hidden = False
@@ -387,6 +411,17 @@ class DesktopCleanerApplication:
         self.update_service = update_service or UpdateService(
             updates_dir=self.store.path.parent / "updates"
         )
+        self.weather_service = weather_service or OpenMeteoWeatherService()
+        self._weather_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="DesktopCleanerWeather",
+        )
+        self._weather_refresh_signals = _WeatherRefreshSignals()
+        self._weather_refresh_signals.completed.connect(
+            self._on_weather_refresh_finished
+        )
+        self._weather_request_token = 0
+        self._auto_weather_refresh_keys: set[str] = set()
         self._latest_update_info: UpdateInfo | None = None
         self._downloaded_update: DownloadResult | None = None
         self._update_status_message = "点击检查更新。"
@@ -407,6 +442,8 @@ class DesktopCleanerApplication:
                 application.installEventFilter(_mouse_filter)
         self._connect_tray()
         self.activation_server.activated.connect(self._show_panels_from_tray)
+        self._check_due_home_reminders()
+        self._reminder_timer.start()
 
     def panel_widgets(self) -> list[PanelGroupWidget]:
         return list(self._panels.values())
@@ -527,7 +564,7 @@ class DesktopCleanerApplication:
     def _on_global_mouse_press(self, widget: QWidget) -> None:
         if self._shutdown_started or self._closing_group_from_focus:
             return
-        if self._widget_is_inside_group_popup(widget):
+        if self._widget_is_inside_group_layer(widget):
             return
         clicked_grid = self._item_grid_for_widget(widget)
         if clicked_grid is not None and self._group_id_for_widget(widget):
@@ -586,11 +623,16 @@ class DesktopCleanerApplication:
             current = current.parentWidget()
         return False
 
-    def _widget_is_inside_group_popup(self, widget: QWidget) -> bool:
+    def _widget_is_inside_group_layer(self, widget: QWidget) -> bool:
         current: QWidget | None = widget
         while current is not None:
             try:
-                if current.objectName() == "groupFolderPopupRoot":
+                if current.objectName() in {
+                    "inlineGroupExpansion",
+                    "inlineGroupCard",
+                    "inlineGroupItem",
+                    "groupFolderPopupRoot",
+                }:
                     return True
                 current = current.parentWidget()
             except RuntimeError:
@@ -631,6 +673,7 @@ class DesktopCleanerApplication:
         if self._shutdown_started:
             return
         self._shutdown_started = True
+        self._weather_executor.shutdown(wait=False, cancel_futures=True)
         _active_desktop_apps.discard(self)
         for panel in self._panels.values():
             panel._persist_geometry_from_widget(update_rh=not panel.is_collapsed)
@@ -681,6 +724,84 @@ class DesktopCleanerApplication:
         except Exception as exc:
             log_exception("show tray notification", exc)
 
+    def _check_due_home_reminders(self, now: datetime | None = None) -> None:
+        current = now or datetime.now()
+        home = self.model.home_tab()
+        if home is None:
+            return
+        settings = dict(home.widget_settings)
+        reminders = self._home_module_list_setting(settings, "schedule", "reminders")
+        if not isinstance(reminders, list):
+            return
+        notified = {
+            str(value)
+            for value in settings.get("notified_reminders", [])
+            if str(value).strip()
+        }
+        valid_due_keys: set[str] = set()
+        changed = False
+        for reminder in reminders:
+            payload = self._due_reminder_payload(reminder, current)
+            if payload is None:
+                continue
+            key, text = payload
+            valid_due_keys.add(key)
+            if key in notified:
+                continue
+            self._notify_user("日程提醒", text)
+            notified.add(key)
+            changed = True
+        if changed:
+            settings["notified_reminders"] = sorted(notified & valid_due_keys)
+            home.widget_settings = settings
+            self._schedule_deferred_save()
+
+    def _home_module_list_setting(
+        self,
+        settings: dict[str, object],
+        module_id: str,
+        key: str,
+    ) -> list[object] | object:
+        modules = settings.get("module_settings")
+        if isinstance(modules, dict):
+            module_settings = modules.get(module_id)
+            if isinstance(module_settings, dict):
+                value = module_settings.get(key)
+                if isinstance(value, list):
+                    return list(value)
+        return settings.get(key)
+
+    def _due_reminder_payload(
+        self,
+        reminder: object,
+        now: datetime,
+    ) -> tuple[str, str] | None:
+        if not isinstance(reminder, dict):
+            return None
+        if bool(reminder.get("done")):
+            return None
+        date_value = str(reminder.get("date") or "").strip()
+        text = str(reminder.get("text") or reminder.get("title") or "").strip()
+        if not date_value or not text:
+            return None
+        try:
+            reminder_date = datetime.strptime(date_value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        if reminder_date != now.date():
+            return None
+        match = _REMINDER_TIME_RE.match(text)
+        if not match:
+            return None
+        hour = int(match.group("hour"))
+        minute = int(match.group("minute"))
+        if hour > 23:
+            return None
+        reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if reminder_time > now:
+            return None
+        return f"{date_value}|{text}", text
+
     def _quit_from_tray(self) -> None:
         self._on_about_to_quit()
         application = QApplication.instance()
@@ -695,6 +816,47 @@ class DesktopCleanerApplication:
         )
         self.save()
         self.refresh()
+
+    def _sync_home_dashboard_settings(self) -> bool:
+        home = self.model.home_tab()
+        if home is None:
+            return False
+        settings = dict(home.widget_settings)
+        changed = False
+
+        module_definitions = default_dashboard_modules()
+        valid_module_ids = [entry.id for entry in module_definitions]
+        default_module_ids = [entry.id for entry in module_definitions if entry.default_visible]
+        modules = settings.get("modules")
+        if isinstance(modules, list):
+            valid = set(valid_module_ids)
+            cleaned_modules = [str(entry) for entry in modules if str(entry) in valid]
+            if cleaned_modules != modules:
+                settings["modules"] = cleaned_modules
+                changed = True
+        else:
+            settings["modules"] = default_module_ids
+            changed = True
+
+        for key, default_value in {
+            "module_settings": {},
+            "bookmarks": [],
+            "reminders": [],
+            "weather": {},
+            "reduced_motion": False,
+        }.items():
+            if key not in settings:
+                settings[key] = default_value
+                changed = True
+
+        recent_items = self.recent_items_store.dashboard_snapshot(limit=8)
+        if settings.get("recent_items") != recent_items:
+            settings["recent_items"] = recent_items
+            changed = True
+
+        if changed:
+            home.widget_settings = settings
+        return changed
 
     def refresh(self, _changes: IndexChanges | None = None) -> None:
         issues = self.model.repair_metadata(desktop_roots=self.index.directories())
@@ -762,6 +924,18 @@ class DesktopCleanerApplication:
         panel.item_grid.set_group_accent_color(self.ui_preferences.group_accent_color)
         panel.tab_detach_requested.connect(self._on_tab_detach_requested)
         panel.tab_reordered.connect(self._on_panel_tab_reordered)
+        panel.widget_settings_changed.connect(self._on_widget_settings_changed)
+        panel.widget_item_open_requested.connect(self._on_widget_item_open_requested)
+        panel.widget_url_open_requested.connect(self._on_widget_url_open_requested)
+        panel.widget_weather_refresh_requested.connect(
+            self._on_widget_weather_refresh_requested
+        )
+        panel.widget_recent_refresh_requested.connect(
+            self._on_widget_recent_refresh_requested
+        )
+        panel.widget_recent_clear_requested.connect(
+            self._on_widget_recent_clear_requested
+        )
         panel.item_dropped_on_tab.connect(self._on_item_dropped_on_tab)
         panel.item_drag_over_tab.connect(self._on_item_drag_over_tab)
         panel.group_merge_requested.connect(self._on_group_merge_requested)
@@ -812,9 +986,19 @@ class DesktopCleanerApplication:
         self.save_with_history("panel-change")
         self.refresh()
 
-    def _on_panel_active_tab_changed(self, group_id: str, _tab_id: str) -> None:
+    def _on_panel_active_tab_changed(self, group_id: str, tab_id: str) -> None:
         panel = self._panels.get(group_id)
         if panel is None:
+            return
+        try:
+            tab = self.model.tab(tab_id)
+        except KeyError:
+            tab = None
+        if tab is not None and tab.content_kind == "widget" and tab.widget_type == "home":
+            if self._sync_home_dashboard_settings():
+                panel.reload_from_model()
+            self._maybe_auto_refresh_home_weather()
+            self._schedule_deferred_save()
             return
         self._refresh_panel_item_grid(panel)
         self._schedule_deferred_save()
@@ -831,6 +1015,25 @@ class DesktopCleanerApplication:
     def _on_panel_tab_reordered(self, _group_id: str) -> None:
         self.save_with_history("tab-reorder")
         self.refresh()
+
+    def _on_widget_settings_changed(self, tab_id: str, settings: object) -> None:
+        if not isinstance(settings, dict):
+            return
+        try:
+            tab = self.model.tab(tab_id)
+        except KeyError:
+            return
+        if tab.content_kind != "widget":
+            return
+        merged = dict(tab.widget_settings)
+        merged.update(settings)
+        tab.widget_settings = merged
+        if tab.widget_type == "home":
+            self._sync_home_dashboard_settings()
+        panel = self._panels.get(tab.group_id)
+        if panel is not None and panel.active_tab_id == tab.id:
+            panel.reload_from_model()
+        self._schedule_deferred_save()
 
     def _on_items_reordered(self, tab_id: str, paths: object) -> None:
         ordered = [Path(entry) for entry in paths]  # type: ignore[union-attr]
@@ -1062,6 +1265,200 @@ class DesktopCleanerApplication:
             open_item(path)
         except Exception as exc:
             log_exception(f"open item {path}", exc)
+            return
+        try:
+            self.recent_items_store.record(path)
+            if self._sync_home_dashboard_settings():
+                panel = self._panels.get(self._home_tab.group_id)
+                if panel is not None and panel.active_tab_id == self._home_tab.id:
+                    panel.reload_from_model()
+                self._schedule_deferred_save()
+        except Exception as exc:
+            log_exception(f"record recent item {path}", exc)
+
+    def _on_widget_item_open_requested(self, path: str) -> None:
+        self._on_item_activated(Path(path))
+
+    def _on_widget_url_open_requested(self, url: str) -> None:
+        try:
+            open_url(url)
+        except Exception as exc:
+            log_exception(f"open url {url}", exc)
+
+    def _on_widget_recent_refresh_requested(self) -> None:
+        if not self._sync_home_dashboard_settings():
+            return
+        panel = self._panels.get(self._home_tab.group_id)
+        if panel is not None and panel.active_tab_id == self._home_tab.id:
+            panel.reload_from_model()
+        self._schedule_deferred_save()
+
+    def _on_widget_recent_clear_requested(self) -> None:
+        try:
+            self.recent_items_store.clear()
+        except Exception as exc:
+            log_exception("clear recent items", exc)
+            return
+        if not self._sync_home_dashboard_settings():
+            return
+        panel = self._panels.get(self._home_tab.group_id)
+        if panel is not None and panel.active_tab_id == self._home_tab.id:
+            panel.reload_from_model()
+        self._schedule_deferred_save()
+
+    def _on_widget_weather_refresh_requested(self, city: str) -> None:
+        city_value = str(city).strip()
+        if not city_value:
+            return
+        home = self.model.home_tab()
+        if home is None:
+            return
+        self._weather_request_token += 1
+        token = self._weather_request_token
+        future = self._weather_executor.submit(
+            self.weather_service.fetch_current,
+            city_value,
+        )
+        future.add_done_callback(
+            lambda done, request_token=token, request_city=city_value: self._emit_weather_refresh_result(
+                request_token,
+                request_city,
+                done,
+            )
+        )
+
+    def _maybe_auto_refresh_home_weather(self) -> None:
+        home = self.model.home_tab()
+        if home is None:
+            return
+        settings = dict(home.widget_settings)
+        weather_settings = self._home_module_dict_setting(
+            settings,
+            "weather",
+            "weather",
+        )
+        legacy_weather = settings.get("weather")
+        if isinstance(legacy_weather, dict):
+            weather_settings = {**legacy_weather, **weather_settings}
+        city = str(weather_settings.get("city") or "").strip()
+        summary = str(weather_settings.get("summary") or "").strip()
+        if not city or summary:
+            return
+        refresh_key = city.casefold()
+        if refresh_key in self._auto_weather_refresh_keys:
+            return
+        self._auto_weather_refresh_keys.add(refresh_key)
+        self._on_widget_weather_refresh_requested(city)
+
+    def _home_module_dict_setting(
+        self,
+        settings: dict[str, object],
+        module_id: str,
+        key: str,
+    ) -> dict[str, object]:
+        modules = settings.get("module_settings")
+        if isinstance(modules, dict):
+            module_settings = modules.get(module_id)
+            if isinstance(module_settings, dict):
+                value = module_settings.get(key)
+                if isinstance(value, dict):
+                    return dict(value)
+        value = settings.get(key)
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _set_home_module_setting(
+        self,
+        settings: dict[str, object],
+        module_id: str,
+        key: str,
+        value: object,
+    ) -> None:
+        modules = settings.get("module_settings")
+        module_settings = dict(modules) if isinstance(modules, dict) else {}
+        current = module_settings.get(module_id)
+        module_payload = dict(current) if isinstance(current, dict) else {}
+        module_payload[key] = value
+        module_settings[module_id] = module_payload
+        settings["module_settings"] = module_settings
+        settings[key] = value
+
+    def _emit_weather_refresh_result(
+        self,
+        token: int,
+        city: str,
+        future: Future,
+    ) -> None:
+        if self._shutdown_started:
+            return
+        report = None
+        error = None
+        try:
+            report = future.result()
+        except WeatherLookupError as exc:
+            error = exc
+        except Exception as exc:
+            error = exc
+        self._weather_refresh_signals.completed.emit(token, city, report, error)
+
+    def _on_weather_refresh_finished(
+        self,
+        token: int,
+        city: str,
+        report: object,
+        error: object,
+    ) -> None:
+        if self._shutdown_started or token != self._weather_request_token:
+            return
+        if error is not None:
+            log_exception(f"refresh weather {city}", error)
+            home = self.model.home_tab()
+            if home is not None:
+                settings = dict(home.widget_settings)
+                weather_settings = self._home_module_dict_setting(
+                    settings,
+                    "weather",
+                    "weather",
+                )
+                weather_settings.setdefault("city", city)
+                weather_settings["error"] = "天气刷新失败，请稍后再试"
+                self._set_home_module_setting(
+                    settings,
+                    "weather",
+                    "weather",
+                    weather_settings,
+                )
+                home.widget_settings = settings
+                panel = self._panels.get(home.group_id)
+                if panel is not None and panel.active_tab_id == home.id:
+                    panel.reload_from_model()
+                self._schedule_deferred_save()
+            return
+        if report is None:
+            return
+        home = self.model.home_tab()
+        if home is None:
+            return
+        weather_settings = {
+            "city": report.city,
+            "summary": report.summary,
+            "provider": report.provider,
+        }
+        if report.temperature_c is not None:
+            weather_settings["temperature_c"] = report.temperature_c
+        if report.condition:
+            weather_settings["condition"] = report.condition
+        settings = dict(home.widget_settings)
+        self._set_home_module_setting(
+            settings,
+            "weather",
+            "weather",
+            weather_settings,
+        )
+        home.widget_settings = settings
+        panel = self._panels.get(home.group_id)
+        if panel is not None and panel.active_tab_id == home.id:
+            panel.reload_from_model()
+        self._schedule_deferred_save()
 
     def _on_tab_detach_requested(self, tab_id: str, geometry: object) -> None:
         if not isinstance(geometry, PanelGeometry):
@@ -1618,6 +2015,7 @@ class DesktopCleanerApplication:
             panel.show()
         self._sync_panel_snap_targets()
         self.refresh()
+        self._maybe_auto_refresh_home_weather()
         if self._home_startup_dirty:
             self._schedule_deferred_save()
         self._apply_startup_preference()

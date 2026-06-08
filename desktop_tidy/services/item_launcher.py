@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def open_item(path: str | Path) -> None:
@@ -21,3 +22,19 @@ def open_item(path: str | Path) -> None:
         from PySide6.QtGui import QDesktopServices
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
+
+
+def open_url(url: str) -> None:
+    """Open a web URL with the OS default browser."""
+
+    value = str(url).strip()
+    if not value:
+        raise ValueError("url is empty")
+    parsed = urlparse(value)
+    if not parsed.scheme:
+        value = f"https://{value}"
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    if not QDesktopServices.openUrl(QUrl(value)):
+        raise RuntimeError(f"failed to open url: {value}")

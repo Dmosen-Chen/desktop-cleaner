@@ -684,6 +684,7 @@ class SettingsWindowTests(unittest.TestCase):
         text = window.all_text()
 
         self.assertIn("时间面板", text)
+        self.assertNotIn("主标签页", text)
         self.assertNotIn("时间面板预览", text)
         self.assertIn("#", window._clock_widget_card.styleSheet())
         self.assertIn(clock_definition.preview_background, window._clock_widget_preview.styleSheet())

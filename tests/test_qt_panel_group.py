@@ -184,6 +184,76 @@ class PanelGroupWidgetTests(unittest.TestCase):
         self.assertNotIn("qlineargradient", clock_widget.styleSheet())
         self.assertNotIn("border-radius: 16px", clock_widget.styleSheet())
 
+    def test_home_widget_expands_to_panel_content_width(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        home_tab = model.ensure_home_tab()
+        widget = PanelGroupWidget(
+            model.group("group-default"),
+            model.config.panel_tabs,
+            workspace=model,
+        )
+        widget.resize(1200, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        widget.activate_tab(home_tab.id)
+        type(self).app.processEvents()
+
+        home_widget = widget.findChild(QWidget, "HomeDashboardWidgetRoot")
+        self.assertIsNotNone(home_widget)
+        self.assertGreaterEqual(home_widget.width(), widget._content_host.width() - 4)
+        self.assertEqual(home_widget.property("layout_columns"), 4)
+        self.assertEqual(home_widget.property("dashboard_mode"), "wide")
+
+    def test_home_weather_refresh_request_is_forwarded_from_panel(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        home_tab = model.ensure_home_tab()
+        home_tab.widget_settings["weather"] = {"city": "London"}
+        widget = PanelGroupWidget(
+            model.group("group-default"),
+            model.config.panel_tabs,
+            workspace=model,
+        )
+        spy = QSignalSpy(widget.widget_weather_refresh_requested)
+
+        widget.activate_tab(home_tab.id)
+        type(self).app.processEvents()
+        edit_button = widget.findChild(QPushButton, "HomeEditButton")
+        self.assertIsNotNone(edit_button)
+        QTest.mouseClick(edit_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+        city_input = widget.findChild(QLineEdit, "HomeEditorWeatherCityInput")
+        refresh_button = widget.findChild(QPushButton, "HomeEditorWeatherRefreshButton")
+        self.assertIsNotNone(city_input)
+        self.assertIsNotNone(refresh_button)
+
+        city_input.setText("London")
+        refresh_button.click()
+
+        self.assertEqual(spy.count(), 1)
+        self.assertEqual(spy.at(0)[0], "London")
+
+    def test_home_recent_refresh_request_is_forwarded_from_panel(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        home_tab = model.ensure_home_tab()
+        widget = PanelGroupWidget(
+            model.group("group-default"),
+            model.config.panel_tabs,
+            workspace=model,
+        )
+        spy = QSignalSpy(widget.widget_recent_refresh_requested)
+
+        widget.activate_tab(home_tab.id)
+        type(self).app.processEvents()
+        refresh_button = widget.findChild(QPushButton, "HomeRecentRefreshButton")
+        self.assertIsNotNone(refresh_button)
+        QTest.mouseClick(refresh_button, Qt.MouseButton.LeftButton)
+
+        self.assertEqual(spy.count(), 1)
+
     def test_tab_button_click_switches_active_tab_without_drag(self) -> None:
         """Plain tab click must switch content; drag-detection must not swallow clicks."""
         widget, _model = make_group_widget()

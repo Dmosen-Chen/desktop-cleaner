@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from pathlib import Path
 
@@ -204,6 +205,12 @@ class PanelGroupWidget(QWidget):
     item_drag_over_tab = Signal(str)
     group_merge_requested = Signal(str, int, int)
     close_requested = Signal()
+    widget_settings_changed = Signal(str, object)
+    widget_item_open_requested = Signal(str)
+    widget_url_open_requested = Signal(str)
+    widget_weather_refresh_requested = Signal(str)
+    widget_recent_refresh_requested = Signal()
+    widget_recent_clear_requested = Signal()
 
     def __init__(
         self,
@@ -240,6 +247,7 @@ class PanelGroupWidget(QWidget):
         self._widget_registry = BuiltinWidgetRegistry()
         self._widget_content: QWidget | None = None
         self._widget_content_type = ""
+        self._widget_content_settings_fingerprint = ""
 
         self.setWindowFlags(
             Qt.WindowType.Window
@@ -407,21 +415,100 @@ class PanelGroupWidget(QWidget):
         widget_type: str,
         settings: dict[str, object],
     ) -> None:
-        if self._widget_content is None or self._widget_content_type != widget_type:
+        settings_fingerprint = json.dumps(
+            settings,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+        needs_rebuild = (
+            self._widget_content is None
+            or self._widget_content_type != widget_type
+            or self._widget_content_settings_fingerprint != settings_fingerprint
+        )
+        if needs_rebuild:
             if self._widget_content is not None:
                 self._content_layout.removeWidget(self._widget_content)
                 self._widget_content.deleteLater()
             plugin = self._widget_registry.get(widget_type)
             self._widget_content = plugin.create_widget(settings)
             self._widget_content_type = widget_type
+            self._widget_content_settings_fingerprint = settings_fingerprint
             self._widget_content.setParent(self._content_host)
-            self._content_layout.addWidget(
+            settings_changed = getattr(self._widget_content, "settings_changed", None)
+            if settings_changed is not None:
+                try:
+                    settings_changed.connect(self._forward_widget_settings_changed)
+                except TypeError:
+                    pass
+            item_open_requested = getattr(self._widget_content, "item_open_requested", None)
+            if item_open_requested is not None:
+                try:
+                    item_open_requested.connect(self.widget_item_open_requested.emit)
+                except TypeError:
+                    pass
+            url_open_requested = getattr(self._widget_content, "url_open_requested", None)
+            if url_open_requested is not None:
+                try:
+                    url_open_requested.connect(self.widget_url_open_requested.emit)
+                except TypeError:
+                    pass
+            weather_refresh_requested = getattr(
                 self._widget_content,
-                alignment=Qt.AlignmentFlag.AlignCenter,
+                "weather_refresh_requested",
+                None,
             )
+            if weather_refresh_requested is not None:
+                try:
+                    weather_refresh_requested.connect(
+                        self.widget_weather_refresh_requested.emit
+                    )
+                except TypeError:
+                    pass
+            recent_refresh_requested = getattr(
+                self._widget_content,
+                "recent_refresh_requested",
+                None,
+            )
+            if recent_refresh_requested is not None:
+                try:
+                    recent_refresh_requested.connect(
+                        self.widget_recent_refresh_requested.emit
+                    )
+                except TypeError:
+                    pass
+            recent_clear_requested = getattr(
+                self._widget_content,
+                "recent_clear_requested",
+                None,
+            )
+            if recent_clear_requested is not None:
+                try:
+                    recent_clear_requested.connect(
+                        self.widget_recent_clear_requested.emit
+                    )
+                except TypeError:
+                    pass
+            if widget_type == "home":
+                self._widget_content.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Expanding,
+                )
+                self._widget_content.setMaximumSize(16777215, 16777215)
+                self._content_layout.addWidget(self._widget_content, 1)
+            else:
+                self._content_layout.addWidget(
+                    self._widget_content,
+                    alignment=Qt.AlignmentFlag.AlignCenter,
+                )
         self._item_grid.hide()
         if self._widget_content is not None:
             self._widget_content.show()
+
+    def _forward_widget_settings_changed(self, settings: object) -> None:
+        tab_id = self._group.active_tab_id
+        if tab_id:
+            self.widget_settings_changed.emit(tab_id, settings)
 
     def detach_preview_visible(self) -> bool:
         return self._detach_preview.isVisible()

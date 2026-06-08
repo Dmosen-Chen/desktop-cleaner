@@ -1542,7 +1542,7 @@ class SettingsWindow(QWidget):
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("功能面板", page))
         registry = BuiltinWidgetRegistry()
-        for definition in registry.available():
+        for definition in registry.available_standalone_widgets():
             card = self._build_widget_definition_card(definition, page)
             if definition.id == "clock":
                 self._clock_widget_card = card
@@ -1557,7 +1557,7 @@ class SettingsWindow(QWidget):
     ) -> QFrame:
         visual = definition.visual
         card = QFrame(parent)
-        card.setFixedSize(definition.default_width, definition.default_height)
+        card.setFixedSize(320, 190)
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
             "QFrame { "
