@@ -33,6 +33,14 @@ class DashboardModuleDefinition:
     empty_policy: DashboardModuleEmptyPolicy = "normal"
     default_visible: bool = True
     refresh_interval_seconds: int = 0
+    layout_default_w: int = 2
+    layout_default_h: int = 1
+    layout_min_w: int = 1
+    layout_max_w: int = 8
+    layout_min_h: int = 1
+    layout_max_h: int = 3
+    standalone_enabled: bool = True
+    settings_section: str = ""
     factory: DashboardModuleFactory | None = field(default=None, repr=False, compare=False)
 
     def create_widget(
@@ -74,6 +82,10 @@ def default_dashboard_modules() -> tuple[DashboardModuleDefinition, ...]:
             preferred_span=2,
             render_mode="wide",
             empty_policy="normal",
+            layout_default_w=4,
+            layout_default_h=1,
+            layout_max_w=8,
+            layout_max_h=3,
             factory=_recent_module,
         ),
         DashboardModuleDefinition(
@@ -85,6 +97,11 @@ def default_dashboard_modules() -> tuple[DashboardModuleDefinition, ...]:
             preferred_span=1,
             render_mode="normal",
             empty_policy="compact",
+            layout_default_w=2,
+            layout_default_h=1,
+            layout_max_w=4,
+            layout_max_h=3,
+            settings_section="schedule",
             factory=_schedule_module,
         ),
         DashboardModuleDefinition(
@@ -96,6 +113,11 @@ def default_dashboard_modules() -> tuple[DashboardModuleDefinition, ...]:
             preferred_span=1,
             render_mode="normal",
             empty_policy="compact",
+            layout_default_w=2,
+            layout_default_h=1,
+            layout_max_w=4,
+            layout_max_h=3,
+            settings_section="bookmarks",
             factory=_bookmarks_module,
         ),
         DashboardModuleDefinition(
@@ -107,6 +129,10 @@ def default_dashboard_modules() -> tuple[DashboardModuleDefinition, ...]:
             preferred_span=1,
             render_mode="normal",
             empty_policy="normal",
+            layout_default_w=3,
+            layout_default_h=2,
+            layout_max_w=4,
+            layout_max_h=3,
             factory=_calendar_module,
         ),
         DashboardModuleDefinition(
@@ -118,6 +144,11 @@ def default_dashboard_modules() -> tuple[DashboardModuleDefinition, ...]:
             preferred_span=1,
             render_mode="normal",
             empty_policy="compact",
+            layout_default_w=2,
+            layout_default_h=1,
+            layout_max_w=4,
+            layout_max_h=3,
+            settings_section="weather",
             factory=_weather_module,
         ),
         DashboardModuleDefinition(
@@ -130,6 +161,12 @@ def default_dashboard_modules() -> tuple[DashboardModuleDefinition, ...]:
             render_mode="compact",
             empty_policy="compact",
             default_visible=False,
+            layout_default_w=2,
+            layout_default_h=1,
+            layout_max_w=3,
+            layout_max_h=2,
+            standalone_enabled=False,
+            settings_section="modules",
             factory=_module_manager_module,
         ),
     )
@@ -375,7 +412,7 @@ def _module_manager_module(
 ) -> QWidget:
     return _module_card(
         definition,
-        ["点击“编辑首页”调整显示和顺序。"],
+        ["在设置中管理首页模块、顺序和尺寸。"],
         compact=compact,
         render_mode=render_mode,
     )

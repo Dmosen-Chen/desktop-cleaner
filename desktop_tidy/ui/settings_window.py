@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -64,6 +65,11 @@ from desktop_tidy.ui.panel_preview import (
 )
 from desktop_tidy.widgets.models import WidgetDefinition
 from desktop_tidy.widgets.registry import BuiltinWidgetRegistry
+from desktop_tidy.widgets.home_layout import (
+    HomeLayoutSpec,
+    build_default_module_layout,
+    normalize_home_module_layout,
+)
 
 _SECTIONS = ["面板", "分类规则"]
 _OPACITY_MIN = 0.10
@@ -122,8 +128,19 @@ _DEFAULT_RULE_ROLES = {
     "rule-apps": "apps",
     "rule-other": "other",
 }
-_SECTIONS = _SECTIONS + ["面板历史", "功能面板", "诊断与恢复", "其他"]
+_SECTIONS = _SECTIONS + ["面板历史", "主标签页设置", "功能面板", "诊断与恢复", "其他"]
 _PANEL_COUNT_ROLE = Qt.ItemDataRole.UserRole.value + 64
+_HOME_DEFAULT_MODULE_WIDTHS = {
+    "recent": 4,
+    "calendar": 3,
+    "schedule": 2,
+    "bookmarks": 2,
+    "weather": 2,
+    "module_manager": 2,
+}
+_HOME_DEFAULT_MODULE_HEIGHTS = {
+    "calendar": 2,
+}
 _SETTINGS_WINDOW_STYLE = """
 QWidget#DesktopCleanerSettings {
     background: rgba(9, 11, 15, 214);
@@ -909,6 +926,8 @@ class SettingsWindow(QWidget):
         self._inline_edit_kind = ""
         self._inline_edit_id = ""
         self._active_rule_id = ""
+        self._home_module_controls: dict[str, tuple[QCheckBox, QSpinBox, QSpinBox, QPushButton, QPushButton]] = {}
+        self._home_layout_reset_requested = False
         self._appearance_save_timer = QTimer(self)
         self._appearance_save_timer.setSingleShot(True)
         self._appearance_save_timer.setInterval(250)
@@ -934,6 +953,7 @@ class SettingsWindow(QWidget):
         self._pages.addWidget(self._build_panel_management_page())
         self._pages.addWidget(self._build_rules_page())
         self._pages.addWidget(self._build_history_page())
+        self._pages.addWidget(self._build_home_settings_page())
         self._pages.addWidget(self._build_widgets_page())
         self._pages.addWidget(self._build_diagnostics_page())
         self._pages.addWidget(self._build_other_page())
@@ -1078,12 +1098,27 @@ class SettingsWindow(QWidget):
         self._reload_screen_layout(config)
         self._reload_panel_management(config)
         self._reload_rules_editor()
+        self._sync_home_settings_page(config)
         group = self._target_group(config)
         self._sync_appearance_controls_from_group(group)
         self._sync_new_item_placement_combo()
 
     def visible_section_names(self) -> list[str]:
         return list(_SECTIONS)
+
+    def select_section(self, name: str) -> bool:
+        try:
+            row = _SECTIONS.index(name)
+        except ValueError:
+            return False
+        self._section_list.setCurrentRow(row)
+        return True
+
+    def current_section_name(self) -> str:
+        row = self._section_list.currentRow()
+        if 0 <= row < len(_SECTIONS):
+            return _SECTIONS[row]
+        return ""
 
     def all_text(self) -> str:
         parts: list[str] = []
@@ -1537,6 +1572,250 @@ class SettingsWindow(QWidget):
         layout.addWidget(self._history_scroll, stretch=1)
         return page
 
+    def _build_home_settings_page(self) -> QWidget:
+        page = QWidget(self)
+        self._home_settings_page = page
+        layout = QVBoxLayout(page)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("主标签页设置", page))
+
+        modules_group = QGroupBox("首页模块", page)
+        modules_layout = QVBoxLayout(modules_group)
+        self._home_module_controls = {}
+        registry = BuiltinWidgetRegistry()
+        self._home_module_order = [
+            definition.id for definition in registry.home_plugin().module_definitions()
+        ]
+        for definition in registry.home_plugin().module_definitions():
+            row = QHBoxLayout()
+            toggle = QCheckBox(definition.display_name, modules_group)
+            toggle.setObjectName(f"HomeSettingsModuleToggle-{definition.id}")
+            width_spin = QSpinBox(modules_group)
+            width_spin.setObjectName(f"HomeSettingsModuleWidth-{definition.id}")
+            width_spin.setRange(definition.layout_min_w, definition.layout_max_w)
+            width_spin.setSuffix(" 宽")
+            height_spin = QSpinBox(modules_group)
+            height_spin.setObjectName(f"HomeSettingsModuleHeight-{definition.id}")
+            height_spin.setRange(definition.layout_min_h, definition.layout_max_h)
+            height_spin.setSuffix(" 高")
+            up_button = QPushButton("上移", modules_group)
+            up_button.setObjectName(f"HomeSettingsModuleUp-{definition.id}")
+            down_button = QPushButton("下移", modules_group)
+            down_button.setObjectName(f"HomeSettingsModuleDown-{definition.id}")
+            up_button.clicked.connect(
+                lambda _checked=False, module_id=definition.id: self._move_home_settings_module(module_id, -1)
+            )
+            down_button.clicked.connect(
+                lambda _checked=False, module_id=definition.id: self._move_home_settings_module(module_id, 1)
+            )
+            row.addWidget(toggle, 1)
+            row.addWidget(width_spin)
+            row.addWidget(height_spin)
+            row.addWidget(up_button)
+            row.addWidget(down_button)
+            modules_layout.addLayout(row)
+            self._home_module_controls[definition.id] = (
+                toggle,
+                width_spin,
+                height_spin,
+                up_button,
+                down_button,
+            )
+        reset_button = QPushButton("重置布局", modules_group)
+        reset_button.setObjectName("HomeSettingsResetLayoutButton")
+        reset_button.clicked.connect(self._reset_home_settings_layout)
+        modules_layout.addWidget(reset_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(modules_group)
+
+        content_group = QGroupBox("模块内容", page)
+        content_layout = QVBoxLayout(content_group)
+        content_layout.addWidget(QLabel("日程提醒", content_group))
+        self._home_reminders_edit = QPlainTextEdit(content_group)
+        self._home_reminders_edit.setObjectName("HomeSettingsRemindersEdit")
+        self._home_reminders_edit.setPlaceholderText("09:00 复盘\n18:00 备忘")
+        self._home_reminders_edit.setFixedHeight(76)
+        content_layout.addWidget(self._home_reminders_edit)
+
+        content_layout.addWidget(QLabel("网络收藏", content_group))
+        self._home_bookmarks_edit = QPlainTextEdit(content_group)
+        self._home_bookmarks_edit.setObjectName("HomeSettingsBookmarksEdit")
+        self._home_bookmarks_edit.setPlaceholderText("名称 | https://example.com")
+        self._home_bookmarks_edit.setFixedHeight(76)
+        content_layout.addWidget(self._home_bookmarks_edit)
+
+        weather_form = QFormLayout()
+        self._home_weather_city_input = QLineEdit(content_group)
+        self._home_weather_city_input.setObjectName("HomeSettingsWeatherCityInput")
+        self._home_weather_summary_input = QLineEdit(content_group)
+        self._home_weather_summary_input.setObjectName("HomeSettingsWeatherSummaryInput")
+        weather_form.addRow("天气城市", self._home_weather_city_input)
+        weather_form.addRow("天气摘要", self._home_weather_summary_input)
+        content_layout.addLayout(weather_form)
+        layout.addWidget(content_group)
+        layout.addStretch(1)
+        self._sync_home_settings_page(self._config)
+        return page
+
+    def _home_tab_for_config(self, config: Configuration):
+        for tab in config.panel_tabs:
+            if tab.content_kind == "widget" and tab.widget_type == "home":
+                return tab
+        return None
+
+    def _home_settings_from_config(self, config: Configuration) -> dict[str, object]:
+        registry = BuiltinWidgetRegistry()
+        settings = registry.home_plugin().default_settings()
+        tab = self._home_tab_for_config(config)
+        if tab is not None and isinstance(tab.widget_settings, dict):
+            settings.update(tab.widget_settings)
+        return settings
+
+    def _home_default_span_value(self, module_id: str) -> tuple[int, int]:
+        spec = self._home_layout_specs().get(module_id)
+        if spec is None:
+            return (2, 1)
+        return (spec.default_w, spec.default_h)
+
+    def _home_layout_specs(self) -> dict[str, HomeLayoutSpec]:
+        registry = BuiltinWidgetRegistry()
+        return {
+            definition.id: HomeLayoutSpec(
+                default_w=definition.layout_default_w,
+                default_h=definition.layout_default_h,
+                min_w=definition.layout_min_w,
+                max_w=definition.layout_max_w,
+                min_h=definition.layout_min_h,
+                max_h=definition.layout_max_h,
+            )
+            for definition in registry.home_plugin().module_definitions()
+        }
+
+    def _home_span_value(
+        self,
+        settings: dict[str, object],
+        module_id: str,
+    ) -> tuple[int, int]:
+        default_width, default_height = self._home_default_span_value(module_id)
+        layout = settings.get("module_layout")
+        if isinstance(layout, dict):
+            value = layout.get(module_id)
+            if isinstance(value, dict):
+                try:
+                    return (
+                        max(1, min(8, int(value.get("w", default_width)))),
+                        max(1, min(3, int(value.get("h", default_height)))),
+                    )
+                except (TypeError, ValueError):
+                    return (default_width, default_height)
+        spans = settings.get("module_spans")
+        value = spans.get(module_id) if isinstance(spans, dict) else None
+        if isinstance(value, dict):
+            width_value = value.get("w", value.get("width", default_width))
+            height_value = value.get("h", value.get("height", default_height))
+        else:
+            width_value = value if value is not None else default_width
+            height_value = default_height
+        try:
+            width = int(width_value)
+            height = int(height_value)
+        except (TypeError, ValueError):
+            return (default_width, default_height)
+        return (max(1, min(8, width)), max(1, min(3, height)))
+
+    def _sync_home_settings_page(self, config: Configuration | None = None) -> None:
+        if not hasattr(self, "_home_module_controls"):
+            return
+        config = config or self._config
+        settings = self._home_settings_from_config(config)
+        visible_modules = [
+            str(entry)
+            for entry in settings.get("modules", [])
+            if isinstance(entry, str)
+        ]
+        if visible_modules:
+            known = set(self._home_module_controls)
+            remainder = [mid for mid in self._home_module_order if mid not in visible_modules]
+            self._home_module_order = [
+                mid for mid in visible_modules if mid in known
+            ] + remainder
+        for module_id, controls in self._home_module_controls.items():
+            toggle, width_spin, height_spin, up_button, down_button = controls
+            toggle.setChecked(module_id in visible_modules)
+            width, height = self._home_span_value(settings, module_id)
+            width_spin.setValue(width)
+            height_spin.setValue(height)
+        self._sync_home_order_buttons()
+
+        module_settings = settings.get("module_settings")
+        modules = module_settings if isinstance(module_settings, dict) else {}
+        schedule = modules.get("schedule") if isinstance(modules.get("schedule"), dict) else {}
+        reminders = schedule.get("reminders", settings.get("reminders", []))
+        reminder_lines: list[str] = []
+        if isinstance(reminders, list):
+            for item in reminders:
+                if isinstance(item, dict):
+                    text = str(item.get("text") or item.get("title") or "").strip()
+                else:
+                    text = str(item).strip()
+                if text:
+                    reminder_lines.append(text)
+        self._home_reminders_edit.setPlainText("\n".join(reminder_lines))
+
+        bookmarks_module = (
+            modules.get("bookmarks") if isinstance(modules.get("bookmarks"), dict) else {}
+        )
+        bookmarks = bookmarks_module.get("bookmarks", settings.get("bookmarks", []))
+        bookmark_lines: list[str] = []
+        if isinstance(bookmarks, list):
+            for item in bookmarks:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                url = str(item.get("url") or "").strip()
+                if title or url:
+                    bookmark_lines.append(f"{title or url} | {url}")
+        self._home_bookmarks_edit.setPlainText("\n".join(bookmark_lines))
+
+        weather_module = modules.get("weather") if isinstance(modules.get("weather"), dict) else {}
+        weather = weather_module.get("weather", settings.get("weather", {}))
+        weather = weather if isinstance(weather, dict) else {}
+        self._home_weather_city_input.setText(str(weather.get("city") or ""))
+        self._home_weather_summary_input.setText(str(weather.get("summary") or ""))
+
+    def _move_home_settings_module(self, module_id: str, delta: int) -> None:
+        if module_id not in self._home_module_order:
+            return
+        index = self._home_module_order.index(module_id)
+        target = max(0, min(len(self._home_module_order) - 1, index + delta))
+        if target == index:
+            return
+        self._home_module_order.pop(index)
+        self._home_module_order.insert(target, module_id)
+        self._sync_home_order_buttons()
+
+    def _sync_home_order_buttons(self) -> None:
+        for module_id, controls in self._home_module_controls.items():
+            _toggle, _width_spin, _height_spin, up_button, down_button = controls
+            index = self._home_module_order.index(module_id)
+            up_button.setEnabled(index > 0)
+            down_button.setEnabled(index < len(self._home_module_order) - 1)
+
+    def _reset_home_settings_layout(self) -> None:
+        registry = BuiltinWidgetRegistry()
+        self._home_module_order = [
+            definition.id for definition in registry.home_plugin().module_definitions()
+        ]
+        defaults = registry.home_plugin().default_settings()
+        default_visible = set(defaults.get("modules", []))
+        for module_id, controls in self._home_module_controls.items():
+            toggle, width_spin, height_spin, _up_button, _down_button = controls
+            default_width, default_height = self._home_default_span_value(module_id)
+            toggle.setChecked(module_id in default_visible)
+            width_spin.setValue(default_width)
+            height_spin.setValue(default_height)
+        self._home_layout_reset_requested = True
+        self._sync_home_order_buttons()
+
     def _build_widgets_page(self) -> QWidget:
         page = QWidget(self)
         layout = QVBoxLayout(page)
@@ -1571,6 +1850,7 @@ class SettingsWindow(QWidget):
         header.addWidget(QLabel(definition.display_name, card))
         header.addStretch(1)
         button = QPushButton("+", card)
+        button.setObjectName(f"AddWidgetPanel-{definition.id}")
         button.setFixedSize(34, 30)
         button.setToolTip(f"创建独立{definition.display_name}")
         button.clicked.connect(
@@ -2173,6 +2453,100 @@ class SettingsWindow(QWidget):
             self.ui_preferences_changed.emit()
         return confirmed
 
+    def _write_home_settings_to_configuration(self, config: Configuration) -> None:
+        if not hasattr(self, "_home_module_controls"):
+            return
+        tab = self._home_tab_for_config(config)
+        if tab is None:
+            tab = WorkspaceModel(config).ensure_home_tab()
+        current = self._home_settings_from_config(config)
+        settings = dict(current)
+        visible_modules: list[str] = []
+        specs = self._home_layout_specs()
+        existing_layout = normalize_home_module_layout(
+            list(self._home_module_order),
+            specs,
+            settings,
+        )
+        if self._home_layout_reset_requested:
+            module_layout = build_default_module_layout(
+                list(self._home_module_order),
+                specs,
+            )
+        else:
+            module_layout = {
+                module_id: dict(existing_layout.get(module_id, {"x": 0, "y": 0, "w": 2, "h": 1}))
+                for module_id in self._home_module_order
+            }
+        for module_id in self._home_module_order:
+            controls = self._home_module_controls.get(module_id)
+            if controls is None:
+                continue
+            toggle, width_spin, height_spin, _up_button, _down_button = controls
+            if toggle.isChecked():
+                visible_modules.append(module_id)
+            module_layout.setdefault(module_id, {"x": 0, "y": 0, "w": 2, "h": 1})
+            module_layout[module_id]["w"] = width_spin.value()
+            module_layout[module_id]["h"] = height_spin.value()
+        settings["modules"] = visible_modules
+        settings["module_layout"] = normalize_home_module_layout(
+            list(self._home_module_order),
+            specs,
+            {"module_layout": module_layout},
+        )
+        settings.pop("module_spans", None)
+        settings.pop("module_positions", None)
+        if self._home_layout_reset_requested:
+            settings["layout_locked"] = True
+            self._home_layout_reset_requested = False
+        settings.setdefault("layout_locked", True)
+        settings.setdefault("reduced_motion", False)
+
+        module_settings = settings.get("module_settings")
+        modules = dict(module_settings) if isinstance(module_settings, dict) else {}
+
+        reminder_date = date.today().isoformat()
+        reminders = [
+            {"date": reminder_date, "text": line.strip()}
+            for line in self._home_reminders_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        schedule_settings = dict(modules.get("schedule")) if isinstance(modules.get("schedule"), dict) else {}
+        schedule_settings["reminders"] = reminders[:20]
+        modules["schedule"] = schedule_settings
+        settings["reminders"] = reminders[:20]
+
+        bookmarks: list[dict[str, str]] = []
+        for line in self._home_bookmarks_edit.toPlainText().splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            if "|" in value:
+                title, url = [part.strip() for part in value.split("|", 1)]
+            else:
+                title = value
+                url = value
+            if not url:
+                continue
+            bookmarks.append({"title": title or url, "url": url})
+        bookmarks_settings = (
+            dict(modules.get("bookmarks")) if isinstance(modules.get("bookmarks"), dict) else {}
+        )
+        bookmarks_settings["bookmarks"] = bookmarks[:50]
+        modules["bookmarks"] = bookmarks_settings
+        settings["bookmarks"] = bookmarks[:50]
+
+        city = self._home_weather_city_input.text().strip()
+        summary = self._home_weather_summary_input.text().strip()
+        weather_payload = {"city": city, "summary": summary} if city or summary else {}
+        weather_settings = dict(modules.get("weather")) if isinstance(modules.get("weather"), dict) else {}
+        weather_settings["weather"] = weather_payload
+        modules["weather"] = weather_settings
+        settings["weather"] = weather_payload
+
+        settings["module_settings"] = modules
+        tab.widget_settings = settings
+
     def _apply_editor_values_to_configuration(self, config: Configuration) -> None:
         config.desktop.path = self._desktop_path_edit.text().strip()
         config.desktop.takeover_enabled = self._takeover_checkbox.isChecked()
@@ -2183,6 +2557,7 @@ class SettingsWindow(QWidget):
             if rule.enabled and rule.target_tab_id not in valid_item_tab_ids:
                 rule.target_tab_id = self._suggested_target_for_rule(rule, config)
         self._write_back_rule_editor(config, self._current_rule_id())
+        self._write_home_settings_to_configuration(config)
         group = self._target_group(config)
         group.screen_id = self.selected_screen_id()
         # 颜色/透明度是全局外观,统一写入默认值和所有面板组。
@@ -2229,6 +2604,14 @@ class SettingsWindow(QWidget):
             if matching is None:
                 continue
             matching.appearance.item_icon_size = source_panel_group.appearance.item_icon_size
+        source_tabs = {tab.id: tab for tab in source.panel_tabs}
+        for target_tab in target.panel_tabs:
+            source_tab = source_tabs.get(target_tab.id)
+            if source_tab is None:
+                continue
+            target_tab.widget_settings = dict(source_tab.widget_settings)
+            target_tab.widget_type = source_tab.widget_type
+            target_tab.content_kind = source_tab.content_kind
 
     def _select_color(self, color: str) -> None:
         self._selected_color = color

@@ -121,7 +121,7 @@ class _TabDetachPreview(QWidget):
         self._label.setStyleSheet("color: #ffffff; background: transparent;")
         layout.addWidget(self._label)
         self.setStyleSheet(
-            "background: rgba(20, 20, 20, 0.72); border-radius: 8px;"
+            "background: rgba(20, 20, 20, 184); border-radius: 8px;"
         )
 
     def set_title(self, title: str) -> None:
@@ -198,6 +198,7 @@ class PanelGroupWidget(QWidget):
     appearance_changed = Signal()
     layout_gesture_started = Signal(str)
     settings_requested = Signal(str)
+    settings_section_requested = Signal(str, str)
     organize_requested = Signal(str)
     tab_detach_requested = Signal(str, object)
     tab_reordered = Signal(str)
@@ -286,12 +287,12 @@ class PanelGroupWidget(QWidget):
                 QSizePolicy.Policy.Fixed,
             )
             button.setStyleSheet(
-                "QPushButton { color: #ffffff; background: rgba(255,255,255,0.12); "
+                "QPushButton { color: #ffffff; background: rgba(255,255,255,31); "
                 "border: none; border-radius: 6px; padding: 0 8px; }"
-                "QPushButton:hover { background: rgba(255,255,255,0.22); }"
-                "QPushButton:pressed { background: rgba(255,255,255,0.34); }"
-                "QPushButton:disabled { color: rgba(255,255,255,0.32); "
-                "background: rgba(255,255,255,0.07); }"
+                "QPushButton:hover { background: rgba(255,255,255,56); }"
+                "QPushButton:pressed { background: rgba(255,255,255,87); }"
+                "QPushButton:disabled { color: rgba(255,255,255,82); "
+                "background: rgba(255,255,255,18); }"
             )
         header_row.addWidget(self.collapse_button)
         header_row.addWidget(self.lock_button)
@@ -306,8 +307,8 @@ class PanelGroupWidget(QWidget):
         self.inline_title_editor.setStyleSheet(
             "QLineEdit#inlineTabTitleEditor {"
             "  color: #ffffff;"
-            "  background: rgba(18, 18, 22, 0.92);"
-            "  border: 1px solid rgba(255, 255, 255, 0.72);"
+            "  background: rgba(18, 18, 22, 235);"
+            "  border: 1px solid rgba(255, 255, 255, 184);"
             "  border-radius: 6px;"
             "  padding: 2px 8px;"
             "}"
@@ -489,12 +490,26 @@ class PanelGroupWidget(QWidget):
                     )
                 except TypeError:
                     pass
+            home_settings_requested = getattr(
+                self._widget_content,
+                "home_settings_requested",
+                None,
+            )
+            if home_settings_requested is not None:
+                try:
+                    home_settings_requested.connect(
+                        lambda _section="": self.settings_section_requested.emit(
+                            self._group.id,
+                            "主标签页设置",
+                        )
+                    )
+                except TypeError:
+                    pass
             if widget_type == "home":
                 self._widget_content.setSizePolicy(
                     QSizePolicy.Policy.Expanding,
                     QSizePolicy.Policy.Expanding,
                 )
-                self._widget_content.setMaximumSize(16777215, 16777215)
                 self._content_layout.addWidget(self._widget_content, 1)
             else:
                 self._content_layout.addWidget(
@@ -913,9 +928,23 @@ class PanelGroupWidget(QWidget):
         return screen.bottom() - _PANEL_SCREEN_BOTTOM_INSET
 
     def _clamp_frame_bottom_to_screen(self, frame: QRect, screen: QRect) -> QRect:
+        max_width = max(_MIN_PANEL_WIDTH, screen.width())
+        if frame.width() > max_width:
+            frame.setWidth(max_width)
+        max_height = max(_MIN_PANEL_HEIGHT, screen.height() - _PANEL_SCREEN_BOTTOM_INSET)
+        if frame.height() > max_height:
+            frame.setHeight(max_height)
+        if frame.left() < screen.left():
+            frame.moveLeft(screen.left())
+        if frame.right() > screen.right():
+            frame.moveRight(screen.right())
+        if frame.top() < screen.top():
+            frame.moveTop(screen.top())
         limit = self._screen_bottom_limit(screen)
         if frame.bottom() > limit:
             frame.moveBottom(limit)
+        if frame.top() < screen.top():
+            frame.moveTop(screen.top())
         return frame
 
     def _apply_geometry_from_model(self) -> None:
