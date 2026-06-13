@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QLineEdit, QPushButton, QWidget
 
@@ -26,10 +26,27 @@ class WidgetPluginTests(unittest.TestCase):
         widget.resize(1100, 700)
         widget.show()
         type(self).app.processEvents()
-        editor = widget.findChild(QWidget, "HomeModuleEditor")
-        self.assertIsNotNone(editor)
-        editor.setVisible(True)
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        if widget.property("layout_locked"):
+            QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
         type(self).app.processEvents()
+
+    def _widget_rect_in(self, root: QWidget, child: QWidget) -> QRect:
+        top_left = root.mapFromGlobal(child.mapToGlobal(QPoint(0, 0)))
+        return QRect(top_left, child.size())
+
+    def _widget_top_in(self, root: QWidget, child: QWidget) -> int:
+        return root.mapFromGlobal(child.mapToGlobal(QPoint(0, 0))).y()
+
+    def _home_grid_positions(
+        self, widget: HomeDashboardWidget
+    ) -> dict[str, tuple[int, int, int, int]]:
+        grid = widget._module_grid
+        return {
+            grid.itemAt(index).widget().objectName(): grid.getItemPosition(index)
+            for index in range(grid.count())
+        }
 
     def test_clock_plugin_is_registered_and_creates_widget(self) -> None:
         registry = BuiltinWidgetRegistry()
@@ -73,7 +90,17 @@ class WidgetPluginTests(unittest.TestCase):
         standalone_ids = [definition.id for definition in registry.available_standalone_widgets()]
         home = registry.home_plugin()
 
-        self.assertEqual(standalone_ids, ["clock"])
+        self.assertEqual(
+            standalone_ids,
+            [
+                "clock",
+                "home-recent",
+                "home-schedule",
+                "home-bookmarks",
+                "home-calendar",
+                "home-weather",
+            ],
+        )
         self.assertEqual(home.id, "home")
         self.assertEqual(home.definition().display_name, "主标签页")
 
@@ -301,16 +328,19 @@ class WidgetPluginTests(unittest.TestCase):
 
         widget.resize(1100, 700)
         type(self).app.processEvents()
-        self.assertEqual(widget.property("layout_columns"), 4)
+        self.assertEqual(widget.property("layout_units"), 8)
+        self.assertEqual(widget.property("layout_columns"), 8)
         self.assertEqual(widget.property("dashboard_mode"), "wide")
 
         widget.resize(820, 700)
         type(self).app.processEvents()
-        self.assertEqual(widget.property("layout_columns"), 2)
+        self.assertEqual(widget.property("layout_units"), 4)
+        self.assertEqual(widget.property("layout_columns"), 4)
         self.assertEqual(widget.property("dashboard_mode"), "medium")
 
         widget.resize(640, 700)
         type(self).app.processEvents()
+        self.assertEqual(widget.property("layout_units"), 1)
         self.assertEqual(widget.property("layout_columns"), 1)
         self.assertEqual(widget.property("dashboard_mode"), "compact")
         self.assertTrue(widget.property("compact_modules"))
@@ -330,7 +360,7 @@ class WidgetPluginTests(unittest.TestCase):
         schedule = widget.findChild(QWidget, "HomeModuleCard-schedule")
         self.assertIsNotNone(schedule)
         self.assertTrue(schedule.property("compact_empty"))
-        self.assertLessEqual(schedule.maximumHeight(), 150)
+        self.assertLessEqual(schedule.maximumHeight(), 132)
 
         grid = widget._module_grid
         positions = {
@@ -340,8 +370,135 @@ class WidgetPluginTests(unittest.TestCase):
         weather = widget.findChild(QWidget, "HomeModuleCard-weather")
         self.assertIsNotNone(weather)
         self.assertTrue(weather.property("compact_empty"))
+        self.assertEqual(widget.property("layout_units"), 8)
+        _row, _column, _row_span, recent_span = positions["HomeModuleCard-recent"]
+        self.assertEqual(recent_span, 4)
         _row, _column, _row_span, weather_span = positions["HomeModuleCard-weather"]
-        self.assertEqual(weather_span, 1)
+        self.assertEqual(weather_span, 2)
+
+    def test_home_dashboard_module_area_stays_within_unit_width_limit(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1600, 900)
+        widget.show()
+        type(self).app.processEvents()
+
+        module_area = widget.findChild(QWidget, "HomeModuleArea")
+        self.assertIsNotNone(module_area)
+        self.assertLessEqual(module_area.width(), 1236)
+        self.assertEqual(widget.property("layout_units"), 8)
+
+    def test_home_modules_stay_near_hero_instead_of_sinking_to_bottom(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["calendar", "recent"],
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1600, 900)
+        widget.show()
+        type(self).app.processEvents()
+
+        hero = widget.findChild(QWidget, "HomeHeroPanel")
+        calendar_card = widget.findChild(QWidget, "HomeModuleCard-calendar")
+        recent_card = widget.findChild(QWidget, "HomeModuleCard-recent")
+        self.assertIsNotNone(hero)
+        self.assertIsNotNone(calendar_card)
+        self.assertIsNotNone(recent_card)
+
+        hero_bottom = self._widget_top_in(widget, hero) + hero.height()
+        first_module_top = min(
+            self._widget_top_in(widget, calendar_card),
+            self._widget_top_in(widget, recent_card),
+        )
+        self.assertLessEqual(first_module_top - hero_bottom, 28)
+
+    def test_home_calendar_uses_compact_summary_when_height_is_one_unit(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "module_spans": {"calendar": {"w": 3, "h": 1}},
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        calendar_card = widget.findChild(QWidget, "HomeModuleCard-calendar")
+        self.assertIsNotNone(calendar_card)
+        self.assertEqual(calendar_card.property("render_mode"), "compact")
+        self.assertEqual(calendar_card.property("height_units"), 1)
+        day_buttons = [
+            button
+            for button in calendar_card.findChildren(QPushButton)
+            if button.objectName().startswith("HomeCalendarDay-")
+        ]
+        self.assertEqual(day_buttons, [])
+        labels = "\n".join(label.text() for label in calendar_card.findChildren(QLabel))
+        self.assertIn("选中", labels)
+
+    def test_home_dashboard_uses_quieter_card_radius(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+
+        style = widget.styleSheet()
+
+        self.assertIn("border-radius: 14px", style)
+        self.assertNotIn("border-radius: 18px", style)
+
+    def test_home_recent_empty_state_is_short_and_action_oriented(self) -> None:
+        widget = HomeDashboardWidget({"recent_items": [], "reduced_motion": True})
+
+        card = widget.findChild(QWidget, "HomeModuleCard-recent")
+        self.assertIsNotNone(card)
+        labels = "\n".join(label.text() for label in card.findChildren(QLabel))
+
+        self.assertIsNotNone(widget.findChild(QPushButton, "HomeRecentRefreshButton"))
+        self.assertIn("暂无最近项目。打开文件或刷新后会显示在这里。", labels)
+        self.assertNotIn("当前系统暂时无法读取", labels)
+
+    def test_home_bookmarks_empty_state_requests_settings_from_card(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.home_settings_requested)
+
+        button = widget.findChild(QPushButton, "HomeBookmarkAddButton")
+        self.assertIsNotNone(button)
+        self.assertIsNone(widget.findChild(QWidget, "HomeModuleEditor"))
+
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+
+        self.assertEqual(settings_spy.count(), 1)
+        self.assertEqual(settings_spy.at(0)[0], "bookmarks")
+
+    def test_home_weather_empty_state_stays_compact_with_configure_action(self) -> None:
+        widget = HomeDashboardWidget({"weather": {}, "reduced_motion": True})
+
+        card = widget.findChild(QWidget, "HomeModuleCard-weather")
+
+        self.assertIsNotNone(card)
+        self.assertTrue(card.property("compact_empty"))
+        self.assertLessEqual(card.maximumHeight(), 132)
+        self.assertIsNotNone(widget.findChild(QPushButton, "HomeWeatherConfigureButton"))
+
+    def test_home_schedule_title_uses_selected_date_when_not_today(self) -> None:
+        today = date.today()
+        selected = today + timedelta(days=1)
+        widget = HomeDashboardWidget(
+            {
+                "selected_date": selected.isoformat(),
+                "reduced_motion": True,
+            }
+        )
+
+        schedule = widget.findChild(QWidget, "HomeModuleCard-schedule")
+        self.assertIsNotNone(schedule)
+        labels = "\n".join(label.text() for label in schedule.findChildren(QLabel))
+
+        self.assertIn(f"{selected:%m-%d} 日程", labels)
+        self.assertIn("选中日期", labels)
+        self.assertNotIn("今日日程", labels)
 
     def test_home_dashboard_editor_updates_visible_module_order(self) -> None:
         registry = ModularWidgetRegistry()
@@ -364,50 +521,374 @@ class WidgetPluginTests(unittest.TestCase):
         modules = latest["modules"]
         self.assertLess(modules.index("weather"), len(modules) - 1)
 
-    def test_home_dashboard_editor_ui_toggles_modules_and_can_close(self) -> None:
+    def test_home_dashboard_has_lock_button_instead_of_editor(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        weather_toggle = widget.findChild(QCheckBox, "HomeModuleToggle-weather")
-        done_button = widget.findChild(QPushButton, "HomeEditorDoneButton")
-        editor = widget.findChild(QWidget, "HomeModuleEditor")
-        self.assertIsNotNone(weather_toggle)
-        self.assertIsNotNone(done_button)
-        self.assertIsNotNone(editor)
+        self.assertIsNone(widget.findChild(QPushButton, "HomeEditButton"))
+        self.assertIsNone(widget.findChild(QWidget, "HomeModuleEditor"))
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        self.assertTrue(widget.property("layout_locked"))
+        self.assertEqual(lock_button.text(), "锁定")
+        self.assertNotEqual(lock_button.text(), "开锁")
 
-        weather_toggle.click()
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
-        self.assertNotIn("weather", latest["modules"])
-        self.assertIsNone(widget.findChild(QWidget, "HomeModuleCard-weather"))
+        self.assertFalse(latest["layout_locked"])
+        self.assertFalse(widget.property("layout_locked"))
+        self.assertEqual(lock_button.text(), "调整中")
 
-        done_button.click()
+    def test_home_hero_weather_uses_structured_status_group(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "weather": {"city": "Bristol", "summary": "等待天气数据"},
+                "reduced_motion": True,
+            }
+        )
+
+        status = widget.findChild(QWidget, "HomeHeroWeatherStatus")
+        city = widget.findChild(QLabel, "HomeHeroWeatherCity")
+        summary = widget.findChild(QLabel, "HomeHeroWeatherSummary")
+
+        self.assertIsNotNone(status)
+        self.assertIsNotNone(city)
+        self.assertIsNotNone(summary)
+        self.assertEqual(city.text(), "Bristol")
+        self.assertEqual(summary.text(), "等待天气数据")
+
+    def test_home_module_order_changes_without_inline_editor(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        widget.move_module("schedule", 1)
         type(self).app.processEvents()
 
-        self.assertFalse(editor.isVisible())
+        self.assertGreaterEqual(settings_spy.count(), 1)
+        self.assertIsNone(widget.findChild(QWidget, "HomeModuleEditor"))
 
-    def test_home_dashboard_editor_is_floating_and_bounded(self) -> None:
+    def test_home_inline_setting_changes_do_not_create_editor(self) -> None:
+        widget = HomeDashboardWidget(
+            {"selected_date": "2026-06-07", "reduced_motion": True}
+        )
+        widget._add_reminder("09:00 Standup")
+        widget._add_bookmark("Docs", "https://docs.test")
+        widget._save_weather("London", "Cloudy")
+        type(self).app.processEvents()
+
+        self.assertIsNone(widget.findChild(QWidget, "HomeModuleEditor"))
+
+    def test_home_module_drag_handles_only_show_when_layout_unlocked(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
+
+        handle = widget.findChild(QPushButton, "HomeModuleDragHandle-weather")
+        self.assertIsNotNone(handle)
+        self.assertFalse(handle.isVisible())
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+
+        handle = widget.findChild(QPushButton, "HomeModuleDragHandle-weather")
+        self.assertIsNotNone(handle)
+        self.assertTrue(handle.isVisible())
+
+    def test_home_modules_can_be_freely_dragged_to_grid_position_when_unlocked(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["weather"],
+                "module_spans": {"weather": {"w": 2, "h": 1}},
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        handle = widget.findChild(QPushButton, "HomeModuleDragHandle-weather")
+        self.assertIsNotNone(handle)
+        center = handle.rect().center()
+        delta = QPoint(
+            int(round(widget._module_unit_step() * 2)),
+            int(round(widget._module_height_step())),
+        )
+        release_pos = widget.mapFromGlobal(handle.mapToGlobal(center + delta))
+
+        QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=center)
+        QTest.mouseMove(handle, center + delta, delay=10)
+        type(self).app.processEvents()
+
+        positions = self._home_grid_positions(widget)
+        row, column, _row_span, _column_span = positions["HomeModuleCard-weather"]
+        self.assertEqual((row, column), (1, 2))
+        self.assertEqual(settings_spy.count(), 0)
+
+        QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=release_pos)
+        type(self).app.processEvents()
+
+        self.assertGreaterEqual(settings_spy.count(), 1)
+        latest = settings_spy.at(settings_spy.count() - 1)[0]
+        self.assertEqual(latest["module_layout"]["weather"]["x"], 2)
+        self.assertEqual(latest["module_layout"]["weather"]["y"], 1)
+
+    def test_home_module_free_drag_does_not_move_neighbor_module(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["weather", "recent"],
+                "module_spans": {
+                    "weather": {"w": 2, "h": 1},
+                    "recent": {"w": 4, "h": 1},
+                },
+                "module_positions": {
+                    "weather": {"x": 0, "y": 0},
+                    "recent": {"x": 4, "y": 0},
+                },
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        card = widget.findChild(QWidget, "HomeModuleCard-weather")
+        self.assertIsNotNone(card)
+        start = card.rect().center()
+        delta = QPoint(0, int(round(widget._module_height_step())))
+        release_pos = widget.mapFromGlobal(card.mapToGlobal(start + delta))
+
+        QTest.mousePress(card, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(card, start + delta, delay=10)
+        QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=release_pos)
+        type(self).app.processEvents()
+
+        self.assertGreaterEqual(settings_spy.count(), 1)
+        positions = self._home_grid_positions(widget)
+        weather_row, weather_column, _row_span, weather_span = positions["HomeModuleCard-weather"]
+        recent_row, recent_column, _row_span, recent_span = positions["HomeModuleCard-recent"]
+        self.assertEqual((weather_row, weather_column, weather_span), (1, 0, 2))
+        self.assertEqual((recent_row, recent_column, recent_span), (0, 4, 4))
+        latest = settings_spy.at(settings_spy.count() - 1)[0]
+        self.assertEqual(latest["modules"], ["weather", "recent"])
+        self.assertEqual(latest["module_layout"]["recent"]["x"], 4)
+        self.assertEqual(latest["module_layout"]["recent"]["y"], 0)
+        self.assertEqual(latest["module_layout"]["recent"]["w"], 4)
+
+    def test_home_module_edge_resize_snaps_to_unit_width(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+
+        card = widget.findChild(QWidget, "HomeModuleCard-weather")
+        self.assertIsNotNone(card)
+
+        start = QPoint(card.width() - 2, card.height() // 2)
+        release_pos = widget.mapFromGlobal(card.mapToGlobal(start + QPoint(-220, 0)))
+        QTest.mousePress(card, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(card, start + QPoint(-220, 0), delay=10)
+        QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=release_pos)
+        type(self).app.processEvents()
+
+        self.assertGreaterEqual(settings_spy.count(), 1)
+        latest = settings_spy.at(settings_spy.count() - 1)[0]
+        self.assertEqual(latest["module_layout"]["weather"]["w"], 1)
+        self.assertEqual(latest["module_layout"]["weather"]["h"], 1)
+
+        grid = widget._module_grid
+        positions = {
+            grid.itemAt(index).widget().objectName(): grid.getItemPosition(index)
+            for index in range(grid.count())
+        }
+        _row, _column, _row_span, weather_span = positions["HomeModuleCard-weather"]
+        self.assertEqual(weather_span, 1)
+
+    def test_home_module_edge_resize_previews_grid_before_release(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["weather", "recent"],
+                "module_spans": {
+                    "weather": {"w": 2, "h": 1},
+                    "recent": {"w": 4, "h": 1},
+                },
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        card = widget.findChild(QWidget, "HomeModuleCard-weather")
+        self.assertIsNotNone(card)
+        start = QPoint(card.width() - 2, card.height() // 2)
+        release_pos = widget.mapFromGlobal(card.mapToGlobal(start + QPoint(-220, 0)))
+
+        QTest.mousePress(card, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(card, start + QPoint(-220, 0), delay=10)
+        type(self).app.processEvents()
+
+        positions = self._home_grid_positions(widget)
+        _row, _column, _row_span, weather_span = positions["HomeModuleCard-weather"]
+        self.assertEqual(weather_span, 1)
+        self.assertEqual(settings_spy.count(), 0)
+
+        QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=release_pos)
+        type(self).app.processEvents()
+
+        self.assertGreaterEqual(settings_spy.count(), 1)
+        latest = settings_spy.at(settings_spy.count() - 1)[0]
+        self.assertEqual(latest["module_layout"]["weather"]["w"], 1)
+
+    def test_home_module_grid_does_not_force_final_row_to_fill_width(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["calendar", "recent"],
+                "module_spans": {
+                    "calendar": {"w": 3, "h": 2},
+                    "recent": {"w": 4, "h": 1},
+                },
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        positions = self._home_grid_positions(widget)
+        _row, _column, _row_span, calendar_span = positions["HomeModuleCard-calendar"]
+        _row, _column, _row_span, recent_span = positions["HomeModuleCard-recent"]
+        self.assertEqual(calendar_span, 3)
+        self.assertEqual(recent_span, 4)
+
+    def test_home_module_resize_does_not_change_neighbor_span(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["calendar", "recent"],
+                "module_spans": {
+                    "calendar": {"w": 3, "h": 2},
+                    "recent": {"w": 4, "h": 1},
+                },
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        changed = widget._set_module_span("calendar", width=2, height=2)
+        type(self).app.processEvents()
+
+        self.assertTrue(changed)
+        positions = self._home_grid_positions(widget)
+        _row, _column, _row_span, calendar_span = positions["HomeModuleCard-calendar"]
+        _row, _column, _row_span, recent_span = positions["HomeModuleCard-recent"]
+        self.assertEqual(calendar_span, 2)
+        self.assertEqual(recent_span, 4)
+
+    def test_home_module_edge_resize_is_limited_to_current_row_units(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+
+        card = widget.findChild(QWidget, "HomeModuleCard-weather")
+        self.assertIsNotNone(card)
+
+        start = QPoint(card.width() - 2, card.height() // 2)
+        release_pos = widget.mapFromGlobal(card.mapToGlobal(start + QPoint(2000, 0)))
+        QTest.mousePress(card, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(card, start + QPoint(2000, 0), delay=10)
+        QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=release_pos)
+        type(self).app.processEvents()
+
+        self.assertGreaterEqual(settings_spy.count(), 1)
+        latest = settings_spy.at(settings_spy.count() - 1)[0]
+        self.assertLessEqual(latest["module_layout"]["weather"]["w"], 8)
+
+    def test_home_module_custom_unit_width_is_restored_from_settings(self) -> None:
+        widget = HomeDashboardWidget(
+            {"module_spans": {"weather": 1}, "reduced_motion": True}
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        grid = widget._module_grid
+        positions = {
+            grid.itemAt(index).widget().objectName(): grid.getItemPosition(index)
+            for index in range(grid.count())
+        }
+        _row, _column, _row_span, weather_span = positions["HomeModuleCard-weather"]
+        self.assertEqual(weather_span, 1)
+
+    def test_home_module_drag_release_outside_card_clears_drag_state(self) -> None:
+        widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+
+        handle = widget.findChild(QPushButton, "HomeModuleDragHandle-weather")
+        card = widget.findChild(QWidget, "HomeModuleCard-weather")
+        self.assertIsNotNone(handle)
+        self.assertIsNotNone(card)
+
+        QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=handle.rect().center())
+        QTest.mouseMove(handle, handle.rect().center() + QPoint(24, 0), delay=10)
+        QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(4, 4))
+        type(self).app.processEvents()
+
+        self.assertEqual(widget._module_drag_source_id, "")
+        self.assertFalse(widget._module_drag_started)
+        self.assertFalse(card.property("dragging"))
+
+    def test_home_dashboard_has_no_inline_editor_to_overlap_cards(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         widget.resize(1280, 760)
         widget.show()
         type(self).app.processEvents()
 
-        edit_button = widget.findChild(QPushButton, "HomeEditButton")
-        editor = widget.findChild(QWidget, "HomeModuleEditor")
-        self.assertIsNotNone(edit_button)
-        self.assertIsNotNone(editor)
-
-        edit_button.click()
-        type(self).app.processEvents()
-
-        self.assertTrue(editor.isVisible())
-        self.assertEqual(widget._root_layout.indexOf(editor), -1)
-        self.assertLessEqual(editor.width(), 520)
-        self.assertLess(editor.width(), widget.width() * 0.5)
-        self.assertGreaterEqual(editor.x(), widget.width() - editor.width() - 40)
-        self.assertLessEqual(editor.height(), widget.height() - 32)
+        self.assertIsNone(widget.findChild(QWidget, "HomeModuleEditor"))
+        self.assertIsNone(widget.findChild(QPushButton, "HomeEditButton"))
 
     def test_home_main_cards_do_not_expose_editor_inputs(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
@@ -418,7 +899,6 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertIsNone(widget.findChild(QLineEdit, "HomeWeatherCityInput"))
         self.assertIsNone(widget.findChild(QLineEdit, "HomeWeatherSummaryInput"))
         self.assertIsNone(widget.findChild(QPushButton, "HomeReminderAddButton"))
-        self.assertIsNone(widget.findChild(QPushButton, "HomeBookmarkAddButton"))
         self.assertIsNone(widget.findChild(QPushButton, "HomeWeatherSaveButton"))
 
     def test_home_dashboard_reduced_motion_disables_entry_animation(self) -> None:
@@ -521,6 +1001,9 @@ class WidgetPluginTests(unittest.TestCase):
                 "reduced_motion": True,
             }
         )
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         spy = QSignalSpy(widget.item_open_requested)
 
         button = widget.findChild(QPushButton, "HomeRecentOpen-0")
@@ -532,6 +1015,9 @@ class WidgetPluginTests(unittest.TestCase):
 
     def test_home_recent_refresh_button_emits_request(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         spy = QSignalSpy(widget.recent_refresh_requested)
 
         button = widget.findChild(QPushButton, "HomeRecentRefreshButton")
@@ -548,20 +1034,13 @@ class WidgetPluginTests(unittest.TestCase):
 
     def test_home_bookmarks_can_add_open_and_delete(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         settings_spy = QSignalSpy(widget.settings_changed)
         open_spy = QSignalSpy(widget.url_open_requested)
-        self._show_home_editor(widget)
 
-        title_input = widget.findChild(QLineEdit, "HomeEditorBookmarkTitleInput")
-        url_input = widget.findChild(QLineEdit, "HomeEditorBookmarkUrlInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorBookmarkAddButton")
-        self.assertIsNotNone(title_input)
-        self.assertIsNotNone(url_input)
-        self.assertIsNotNone(add_button)
-
-        title_input.setText("OpenAI")
-        url_input.setText("https://openai.com")
-        QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
+        widget._add_bookmark("OpenAI", "https://openai.com")
         type(self).app.processEvents()
 
         self.assertGreaterEqual(settings_spy.count(), 1)
@@ -569,7 +1048,7 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(latest["bookmarks"], [{"title": "OpenAI", "url": "https://openai.com"}])
 
         open_button = widget.findChild(QPushButton, "HomeBookmarkOpen-0")
-        delete_button = widget.findChild(QPushButton, "HomeEditorBookmarkDelete-0")
+        delete_button = widget.findChild(QPushButton, "HomeBookmarkDelete-0")
         self.assertIsNotNone(open_button)
         self.assertIsNotNone(delete_button)
 
@@ -585,29 +1064,9 @@ class WidgetPluginTests(unittest.TestCase):
     def test_home_bookmarks_update_existing_url_instead_of_duplicating(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        title_input = widget.findChild(QLineEdit, "HomeEditorBookmarkTitleInput")
-        url_input = widget.findChild(QLineEdit, "HomeEditorBookmarkUrlInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorBookmarkAddButton")
-        self.assertIsNotNone(title_input)
-        self.assertIsNotNone(url_input)
-        self.assertIsNotNone(add_button)
-
-        title_input.setText("OpenAI")
-        url_input.setText("openai.com")
-        QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
-        type(self).app.processEvents()
-
-        title_input = widget.findChild(QLineEdit, "HomeEditorBookmarkTitleInput")
-        url_input = widget.findChild(QLineEdit, "HomeEditorBookmarkUrlInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorBookmarkAddButton")
-        self.assertIsNotNone(title_input)
-        self.assertIsNotNone(url_input)
-        self.assertIsNotNone(add_button)
-        title_input.setText("OpenAI Docs")
-        url_input.setText("https://openai.com")
-        QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
+        widget._add_bookmark("OpenAI", "openai.com")
+        widget._add_bookmark("OpenAI Docs", "https://openai.com")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -616,7 +1075,7 @@ class WidgetPluginTests(unittest.TestCase):
             [{"title": "OpenAI Docs", "url": "https://openai.com"}],
         )
 
-    def test_home_bookmarks_can_be_edited_from_editor(self) -> None:
+    def test_home_bookmarks_can_be_edited(self) -> None:
         widget = HomeDashboardWidget(
             {
                 "reduced_motion": True,
@@ -630,18 +1089,8 @@ class WidgetPluginTests(unittest.TestCase):
             }
         )
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        title_input = widget.findChild(QLineEdit, "HomeEditorBookmarkTitle-0")
-        url_input = widget.findChild(QLineEdit, "HomeEditorBookmarkUrl-0")
-        save_button = widget.findChild(QPushButton, "HomeEditorBookmarkSave-0")
-        self.assertIsNotNone(title_input)
-        self.assertIsNotNone(url_input)
-        self.assertIsNotNone(save_button)
-
-        title_input.setText("Docs New")
-        url_input.setText("docs-new.test")
-        QTest.mouseClick(save_button, Qt.MouseButton.LeftButton)
+        widget._update_bookmark(0, "Docs New", "docs-new.test")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -652,18 +1101,8 @@ class WidgetPluginTests(unittest.TestCase):
     def test_home_bookmarks_reject_invalid_urls_without_saving(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        title_input = widget.findChild(QLineEdit, "HomeEditorBookmarkTitleInput")
-        url_input = widget.findChild(QLineEdit, "HomeEditorBookmarkUrlInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorBookmarkAddButton")
-        self.assertIsNotNone(title_input)
-        self.assertIsNotNone(url_input)
-        self.assertIsNotNone(add_button)
-
-        title_input.setText("Broken")
-        url_input.setText("not a url")
-        QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
+        widget._add_bookmark("Broken", "not a url")
         type(self).app.processEvents()
 
         self.assertEqual(settings_spy.count(), 0)
@@ -681,6 +1120,9 @@ class WidgetPluginTests(unittest.TestCase):
                 "reduced_motion": True,
             }
         )
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         open_spy = QSignalSpy(widget.url_open_requested)
 
         button = widget.findChild(QPushButton, "HomeBookmarkOpen-0")
@@ -691,7 +1133,7 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(open_spy.count(), 1)
         self.assertEqual(open_spy.at(0)[0], "https://module.test")
 
-    def test_home_bookmarks_editor_reads_module_settings_before_legacy_root_settings(self) -> None:
+    def test_home_bookmarks_settings_reader_prefers_module_settings(self) -> None:
         widget = HomeDashboardWidget(
             {
                 "bookmarks": [{"title": "Legacy", "url": "https://legacy.test"}],
@@ -704,28 +1146,15 @@ class WidgetPluginTests(unittest.TestCase):
             }
         )
 
-        self._show_home_editor(widget)
-
-        bookmark_title = widget.findChild(QLineEdit, "HomeEditorBookmarkTitle-0")
-        self.assertIsNotNone(bookmark_title)
-        self.assertEqual(bookmark_title.text(), "Module")
-        self.assertNotEqual(bookmark_title.text(), "Legacy")
+        bookmarks = widget._module_list_setting("bookmarks", "bookmarks")
+        self.assertEqual(bookmarks[0]["title"], "Module")
+        self.assertNotEqual(bookmarks[0]["title"], "Legacy")
 
     def test_home_bookmarks_write_module_settings_and_legacy_root_settings(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        title_input = widget.findChild(QLineEdit, "HomeEditorBookmarkTitleInput")
-        url_input = widget.findChild(QLineEdit, "HomeEditorBookmarkUrlInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorBookmarkAddButton")
-        self.assertIsNotNone(title_input)
-        self.assertIsNotNone(url_input)
-        self.assertIsNotNone(add_button)
-
-        title_input.setText("Docs")
-        url_input.setText("https://docs.test")
-        add_button.click()
+        widget._add_bookmark("Docs", "https://docs.test")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -738,15 +1167,8 @@ class WidgetPluginTests(unittest.TestCase):
             {"selected_date": "2026-06-07", "reduced_motion": True}
         )
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        reminder_input = widget.findChild(QLineEdit, "HomeEditorReminderInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorReminderAddButton")
-        self.assertIsNotNone(reminder_input)
-        self.assertIsNotNone(add_button)
-
-        reminder_input.setText("09:00 Standup")
-        add_button.click()
+        widget._add_reminder("09:00 Standup")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -756,16 +1178,12 @@ class WidgetPluginTests(unittest.TestCase):
 
     def test_home_reminders_can_add_and_delete(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        reminder_input = widget.findChild(QLineEdit, "HomeEditorReminderInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorReminderAddButton")
-        self.assertIsNotNone(reminder_input)
-        self.assertIsNotNone(add_button)
-
-        reminder_input.setText("18:00 复盘")
-        QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
+        widget._add_reminder("18:00 复盘")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -774,7 +1192,7 @@ class WidgetPluginTests(unittest.TestCase):
             [{"date": date.today().isoformat(), "text": "18:00 复盘"}],
         )
 
-        delete_button = widget.findChild(QPushButton, "HomeEditorReminderDelete-0")
+        delete_button = widget.findChild(QPushButton, "HomeReminderDelete-0")
         self.assertIsNotNone(delete_button)
         QTest.mouseClick(delete_button, Qt.MouseButton.LeftButton)
         type(self).app.processEvents()
@@ -796,6 +1214,9 @@ class WidgetPluginTests(unittest.TestCase):
                 },
             }
         )
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         settings_spy = QSignalSpy(widget.settings_changed)
 
         done_button = widget.findChild(QPushButton, "HomeReminderDone-0")
@@ -812,7 +1233,7 @@ class WidgetPluginTests(unittest.TestCase):
         labels = "\n".join(label.text() for label in schedule_card.findChildren(QLabel))
         self.assertNotIn("09:00 standup", labels)
 
-    def test_home_done_reminders_can_be_restored_from_editor(self) -> None:
+    def test_home_done_reminders_can_be_restored(self) -> None:
         today = date.today().isoformat()
         widget = HomeDashboardWidget(
             {
@@ -827,13 +1248,8 @@ class WidgetPluginTests(unittest.TestCase):
             }
         )
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        restore_button = widget.findChild(QPushButton, "HomeEditorReminderRestore-0")
-        self.assertIsNotNone(restore_button)
-        editor_text = "\n".join(label.text() for label in widget.findChildren(QLabel))
-        self.assertIn("已完成", editor_text)
-        QTest.mouseClick(restore_button, Qt.MouseButton.LeftButton)
+        widget._restore_reminder(0)
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -841,7 +1257,7 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(latest["reminders"], expected)
         self.assertEqual(latest["module_settings"]["schedule"]["reminders"], expected)
 
-    def test_home_reminders_can_be_edited_from_editor(self) -> None:
+    def test_home_reminders_can_be_edited(self) -> None:
         today = date.today().isoformat()
         widget = HomeDashboardWidget(
             {
@@ -856,15 +1272,8 @@ class WidgetPluginTests(unittest.TestCase):
             }
         )
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        reminder_input = widget.findChild(QLineEdit, "HomeEditorReminderText-0")
-        save_button = widget.findChild(QPushButton, "HomeEditorReminderSave-0")
-        self.assertIsNotNone(reminder_input)
-        self.assertIsNotNone(save_button)
-
-        reminder_input.setText("10:30 review")
-        QTest.mouseClick(save_button, Qt.MouseButton.LeftButton)
+        widget._update_reminder(0, "10:30 review")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -875,16 +1284,9 @@ class WidgetPluginTests(unittest.TestCase):
     def test_home_reminders_sort_timed_items_before_untimed_items(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
-
-        reminder_input = widget.findChild(QLineEdit, "HomeEditorReminderInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorReminderAddButton")
-        self.assertIsNotNone(reminder_input)
-        self.assertIsNotNone(add_button)
 
         for reminder in ["20:30 review", "untimed note", "08:00 standup"]:
-            reminder_input.setText(reminder)
-            QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
+            widget._add_reminder(reminder)
             type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -929,13 +1331,7 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertIn("09:00 tomorrow", labels)
         self.assertNotIn("08:00 today", labels)
 
-        self._show_home_editor(widget)
-        reminder_input = widget.findChild(QLineEdit, "HomeEditorReminderInput")
-        add_button = widget.findChild(QPushButton, "HomeEditorReminderAddButton")
-        self.assertIsNotNone(reminder_input)
-        self.assertIsNotNone(add_button)
-        reminder_input.setText("10:00 call")
-        QTest.mouseClick(add_button, Qt.MouseButton.LeftButton)
+        widget._add_reminder("10:00 call")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -976,6 +1372,7 @@ class WidgetPluginTests(unittest.TestCase):
             }
         )
         widget.resize(820, 700)
+        widget.show()
         type(self).app.processEvents()
         settings_spy = QSignalSpy(widget.settings_changed)
 
@@ -998,6 +1395,9 @@ class WidgetPluginTests(unittest.TestCase):
                 "selected_date": selected,
             }
         )
+        widget.resize(820, 700)
+        widget.show()
+        type(self).app.processEvents()
         settings_spy = QSignalSpy(widget.settings_changed)
 
         today_button = widget.findChild(QPushButton, "HomeCalendarTodayButton")
@@ -1008,30 +1408,16 @@ class WidgetPluginTests(unittest.TestCase):
         latest = settings_spy.at(settings_spy.count() - 1)[0]
         self.assertEqual(latest["selected_date"], date.today().isoformat())
 
-    def test_home_reminder_placeholder_uses_time_only_because_date_is_selected(self) -> None:
+    def test_home_reminder_inputs_are_not_exposed_on_main_cards(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
-        self._show_home_editor(widget)
 
-        reminder_input = widget.findChild(QLineEdit, "HomeEditorReminderInput")
-        self.assertIsNotNone(reminder_input)
-
-        self.assertTrue(reminder_input.placeholderText().startswith("例如：18:00"))
+        self.assertIsNone(widget.findChild(QLineEdit, "HomeEditorReminderInput"))
 
     def test_home_weather_settings_update_summary(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
 
-        city_input = widget.findChild(QLineEdit, "HomeEditorWeatherCityInput")
-        summary_input = widget.findChild(QLineEdit, "HomeEditorWeatherSummaryInput")
-        save_button = widget.findChild(QPushButton, "HomeEditorWeatherSaveButton")
-        self.assertIsNotNone(city_input)
-        self.assertIsNotNone(summary_input)
-        self.assertIsNotNone(save_button)
-
-        city_input.setText("London")
-        summary_input.setText("多云 18°C")
-        QTest.mouseClick(save_button, Qt.MouseButton.LeftButton)
+        widget._save_weather("London", "多云 18°C")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -1056,17 +1442,8 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertNotIn("Legacy", label_text)
 
         settings_spy = QSignalSpy(widget.settings_changed)
-        self._show_home_editor(widget)
-        city_input = widget.findChild(QLineEdit, "HomeEditorWeatherCityInput")
-        summary_input = widget.findChild(QLineEdit, "HomeEditorWeatherSummaryInput")
-        save_button = widget.findChild(QPushButton, "HomeEditorWeatherSaveButton")
-        self.assertIsNotNone(city_input)
-        self.assertIsNotNone(summary_input)
-        self.assertIsNotNone(save_button)
 
-        city_input.setText("London")
-        summary_input.setText("Cloudy")
-        save_button.click()
+        widget._save_weather("London", "Cloudy")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -1094,15 +1471,14 @@ class WidgetPluginTests(unittest.TestCase):
 
     def test_home_weather_refresh_button_emits_city(self) -> None:
         widget = HomeDashboardWidget({"weather": {"city": "London"}, "reduced_motion": True})
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         refresh_spy = QSignalSpy(widget.weather_refresh_requested)
-        self._show_home_editor(widget)
 
-        city_input = widget.findChild(QLineEdit, "HomeEditorWeatherCityInput")
-        refresh_button = widget.findChild(QPushButton, "HomeEditorWeatherRefreshButton")
-        self.assertIsNotNone(city_input)
+        refresh_button = widget.findChild(QPushButton, "HomeWeatherRefreshInlineButton")
         self.assertIsNotNone(refresh_button)
 
-        city_input.setText("  London  ")
         QTest.mouseClick(refresh_button, Qt.MouseButton.LeftButton)
 
         self.assertEqual(refresh_spy.count(), 1)
@@ -1112,18 +1488,8 @@ class WidgetPluginTests(unittest.TestCase):
         widget = HomeDashboardWidget({"reduced_motion": True})
         settings_spy = QSignalSpy(widget.settings_changed)
         refresh_spy = QSignalSpy(widget.weather_refresh_requested)
-        self._show_home_editor(widget)
 
-        city_input = widget.findChild(QLineEdit, "HomeEditorWeatherCityInput")
-        summary_input = widget.findChild(QLineEdit, "HomeEditorWeatherSummaryInput")
-        save_button = widget.findChild(QPushButton, "HomeEditorWeatherSaveButton")
-        self.assertIsNotNone(city_input)
-        self.assertIsNotNone(summary_input)
-        self.assertIsNotNone(save_button)
-
-        city_input.setText("London")
-        summary_input.clear()
-        QTest.mouseClick(save_button, Qt.MouseButton.LeftButton)
+        widget._save_weather("London", "")
         type(self).app.processEvents()
 
         latest = settings_spy.at(settings_spy.count() - 1)[0]
@@ -1138,6 +1504,9 @@ class WidgetPluginTests(unittest.TestCase):
                 "reduced_motion": True,
             }
         )
+        widget.resize(1100, 700)
+        widget.show()
+        type(self).app.processEvents()
         refresh_spy = QSignalSpy(widget.weather_refresh_requested)
 
         refresh_button = widget.findChild(QPushButton, "HomeWeatherRefreshInlineButton")
@@ -1147,21 +1516,20 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(refresh_spy.count(), 1)
         self.assertEqual(refresh_spy.at(0)[0], "London")
 
-    def test_home_weather_empty_card_opens_editor_for_city_setup(self) -> None:
+    def test_home_weather_empty_card_requests_settings_for_city_setup(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})
         widget.resize(1100, 700)
         widget.show()
         type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.home_settings_requested)
 
         configure_button = widget.findChild(QPushButton, "HomeWeatherConfigureButton")
         self.assertIsNotNone(configure_button)
-        self.assertFalse(widget.findChild(QWidget, "HomeModuleEditor").isVisible())
+        self.assertIsNone(widget.findChild(QWidget, "HomeModuleEditor"))
         QTest.mouseClick(configure_button, Qt.MouseButton.LeftButton)
 
-        editor = widget.findChild(QWidget, "HomeModuleEditor")
-        self.assertIsNotNone(editor)
-        self.assertTrue(editor.isVisible())
-        self.assertIsNotNone(widget.findChild(QLineEdit, "HomeEditorWeatherCityInput"))
+        self.assertEqual(settings_spy.count(), 1)
+        self.assertEqual(settings_spy.at(0)[0], "weather")
 
 
 if __name__ == "__main__":

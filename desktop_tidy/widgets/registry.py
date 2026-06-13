@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from desktop_tidy.widgets.clock import ClockWidgetPlugin
-from desktop_tidy.widgets.home import HomeWidgetPlugin
+from desktop_tidy.widgets.home import HomeModuleWidgetPlugin, HomeWidgetPlugin
 from desktop_tidy.widgets.models import WidgetDefinition, WidgetPlugin, WidgetVisualPreset
 
 _UNKNOWN_VISUAL = WidgetVisualPreset(
@@ -50,8 +50,14 @@ class UnknownWidgetPlugin:
 class BuiltinWidgetRegistry:
     def __init__(self) -> None:
         self._home_plugin = HomeWidgetPlugin()
+        home_module_plugins = {
+            f"home-{definition.id}": HomeModuleWidgetPlugin(definition)
+            for definition in self._home_plugin.module_definitions()
+            if definition.standalone_enabled
+        }
         self._standalone_plugins: dict[str, WidgetPlugin] = {
             ClockWidgetPlugin.id: ClockWidgetPlugin(),
+            **home_module_plugins,
         }
         self._plugins: dict[str, WidgetPlugin] = {
             self._home_plugin.id: self._home_plugin,

@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox
 
 from desktop_tidy.domain.defaults import build_default_configuration
 from desktop_tidy.domain.models import PanelGeometry
@@ -28,7 +28,7 @@ _SUPPORTED_SECTIONS = ["面板", "分类规则"]
 _FORBIDDEN_TERMS = ("壁纸", "归档", "移动", "搜索", "AI", "同步")
 
 
-_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "功能面板", "诊断与恢复", "其他"]
+_SUPPORTED_SECTIONS = _SUPPORTED_SECTIONS + ["面板历史", "主标签页设置", "功能面板", "诊断与恢复", "其他"]
 
 
 class SettingsWindowTests(unittest.TestCase):
@@ -114,6 +114,14 @@ class SettingsWindowTests(unittest.TestCase):
         window = self._make_window()
 
         self.assertEqual(window.visible_section_names(), _SUPPORTED_SECTIONS)
+
+    def test_settings_window_can_select_home_settings_section(self) -> None:
+        window = self._make_window()
+
+        self.assertTrue(window.select_section("主标签页设置"))
+        self.assertEqual(window.current_section_name(), "主标签页设置")
+        self.assertFalse(window.select_section("不存在的设置页"))
+        self.assertEqual(window.current_section_name(), "主标签页设置")
 
     def test_settings_window_uses_translucent_console_shell(self) -> None:
         window = self._make_window()
@@ -684,7 +692,9 @@ class SettingsWindowTests(unittest.TestCase):
         text = window.all_text()
 
         self.assertIn("时间面板", text)
-        self.assertNotIn("主标签页", text)
+        self.assertIn("最近使用", text)
+        self.assertIn("网络收藏", text)
+        self.assertIn("天气", text)
         self.assertNotIn("时间面板预览", text)
         self.assertIn("#", window._clock_widget_card.styleSheet())
         self.assertIn(clock_definition.preview_background, window._clock_widget_preview.styleSheet())
@@ -693,6 +703,131 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertNotIn("添加到当前面板组", text)
         self.assertEqual(window._clock_widget_card.width(), 320)
         self.assertEqual(window._clock_widget_card.height(), 190)
+
+    def test_home_settings_page_writes_home_widget_settings(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        home_tab = model.ensure_home_tab()
+        home_tab.widget_settings["module_spans"] = {"weather": 2}
+        window = SettingsWindow(config)
+
+        weather_toggle = window.findChild(QCheckBox, "HomeSettingsModuleToggle-weather")
+        weather_width = window.findChild(QSpinBox, "HomeSettingsModuleWidth-weather")
+        weather_height = window.findChild(QSpinBox, "HomeSettingsModuleHeight-weather")
+        reminders = window.findChild(QPlainTextEdit, "HomeSettingsRemindersEdit")
+        bookmarks = window.findChild(QPlainTextEdit, "HomeSettingsBookmarksEdit")
+        city = window.findChild(QLineEdit, "HomeSettingsWeatherCityInput")
+        summary = window.findChild(QLineEdit, "HomeSettingsWeatherSummaryInput")
+        self.assertIsNotNone(weather_toggle)
+        self.assertIsNotNone(weather_width)
+        self.assertIsNotNone(weather_height)
+        self.assertIsNotNone(reminders)
+        self.assertIsNotNone(bookmarks)
+        self.assertIsNotNone(city)
+        self.assertIsNotNone(summary)
+        self.assertEqual(weather_width.value(), 2)
+        self.assertEqual(weather_height.value(), 1)
+
+        weather_toggle.setChecked(False)
+        weather_width.setValue(3)
+        weather_height.setValue(2)
+        reminders.setPlainText("09:00 Standup")
+        bookmarks.setPlainText("Docs | https://docs.test")
+        city.setText("London")
+        summary.setText("Cloudy")
+        window._save()
+
+        settings = home_tab.widget_settings
+        self.assertNotIn("weather", settings["modules"])
+        self.assertEqual(settings["module_layout"]["weather"]["w"], 3)
+        self.assertEqual(settings["module_layout"]["weather"]["h"], 2)
+        self.assertEqual(
+            settings["module_settings"]["schedule"]["reminders"][0]["text"],
+            "09:00 Standup",
+        )
+        self.assertEqual(
+            settings["module_settings"]["bookmarks"]["bookmarks"],
+            [{"title": "Docs", "url": "https://docs.test"}],
+        )
+        self.assertEqual(
+            settings["module_settings"]["weather"]["weather"],
+            {"city": "London", "summary": "Cloudy"},
+        )
+
+    def test_home_settings_page_preserves_default_home_module_sizes(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        home_tab = WorkspaceModel(config).ensure_home_tab()
+        window = SettingsWindow(config)
+
+        recent_width = window.findChild(QSpinBox, "HomeSettingsModuleWidth-recent")
+        recent_height = window.findChild(QSpinBox, "HomeSettingsModuleHeight-recent")
+        calendar_width = window.findChild(QSpinBox, "HomeSettingsModuleWidth-calendar")
+        calendar_height = window.findChild(QSpinBox, "HomeSettingsModuleHeight-calendar")
+        schedule_width = window.findChild(QSpinBox, "HomeSettingsModuleWidth-schedule")
+        schedule_height = window.findChild(QSpinBox, "HomeSettingsModuleHeight-schedule")
+        self.assertIsNotNone(recent_width)
+        self.assertIsNotNone(recent_height)
+        self.assertIsNotNone(calendar_width)
+        self.assertIsNotNone(calendar_height)
+        self.assertIsNotNone(schedule_width)
+        self.assertIsNotNone(schedule_height)
+
+        self.assertEqual((recent_width.value(), recent_height.value()), (4, 1))
+        self.assertEqual((calendar_width.value(), calendar_height.value()), (3, 2))
+        self.assertEqual((schedule_width.value(), schedule_height.value()), (2, 1))
+
+        window._save()
+
+        settings = home_tab.widget_settings
+        self.assertEqual(settings["module_layout"]["recent"]["w"], 4)
+        self.assertEqual(settings["module_layout"]["recent"]["h"], 1)
+        self.assertEqual(settings["module_layout"]["calendar"]["w"], 3)
+        self.assertEqual(settings["module_layout"]["calendar"]["h"], 2)
+        self.assertEqual(settings["module_layout"]["schedule"]["w"], 2)
+        self.assertEqual(settings["module_layout"]["schedule"]["h"], 1)
+
+    def test_home_settings_reset_layout_clears_saved_module_positions(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        home_tab = WorkspaceModel(config).ensure_home_tab()
+        home_tab.widget_settings["module_spans"] = {
+            "recent": {"w": 1, "h": 3},
+            "calendar": {"w": 1, "h": 1},
+        }
+        home_tab.widget_settings["module_positions"] = {
+            "recent": {"x": 5, "y": 1},
+            "calendar": {"x": 0, "y": 2},
+        }
+        window = SettingsWindow(config)
+
+        reset_button = window.findChild(QPushButton, "HomeSettingsResetLayoutButton")
+        self.assertIsNotNone(reset_button)
+        reset_button.click()
+        window._save()
+
+        settings = home_tab.widget_settings
+        self.assertNotIn("module_positions", settings)
+        self.assertNotIn("module_spans", settings)
+        self.assertEqual(settings["module_layout"]["recent"]["w"], 4)
+        self.assertEqual(settings["module_layout"]["recent"]["h"], 1)
+        self.assertEqual(settings["module_layout"]["calendar"]["w"], 3)
+        self.assertEqual(settings["module_layout"]["calendar"]["h"], 2)
+
+    def test_widget_page_exposes_home_module_panels(self) -> None:
+        window = self._make_window()
+        add_spy = QSignalSpy(window.add_widget_panel_requested)
+
+        definition_ids = {
+            definition.id for definition in ModularWidgetRegistry().available_standalone_widgets()
+        }
+
+        self.assertIn("home-weather", definition_ids)
+        self.assertIn("home-bookmarks", definition_ids)
+        weather_button = window.findChild(QPushButton, "AddWidgetPanel-home-weather")
+        self.assertIsNotNone(weather_button)
+        weather_button.click()
+
+        self.assertEqual(add_spy.count(), 1)
+        self.assertEqual(add_spy.at(0)[0], "home-weather")
 
     def test_other_page_resets_delete_confirmation_preferences(self) -> None:
         preferences = UiPreferences(confirm_delete_panel=False, confirm_delete_tab=False)

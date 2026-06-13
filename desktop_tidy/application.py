@@ -911,6 +911,7 @@ class DesktopCleanerApplication:
         panel.geometry_changed.connect(self._on_panel_geometry_changed)
         panel.layout_gesture_started.connect(self._on_panel_layout_gesture_started)
         panel.settings_requested.connect(self._show_settings)
+        panel.settings_section_requested.connect(self._show_settings_section)
         panel.organize_requested.connect(self._on_organize_requested)
         panel.item_grid.paths_dropped.connect(self._on_paths_dropped)
         panel.item_grid.restore_auto_requested.connect(self._on_restore_auto_requested)
@@ -1031,7 +1032,7 @@ class DesktopCleanerApplication:
         if tab.widget_type == "home":
             self._sync_home_dashboard_settings()
         panel = self._panels.get(tab.group_id)
-        if panel is not None and panel.active_tab_id == tab.id:
+        if panel is not None and panel.active_tab_id == tab.id and tab.widget_type != "home":
             panel.reload_from_model()
         self._schedule_deferred_save()
 
@@ -1469,6 +1470,12 @@ class DesktopCleanerApplication:
         self.complete_group_merge_at_global_point(group_id, (global_x, global_y))
 
     def _show_settings(self, group_id: str) -> None:
+        self._show_settings_window(group_id)
+
+    def _show_settings_section(self, group_id: str, section_name: str) -> None:
+        self._show_settings_window(group_id, section_name=section_name)
+
+    def _show_settings_window(self, group_id: str, *, section_name: str = "") -> None:
         if self._settings_window is None:
             self._settings_window = SettingsWindow(
                 self.model.config,
@@ -1557,6 +1564,8 @@ class DesktopCleanerApplication:
         self._settings_window.set_history_snapshots(self.history_store.load())
         self._refresh_settings_diagnostics()
         self._refresh_settings_update_state()
+        if section_name:
+            self._settings_window.select_section(section_name)
         if self._settings_window.windowState() & Qt.WindowState.WindowMinimized:
             self._settings_window.showNormal()
         self._settings_window.show()

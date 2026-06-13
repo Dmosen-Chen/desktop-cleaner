@@ -203,7 +203,8 @@ class PanelGroupWidgetTests(unittest.TestCase):
         home_widget = widget.findChild(QWidget, "HomeDashboardWidgetRoot")
         self.assertIsNotNone(home_widget)
         self.assertGreaterEqual(home_widget.width(), widget._content_host.width() - 4)
-        self.assertEqual(home_widget.property("layout_columns"), 4)
+        self.assertEqual(home_widget.property("layout_units"), 8)
+        self.assertEqual(home_widget.property("layout_columns"), 8)
         self.assertEqual(home_widget.property("dashboard_mode"), "wide")
 
     def test_home_weather_refresh_request_is_forwarded_from_panel(self) -> None:
@@ -220,16 +221,9 @@ class PanelGroupWidgetTests(unittest.TestCase):
 
         widget.activate_tab(home_tab.id)
         type(self).app.processEvents()
-        edit_button = widget.findChild(QPushButton, "HomeEditButton")
-        self.assertIsNotNone(edit_button)
-        QTest.mouseClick(edit_button, Qt.MouseButton.LeftButton)
-        type(self).app.processEvents()
-        city_input = widget.findChild(QLineEdit, "HomeEditorWeatherCityInput")
-        refresh_button = widget.findChild(QPushButton, "HomeEditorWeatherRefreshButton")
-        self.assertIsNotNone(city_input)
+        refresh_button = widget.findChild(QPushButton, "HomeWeatherRefreshInlineButton")
         self.assertIsNotNone(refresh_button)
 
-        city_input.setText("London")
         refresh_button.click()
 
         self.assertEqual(spy.count(), 1)
@@ -246,6 +240,8 @@ class PanelGroupWidgetTests(unittest.TestCase):
         )
         spy = QSignalSpy(widget.widget_recent_refresh_requested)
 
+        widget.resize(1100, 700)
+        widget.show()
         widget.activate_tab(home_tab.id)
         type(self).app.processEvents()
         refresh_button = widget.findChild(QPushButton, "HomeRecentRefreshButton")
@@ -253,6 +249,30 @@ class PanelGroupWidgetTests(unittest.TestCase):
         QTest.mouseClick(refresh_button, Qt.MouseButton.LeftButton)
 
         self.assertEqual(spy.count(), 1)
+
+    def test_home_empty_state_requests_home_settings_section(self) -> None:
+        config = build_default_configuration(r"D:\Preview\Desktop")
+        model = WorkspaceModel(config)
+        home_tab = model.ensure_home_tab()
+        widget = PanelGroupWidget(
+            model.group("group-default"),
+            model.config.panel_tabs,
+            workspace=model,
+        )
+        spy = QSignalSpy(widget.settings_section_requested)
+
+        widget.resize(1100, 700)
+        widget.show()
+        widget.activate_tab(home_tab.id)
+        type(self).app.processEvents()
+        button = widget.findChild(QPushButton, "HomeBookmarkAddButton")
+        self.assertIsNotNone(button)
+
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+        self.assertEqual(spy.count(), 1)
+        self.assertEqual(spy.at(0)[0], "group-default")
+        self.assertEqual(spy.at(0)[1], "主标签页设置")
 
     def test_tab_button_click_switches_active_tab_without_drag(self) -> None:
         """Plain tab click must switch content; drag-detection must not swallow clicks."""
