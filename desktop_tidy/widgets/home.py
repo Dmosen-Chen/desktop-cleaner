@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -32,6 +33,7 @@ from desktop_tidy.widgets.home_layout import (
     HomeModuleLayout,
     build_default_module_layout,
     normalize_home_module_layout,
+    project_home_module_layout,
     resize_module as resize_home_module,
     set_module_position as set_home_module_position,
 )
@@ -157,9 +159,11 @@ class HomeDashboardWidget(QWidget):
         parent: QWidget | None = None,
         *,
         module_definitions: tuple[DashboardModuleDefinition, ...] | None = None,
+        standalone: bool = False,
     ) -> None:
         super().__init__(parent)
         self._settings = dict(settings)
+        self._standalone = bool(standalone)
         if module_definitions is None:
             module_definitions = default_dashboard_modules()
         self._definitions = {entry.id: entry for entry in module_definitions}
@@ -192,7 +196,9 @@ class HomeDashboardWidget(QWidget):
         self._compact_modules = False
         self._dashboard_mode = ""
         self._reduced_motion = bool(self._settings.get("reduced_motion", False))
-        self._layout_locked = bool(self._settings.get("layout_locked", True))
+        self._layout_locked = (
+            True if self._standalone else bool(self._settings.get("layout_locked", True))
+        )
         self._visible_modules = self._read_visible_modules()
         self._layout_specs = self._home_layout_specs()
         self._module_layout = normalize_home_module_layout(
@@ -200,6 +206,7 @@ class HomeDashboardWidget(QWidget):
             self._layout_specs,
             self._settings,
         )
+        self._projected_module_layout: HomeModuleLayout = {}
         self._module_spans = self._read_module_spans()
         self._module_positions = self._read_module_positions()
 
@@ -210,14 +217,21 @@ class HomeDashboardWidget(QWidget):
         self.setProperty("dashboard_mode", "")
         self.setProperty("compact_modules", False)
         self.setProperty("layout_locked", self._layout_locked)
-        self.setMinimumSize(HOME_VISUAL.min_width, HOME_VISUAL.min_height)
-        self.setMaximumSize(HOME_VISUAL.max_width, HOME_VISUAL.max_height)
+        if self._standalone:
+            self.setMinimumSize(240, 140)
+            self.setMaximumSize(420, 320)
+        else:
+            self.setMinimumSize(HOME_VISUAL.min_width, HOME_VISUAL.min_height)
+            self.setMaximumSize(HOME_VISUAL.max_width, HOME_VISUAL.max_height)
         self.setStyleSheet(self._style_sheet())
 
         self._root_layout = QVBoxLayout(self)
-        self._root_layout.setContentsMargins(
-            HOME_ROOT_HORIZONTAL_MARGIN, 20, HOME_ROOT_HORIZONTAL_MARGIN, 22
-        )
+        if self._standalone:
+            self._root_layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            self._root_layout.setContentsMargins(
+                HOME_ROOT_HORIZONTAL_MARGIN, 20, HOME_ROOT_HORIZONTAL_MARGIN, 22
+            )
         self._root_layout.setSpacing(14)
         self._root_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
@@ -226,7 +240,7 @@ class HomeDashboardWidget(QWidget):
         self._dashboard_shell.setMaximumWidth(HOME_CONTENT_RECOMMENDED_WIDTH)
         self._dashboard_shell.setSizePolicy(
             QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
         )
         self._dashboard_layout = QVBoxLayout(self._dashboard_shell)
         self._dashboard_layout.setContentsMargins(0, 0, 0, 0)
@@ -256,7 +270,8 @@ class HomeDashboardWidget(QWidget):
         self._lock_button = self._edit_button
         self._sync_lock_button()
 
-        self._dashboard_layout.addWidget(self._build_hero_panel())
+        if not self._standalone:
+            self._dashboard_layout.addWidget(self._build_hero_panel())
 
         self._content_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
@@ -273,11 +288,20 @@ class HomeDashboardWidget(QWidget):
         self._content_layout.addWidget(self._module_area, 1)
 
         self._dashboard_layout.addLayout(self._content_layout, 1)
-        self._root_layout.addWidget(
-            self._dashboard_shell,
-            1,
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+        self._dashboard_scroll = QScrollArea(self)
+        self._dashboard_scroll.setObjectName("HomeDashboardScroll")
+        self._dashboard_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._dashboard_scroll.setWidgetResizable(True)
+        self._dashboard_scroll.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
+        self._dashboard_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._dashboard_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._dashboard_scroll.viewport().setStyleSheet("background: transparent;")
+        self._dashboard_scroll.setWidget(self._dashboard_shell)
+        self._root_layout.addWidget(self._dashboard_scroll, 1)
 
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(60_000)
@@ -580,12 +604,16 @@ class HomeDashboardWidget(QWidget):
             return
         if self._content_layout.direction() != QBoxLayout.Direction.LeftToRight:
             self._content_layout.setDirection(QBoxLayout.Direction.LeftToRight)
-        target_width = max(1, min(self._content_width(), HOME_CONTENT_RECOMMENDED_WIDTH))
+        available_width = self._content_width()
+        if hasattr(self, "_dashboard_scroll"):
+            available_width -= self._dashboard_scroll.verticalScrollBar().sizeHint().width()
+        target_width = max(1, min(available_width, HOME_CONTENT_RECOMMENDED_WIDTH))
         self._dashboard_shell.setFixedWidth(target_width)
         self._module_area.setFixedWidth(target_width)
 
     def _available_module_width(self) -> int:
-        return max(0, min(self._content_width(), HOME_CONTENT_RECOMMENDED_WIDTH))
+        width = self._dashboard_shell.width() if hasattr(self, "_dashboard_shell") else 0
+        return max(0, min(width or self._content_width(), HOME_CONTENT_RECOMMENDED_WIDTH))
 
     def _set_module_drag_handles_visible(self, visible: bool) -> None:
         for handle in self._module_drag_handles.values():
@@ -680,13 +708,10 @@ class HomeDashboardWidget(QWidget):
         return (item["y"], item["x"])
 
     def _module_grid_position_tuple(self, module_id: str) -> tuple[int, int, int, int]:
-        item = self._module_layout.get(module_id)
+        item = self._projected_module_layout.get(module_id) or self._module_layout.get(module_id)
         if item is None:
             return (0, 0, 1, 1)
-        columns = max(1, self._layout_units or HOME_GRID_UNITS)
-        span = min(columns, item["w"])
-        column = max(0, min(max(0, columns - span), item["x"]))
-        return (item["y"], column, item["h"], span)
+        return (item["y"], item["x"], item["h"], item["w"])
 
     def _occupied_cells_from_grid(
         self,
@@ -815,6 +840,15 @@ class HomeDashboardWidget(QWidget):
             "h": max(spec.min_h, min(spec.max_h, 3, next_height)),
         }
 
+    def _layout_row_count(self) -> int:
+        return max(
+            HOME_GRID_MAX_ROWS,
+            max(
+                (item["y"] + item["h"] for item in self._module_layout.values()),
+                default=0,
+            ),
+        )
+
     def _normalized_module_position(
         self,
         module_id: str,
@@ -830,12 +864,11 @@ class HomeDashboardWidget(QWidget):
         layout_columns = max(1, int(columns or self._layout_units or HOME_GRID_UNITS))
         definition = self._definitions[module_id]
         width_units = self._column_span(definition, layout_columns)
-        height_units = self._module_height_units(definition)
         next_column = int(column if column is not None else current.get("x", 0))
         next_row = int(row if row is not None else current.get("y", 0))
         return {
             "x": max(0, min(max(0, layout_columns - width_units), next_column)),
-            "y": max(0, min(max(0, HOME_GRID_MAX_ROWS - height_units), next_row)),
+            "y": max(0, min(self._layout_row_count(), next_row)),
         }
 
     def _occupied_cells_for(
@@ -891,9 +924,8 @@ class HomeDashboardWidget(QWidget):
         )
         definition = self._definitions[module_id]
         width_units = self._column_span(definition, columns)
-        height_units = self._module_height_units(definition)
         max_column = max(0, columns - width_units)
-        max_row = max(0, HOME_GRID_MAX_ROWS - height_units)
+        max_row = self._layout_row_count()
         best_position = normalized
         best_distance: int | None = None
         for row in range(max_row + 1):
@@ -1021,6 +1053,8 @@ class HomeDashboardWidget(QWidget):
             module_id: dict(position)
             for module_id, position in self._module_drag_original_positions.items()
         }
+        if source_id and commit:
+            self._apply_module_drag_preview(next_position)
         preview_changed = self._module_layout != original_positions
         self.releaseMouse()
         self._set_module_dragging(source_id, False)
@@ -1028,18 +1062,14 @@ class HomeDashboardWidget(QWidget):
         self._module_drag_source_id = ""
         self._module_drag_started = False
         self._module_drag_original_positions = {}
+        if commit:
+            if preview_changed:
+                self._sync_legacy_layout_views()
+                self._emit_settings_changed()
+            return
         if preview_changed:
             self._module_layout = original_positions
             self._sync_legacy_layout_views()
-        if source_id and commit:
-            changed = self._set_module_position(
-                source_id,
-                next_position["x"],
-                next_position["y"],
-            )
-            if not changed and preview_changed:
-                self._apply_responsive_layout(force=True, animate=True)
-        elif preview_changed:
             self._apply_responsive_layout(force=True, animate=True)
 
     def _drag_position_for_global_pos(self, global_pos: QPoint) -> dict[str, int]:
@@ -1056,10 +1086,9 @@ class HomeDashboardWidget(QWidget):
         target_row = self._module_drag_start_row + row_delta
         item = self._module_layout.get(source_id, {})
         width = int(item.get("w", self._default_module_width(source_id)))
-        height = int(item.get("h", self._default_module_height(source_id)))
         return {
             "x": max(0, min(max(0, HOME_GRID_UNITS - width), target_column)),
-            "y": max(0, min(max(0, HOME_GRID_MAX_ROWS - height), target_row)),
+            "y": max(0, min(self._layout_row_count(), target_row)),
         }
 
     def _apply_module_drag_preview(self, position: dict[str, int]) -> None:
@@ -1334,38 +1363,27 @@ class HomeDashboardWidget(QWidget):
         columns: int,
     ) -> list[tuple[str, DashboardModuleDefinition, int, int, int, int]]:
         placements: list[tuple[str, DashboardModuleDefinition, int, int, int, int]] = []
-        if columns <= 1:
-            row = 0
-            for module_id in self._visible_modules:
-                definition = self._definitions.get(module_id)
-                if definition is None:
-                    continue
-                placements.append((module_id, definition, row, 0, 1, 1))
-                row += 1
-            return placements
-
+        self._projected_module_layout = project_home_module_layout(
+            self._module_layout,
+            self._visible_modules,
+            self._layout_specs,
+            columns=columns,
+        )
         for module_id in self._visible_modules:
             definition = self._definitions.get(module_id)
             if definition is None:
                 continue
-            item = self._module_layout.get(module_id)
-            if item is None:
-                self._normalize_current_module_layout()
-                item = self._module_layout.get(module_id)
+            item = self._projected_module_layout.get(module_id)
             if item is None:
                 continue
-            span = max(1, min(columns, int(item["w"])))
-            height_units = self._module_height_units(definition)
-            column = max(0, min(max(0, columns - span), int(item["x"])))
-            row = max(0, min(max(0, HOME_GRID_MAX_ROWS - height_units), int(item["y"])))
             placements.append(
                 (
                     module_id,
                     definition,
-                    row,
-                    column,
-                    height_units,
-                    span,
+                    int(item["y"]),
+                    int(item["x"]),
+                    int(item["h"]),
+                    int(item["w"]),
                 )
             )
         return placements
@@ -1430,12 +1448,15 @@ class HomeDashboardWidget(QWidget):
             max_row_end * HOME_MODULE_MIN_HEIGHT
             + max(0, max_row_end - 1) * HOME_GRID_GAP
         )
-        self._module_area.setMinimumHeight(total_height)
+        self._module_area.setFixedHeight(total_height)
         if self._module_area.width() <= 0 or self._module_area.height() <= 0:
             self._module_area.resize(
                 self._available_module_width() or HOME_CONTENT_RECOMMENDED_WIDTH,
                 total_height,
             )
+        self._dashboard_layout.activate()
+        self._dashboard_shell.setMinimumHeight(self._dashboard_layout.sizeHint().height())
+
 
     def _module_rect_for_grid(
         self,
@@ -2392,39 +2413,33 @@ class HomeModuleWidgetPlugin:
 
     def default_settings(self) -> dict[str, object]:
         settings = HomeWidgetPlugin().default_settings()
+        settings["module_layout"] = {
+            self._module_definition.id: {
+                "x": 0,
+                "y": 0,
+                "w": self._module_definition.layout_default_w,
+                "h": self._module_definition.layout_default_h,
+            }
+        }
+        settings["layout_locked"] = True
         settings["modules"] = [self._module_definition.id]
         return settings
 
     def create_widget(self, settings: dict[str, object]) -> QWidget:
         merged = self.default_settings()
         merged.update(settings)
-        widget = self._module_definition.create_widget(
+        merged["modules"] = [self._module_definition.id]
+        merged["module_layout"] = {
+            self._module_definition.id: {
+                "x": 0,
+                "y": 0,
+                "w": self._module_definition.layout_default_w,
+                "h": self._module_definition.layout_default_h,
+            }
+        }
+        merged["layout_locked"] = True
+        return HomeDashboardWidget(
             merged,
-            compact=False,
-            render_mode=self._module_definition.render_mode,
+            module_definitions=(self._module_definition,),
+            standalone=True,
         )
-        widget.setStyleSheet(
-            """
-            QFrame.HomeModuleCard {
-                background: rgba(24, 27, 36, 235);
-                border: 1px solid rgba(255, 255, 255, 28);
-                border-radius: 14px;
-            }
-            QLabel.HomeModuleTitle {
-                color: #f8fafc;
-                font-size: 17px;
-                font-weight: 700;
-            }
-            QLabel.HomeModuleItem {
-                color: rgba(248, 250, 252, 235);
-                font-size: 13px;
-            }
-            QLabel.HomeMuted {
-                color: rgba(248, 250, 252, 163);
-                font-size: 13px;
-            }
-            """
-        )
-        widget.setMinimumSize(240, 140)
-        widget.setMaximumSize(420, 320)
-        return widget

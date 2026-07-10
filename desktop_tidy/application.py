@@ -68,6 +68,14 @@ _REMINDER_TIME_RE = re.compile(
     r"^\s*(?:(?:\d{4}[-/])?\d{1,2}[-/]\d{1,2}\s+)?"
     r"(?P<hour>[0-2]?\d):(?P<minute>[0-5]\d)\b"
 )
+_WEATHER_CACHE_TTL_SECONDS = 30 * 60
+_HOME_MODULE_DATA_KEYS = {
+    "recent": "recent_items",
+    "schedule": "reminders",
+    "bookmarks": "bookmarks",
+    "calendar": "selected_date",
+    "weather": "weather",
+}
 
 
 def resolve_startup_executable_path(
@@ -817,7 +825,11 @@ class DesktopCleanerApplication:
         self.save()
         self.refresh()
 
-    def _sync_home_dashboard_settings(self) -> bool:
+    def _sync_home_dashboard_settings(
+        self,
+        *,
+        exclude_tab_id: str = "",
+    ) -> bool:
         home = self.model.home_tab()
         if home is None:
             return False
@@ -856,7 +868,126 @@ class DesktopCleanerApplication:
 
         if changed:
             home.widget_settings = settings
-        return changed
+        standalone_changed = self._sync_standalone_home_tabs(exclude_tab_id=exclude_tab_id)
+        return changed or standalone_changed
+
+    def _standalone_home_module_id(self, widget_type: str) -> str:
+        if not widget_type.startswith("home-"):
+            return ""
+        module_id = widget_type.removeprefix("home-")
+        valid_ids = {
+            definition.id
+            for definition in default_dashboard_modules()
+            if definition.standalone_enabled
+        }
+        return module_id if module_id in valid_ids else ""
+
+    def _standalone_home_settings(self, module_id: str) -> dict[str, object]:
+        home = self.model.home_tab()
+        if home is None:
+            return {}
+        definition = next(
+            (
+                entry
+                for entry in default_dashboard_modules()
+                if entry.id == module_id and entry.standalone_enabled
+            ),
+            None,
+        )
+        if definition is None:
+            return {}
+
+        home_settings = home.widget_settings
+        all_module_settings = home_settings.get("module_settings")
+        module_payload: dict[str, object] = {}
+        if isinstance(all_module_settings, dict):
+            stored_payload = all_module_settings.get(module_id)
+            if isinstance(stored_payload, dict):
+                module_payload = deepcopy(stored_payload)
+
+        data_key = _HOME_MODULE_DATA_KEYS.get(module_id)
+        if data_key:
+            if data_key in module_payload:
+                data_value = deepcopy(module_payload[data_key])
+            elif data_key in home_settings:
+                data_value = deepcopy(home_settings[data_key])
+                module_payload[data_key] = deepcopy(data_value)
+            else:
+                data_value = None
+        else:
+            data_value = None
+
+        settings: dict[str, object] = {
+            "modules": [module_id],
+            "module_settings": {module_id: module_payload},
+            "module_layout": {
+                module_id: {
+                    "x": 0,
+                    "y": 0,
+                    "w": definition.layout_default_w,
+                    "h": definition.layout_default_h,
+                }
+            },
+            "layout_locked": True,
+            "reduced_motion": bool(home_settings.get("reduced_motion", False)),
+        }
+        if data_key and data_value is not None:
+            settings[data_key] = data_value
+        return settings
+
+    def _sync_standalone_home_tabs(self, *, exclude_tab_id: str = "") -> bool:
+        changed_tab_ids: set[str] = set()
+        for tab in self.model.config.panel_tabs:
+            module_id = self._standalone_home_module_id(tab.widget_type)
+            if not module_id:
+                continue
+            shared_settings = self._standalone_home_settings(module_id)
+            if tab.widget_settings == shared_settings:
+                continue
+            tab.widget_settings = shared_settings
+            changed_tab_ids.add(tab.id)
+
+        for panel in getattr(self, "_panels", {}).values():
+            if (
+                panel.active_tab_id in changed_tab_ids
+                and panel.active_tab_id != exclude_tab_id
+            ):
+                panel.reload_from_model()
+        return bool(changed_tab_ids)
+
+    def _merge_standalone_home_settings(
+        self,
+        module_id: str,
+        source_settings: dict[str, object],
+    ) -> bool:
+        home = self.model.home_tab()
+        if home is None:
+            return False
+        settings = deepcopy(home.widget_settings)
+        all_module_settings = settings.get("module_settings")
+        module_settings = (
+            deepcopy(all_module_settings) if isinstance(all_module_settings, dict) else {}
+        )
+        stored_payload = module_settings.get(module_id)
+        target_payload = (
+            deepcopy(stored_payload) if isinstance(stored_payload, dict) else {}
+        )
+        source_modules = source_settings.get("module_settings")
+        if isinstance(source_modules, dict):
+            source_payload = source_modules.get(module_id)
+            if isinstance(source_payload, dict):
+                target_payload.update(deepcopy(source_payload))
+        data_key = _HOME_MODULE_DATA_KEYS.get(module_id)
+        if data_key and data_key in source_settings:
+            target_payload[data_key] = deepcopy(source_settings[data_key])
+        module_settings[module_id] = target_payload
+        settings["module_settings"] = module_settings
+        if data_key and data_key in target_payload:
+            settings[data_key] = deepcopy(target_payload[data_key])
+        if settings == home.widget_settings:
+            return False
+        home.widget_settings = settings
+        return True
 
     def refresh(self, _changes: IndexChanges | None = None) -> None:
         issues = self.model.repair_metadata(desktop_roots=self.index.directories())
@@ -1029,11 +1160,28 @@ class DesktopCleanerApplication:
         merged = dict(tab.widget_settings)
         merged.update(settings)
         tab.widget_settings = merged
+        standalone_module_id = self._standalone_home_module_id(tab.widget_type)
         if tab.widget_type == "home":
-            self._sync_home_dashboard_settings()
-        panel = self._panels.get(tab.group_id)
-        if panel is not None and panel.active_tab_id == tab.id and tab.widget_type != "home":
-            panel.reload_from_model()
+            self._sync_home_dashboard_settings(exclude_tab_id=tab.id)
+        elif standalone_module_id:
+            home_changed = self._merge_standalone_home_settings(
+                standalone_module_id,
+                merged,
+            )
+            self._sync_home_dashboard_settings(exclude_tab_id=tab.id)
+            if home_changed:
+                home = self.model.home_tab()
+                if home is not None:
+                    home_panel = self._panels.get(home.group_id)
+                    if (
+                        home_panel is not None
+                        and home_panel.active_tab_id == home.id
+                    ):
+                        home_panel.reload_from_model()
+        else:
+            panel = self._panels.get(tab.group_id)
+            if panel is not None and panel.active_tab_id == tab.id:
+                panel.reload_from_model()
         self._schedule_deferred_save()
 
     def _on_items_reordered(self, tab_id: str, paths: object) -> None:
@@ -1343,8 +1491,21 @@ class DesktopCleanerApplication:
             weather_settings = {**legacy_weather, **weather_settings}
         city = str(weather_settings.get("city") or "").strip()
         summary = str(weather_settings.get("summary") or "").strip()
-        if not city or summary:
+        if not city:
             return
+        provider = str(weather_settings.get("provider") or "").strip()
+        fetched_at = str(weather_settings.get("fetched_at") or "").strip()
+        if summary and not fetched_at and not provider:
+            return
+        if summary and fetched_at:
+            try:
+                cached_at = datetime.fromisoformat(fetched_at)
+                now = datetime.now(cached_at.tzinfo) if cached_at.tzinfo else datetime.now()
+                age_seconds = (now - cached_at).total_seconds()
+            except ValueError:
+                age_seconds = _WEATHER_CACHE_TTL_SECONDS
+            if 0 <= age_seconds < _WEATHER_CACHE_TTL_SECONDS:
+                return
         refresh_key = city.casefold()
         if refresh_key in self._auto_weather_refresh_keys:
             return
@@ -1429,6 +1590,7 @@ class DesktopCleanerApplication:
                     weather_settings,
                 )
                 home.widget_settings = settings
+                self._sync_standalone_home_tabs()
                 panel = self._panels.get(home.group_id)
                 if panel is not None and panel.active_tab_id == home.id:
                     panel.reload_from_model()
@@ -1443,6 +1605,7 @@ class DesktopCleanerApplication:
             "city": report.city,
             "summary": report.summary,
             "provider": report.provider,
+            "fetched_at": datetime.now().isoformat(timespec="seconds"),
         }
         if report.temperature_c is not None:
             weather_settings["temperature_c"] = report.temperature_c
@@ -1456,6 +1619,7 @@ class DesktopCleanerApplication:
             weather_settings,
         )
         home.widget_settings = settings
+        self._sync_standalone_home_tabs()
         panel = self._panels.get(home.group_id)
         if panel is not None and panel.active_tab_id == home.id:
             panel.reload_from_model()
@@ -1752,7 +1916,11 @@ class DesktopCleanerApplication:
             panel.item_grid.set_group_accent_color(accent)
 
     def _on_add_widget_panel_requested(self, widget_type: str) -> None:
-        group = self.model.add_widget_panel(widget_type)
+        module_id = self._standalone_home_module_id(widget_type)
+        widget_settings = (
+            self._standalone_home_settings(module_id) if module_id else None
+        )
+        group = self.model.add_widget_panel(widget_type, widget_settings=widget_settings)
         if self._settings_window is not None:
             group.screen_id = self._settings_window.selected_screen_id()
             group.geometry = PanelGeometry(0.38, 0.38, group.geometry.rw, group.geometry.rh)

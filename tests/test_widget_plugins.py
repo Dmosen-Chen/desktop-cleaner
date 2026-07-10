@@ -8,7 +8,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QWidget,
+)
 
 from desktop_tidy.ui.widget_plugins import BuiltinWidgetRegistry, UnknownWidgetPlugin
 from desktop_tidy.widgets.dashboard_modules import DashboardModuleDefinition
@@ -104,6 +112,49 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(home.id, "home")
         self.assertEqual(home.definition().display_name, "主标签页")
 
+    def test_standalone_home_recent_uses_interactive_renderer(self) -> None:
+        plugin = ModularWidgetRegistry().get("home-recent")
+        settings = plugin.default_settings()
+        settings["recent_items"] = [
+            {
+                "name": "Report.pdf",
+                "path": "C:/Users/Test/Report.pdf",
+                "source": "windows",
+            }
+        ]
+
+        widget = plugin.create_widget(settings)
+        widget.resize(420, 320)
+        widget.show()
+        type(self).app.processEvents()
+
+        self.assertIsInstance(widget, HomeDashboardWidget)
+        refresh = widget.findChild(QPushButton, "HomeRecentRefreshButton")
+        open_button = widget.findChild(QPushButton, "HomeRecentOpen-0")
+        self.assertIsNotNone(refresh)
+        self.assertIsNotNone(open_button)
+        open_spy = QSignalSpy(widget.item_open_requested)
+        QTest.mouseClick(open_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(open_spy.at(0)[0], "C:/Users/Test/Report.pdf")
+
+
+    def test_standalone_home_modules_start_at_panel_origin(self) -> None:
+        registry = ModularWidgetRegistry()
+
+        for widget_id in (
+            "home-recent",
+            "home-schedule",
+            "home-bookmarks",
+            "home-calendar",
+            "home-weather",
+        ):
+            widget = registry.get(widget_id).create_widget({})
+            widget.resize(420, 320)
+            widget.show()
+            type(self).app.processEvents()
+
+            card = next(iter(widget._module_cards_by_id.values()))
+            self.assertEqual(card.y(), 0, widget_id)
     def test_clock_definition_exposes_reusable_visual_metadata(self) -> None:
         registry = ModularWidgetRegistry()
 
@@ -344,6 +395,39 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(widget.property("layout_columns"), 1)
         self.assertEqual(widget.property("dashboard_mode"), "compact")
         self.assertTrue(widget.property("compact_modules"))
+
+    def test_home_dashboard_responsive_geometries_do_not_overlap(self) -> None:
+        plugin = ModularWidgetRegistry().get("home")
+        widget = plugin.create_widget(plugin.default_settings())
+        widget.show()
+
+        for width in (820, 640):
+            widget.resize(width, 900)
+            type(self).app.processEvents()
+            cards = list(widget._module_widgets)
+            overlaps = [
+                (first.property("module_id"), second.property("module_id"))
+                for index, first in enumerate(cards)
+                for second in cards[index + 1 :]
+                if first.geometry().intersects(second.geometry())
+            ]
+            self.assertEqual(overlaps, [], f"width={width}: {overlaps}")
+
+    def test_home_dashboard_scrolls_when_module_reaches_last_grid_row(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["weather"],
+                "module_layout": {"weather": {"x": 0, "y": 5, "w": 2, "h": 1}},
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(widget.maximumWidth(), widget.maximumHeight())
+        widget.show()
+        type(self).app.processEvents()
+
+        scroll = widget.findChild(QScrollArea, "HomeDashboardScroll")
+        self.assertIsNotNone(scroll)
+        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
 
     def test_home_dashboard_wide_layout_fills_final_row_and_compacts_empty_cards(self) -> None:
         registry = ModularWidgetRegistry()
@@ -690,6 +774,47 @@ class WidgetPluginTests(unittest.TestCase):
         self.assertEqual(latest["module_layout"]["recent"]["x"], 4)
         self.assertEqual(latest["module_layout"]["recent"]["y"], 0)
         self.assertEqual(latest["module_layout"]["recent"]["w"], 4)
+
+    def test_home_drag_conflict_keeps_last_legal_preview_position(self) -> None:
+        widget = HomeDashboardWidget(
+            {
+                "modules": ["weather", "recent"],
+                "module_layout": {
+                    "weather": {"x": 0, "y": 0, "w": 2, "h": 1},
+                    "recent": {"x": 4, "y": 0, "w": 4, "h": 1},
+                },
+                "reduced_motion": True,
+            }
+        )
+        widget.resize(1280, 760)
+        widget.show()
+        type(self).app.processEvents()
+
+        lock_button = widget.findChild(QPushButton, "HomeLayoutLockButton")
+        self.assertIsNotNone(lock_button)
+        QTest.mouseClick(lock_button, Qt.MouseButton.LeftButton)
+        type(self).app.processEvents()
+        settings_spy = QSignalSpy(widget.settings_changed)
+
+        handle = widget.findChild(QPushButton, "HomeModuleDragHandle-weather")
+        self.assertIsNotNone(handle)
+        center = handle.rect().center()
+        legal_delta = QPoint(0, int(round(widget._module_height_step())))
+        QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=center)
+        QTest.mouseMove(handle, center + legal_delta, delay=10)
+        type(self).app.processEvents()
+        self.assertEqual(widget._module_layout["weather"]["y"], 1)
+
+        invalid_release = widget._module_drag_start_global + QPoint(
+            int(round(widget._module_unit_step() * 4)),
+            0,
+        )
+        widget._finish_module_drag(commit=True, global_pos=invalid_release)
+        type(self).app.processEvents()
+
+        self.assertEqual(widget._module_layout["weather"]["x"], 0)
+        self.assertEqual(widget._module_layout["weather"]["y"], 1)
+        self.assertGreaterEqual(settings_spy.count(), 1)
 
     def test_home_module_edge_resize_snaps_to_unit_width(self) -> None:
         widget = HomeDashboardWidget({"reduced_motion": True})

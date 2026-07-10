@@ -68,7 +68,7 @@ def _normalize_item(
         height=item.get("h", item.get("height")),
     )
     x = _clamp(_int_value(item.get("x", item.get("column")), 0), 0, HOME_GRID_UNITS - width)
-    y = _clamp(_int_value(item.get("y", item.get("row")), 0), 0, HOME_GRID_MAX_ROWS - height)
+    y = max(0, _int_value(item.get("y", item.get("row")), 0))
     return {"x": x, "y": y, "w": width, "h": height}
 
 
@@ -105,7 +105,12 @@ def _first_free_item(
     base = _normalize_item(module_id, specs, preferred)
     if _is_free(base, layout, exclude_module_id=module_id):
         return base
-    for row in range(0, HOME_GRID_MAX_ROWS - base["h"] + 1):
+    current_row_end = max(
+        (int(item["y"]) + int(item["h"]) for item in layout.values()),
+        default=0,
+    )
+    search_rows = max(HOME_GRID_MAX_ROWS, current_row_end + base["h"])
+    for row in range(0, search_rows - base["h"] + 1):
         for column in range(0, HOME_GRID_UNITS - base["w"] + 1):
             candidate = dict(base)
             candidate["x"] = column
@@ -178,6 +183,63 @@ def normalize_home_module_layout(
     return layout
 
 
+def project_home_module_layout(
+    layout: Mapping[str, Mapping[str, int]],
+    modules: list[str],
+    specs: Mapping[str, HomeLayoutSpec],
+    *,
+    columns: int,
+) -> HomeModuleLayout:
+    """Project the canonical eight-column layout into a collision-free viewport grid."""
+
+    column_count = _clamp(_int_value(columns, HOME_GRID_UNITS), 1, HOME_GRID_UNITS)
+    preferred_items: list[tuple[str, dict[str, int]]] = []
+    for module_id in modules:
+        source = layout.get(module_id)
+        source_item = source if isinstance(source, Mapping) else {}
+        width, height = _normalize_size(
+            module_id,
+            specs,
+            width=source_item.get("w"),
+            height=source_item.get("h"),
+        )
+        width = min(column_count, width)
+        preferred_items.append(
+            (
+                module_id,
+                {
+                    "x": _clamp(
+                        _int_value(source_item.get("x"), 0),
+                        0,
+                        column_count - width,
+                    ),
+                    "y": max(0, _int_value(source_item.get("y"), 0)),
+                    "w": width,
+                    "h": height,
+                },
+            )
+        )
+
+    projected: HomeModuleLayout = {}
+    search_rows = max(
+        HOME_GRID_MAX_ROWS,
+        sum(item["h"] for _module_id, item in preferred_items),
+    )
+    for module_id, preferred in preferred_items:
+        if _is_free(preferred, projected):
+            projected[module_id] = preferred
+            continue
+        for row in range(0, search_rows - preferred["h"] + 1):
+            for column in range(0, column_count - preferred["w"] + 1):
+                candidate = {**preferred, "x": column, "y": row}
+                if _is_free(candidate, projected):
+                    projected[module_id] = candidate
+                    break
+            if module_id in projected:
+                break
+    return projected
+
+
 def set_module_position(
     layout: Mapping[str, Mapping[str, int]],
     module_id: str,
@@ -220,8 +282,6 @@ def resize_module(
     )
     if candidate["x"] + candidate["w"] > HOME_GRID_UNITS:
         candidate["x"] = max(0, HOME_GRID_UNITS - candidate["w"])
-    if candidate["y"] + candidate["h"] > HOME_GRID_MAX_ROWS:
-        candidate["y"] = max(0, HOME_GRID_MAX_ROWS - candidate["h"])
     if candidate == current:
         return False, next_layout
     if not _is_free(candidate, next_layout, exclude_module_id=module_id):

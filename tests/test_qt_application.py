@@ -433,6 +433,36 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             saved_home = next(tab for tab in payload["panel_tabs"] if tab["id"] == home.id)
             self.assertEqual(saved_home["widget_settings"]["modules"], ["recent", "calendar"])
 
+    def test_standalone_home_module_settings_update_shared_home_data(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(build_default_configuration(desktop), store=store)
+            home = app.model.home_tab()
+            assert home is not None
+            group = app.model.add_widget_panel("home-bookmarks")
+            standalone = app.model.tab(group.active_tab_id)
+            bookmarks = [{"title": "Docs", "url": "https://example.com/docs"}]
+
+            app._on_widget_settings_changed(
+                standalone.id,
+                {
+                    "modules": ["bookmarks"],
+                    "module_settings": {
+                        "bookmarks": {"bookmarks": bookmarks}
+                    },
+                    "bookmarks": bookmarks,
+                },
+            )
+
+            self.assertEqual(home.widget_settings["bookmarks"], bookmarks)
+            self.assertEqual(
+                home.widget_settings["module_settings"]["bookmarks"]["bookmarks"],
+                bookmarks,
+            )
+            self.assertEqual(standalone.widget_settings["bookmarks"], bookmarks)
+
     def test_due_home_reminder_notifies_once_and_ignores_future_items(self) -> None:
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "desktop"
@@ -2555,6 +2585,38 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(payload["schema_version"], 5)
 
+    def test_adding_standalone_home_panel_inherits_shared_module_data(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                history_store=LayoutHistoryStore(Path(tmp) / "layout-history.json"),
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            bookmarks = [{"title": "Docs", "url": "https://example.com/docs"}]
+            home.widget_settings["bookmarks"] = bookmarks
+            home.widget_settings["module_settings"] = {
+                "bookmarks": {"bookmarks": bookmarks}
+            }
+
+            app._on_add_widget_panel_requested("home-bookmarks")
+            type(self).app.processEvents()
+
+            standalone = next(
+                tab
+                for tab in app.model.config.panel_tabs
+                if tab.widget_type == "home-bookmarks"
+            )
+            self.assertEqual(standalone.widget_settings["bookmarks"], bookmarks)
+            self.assertEqual(
+                standalone.widget_settings["module_settings"]["bookmarks"]["bookmarks"],
+                bookmarks,
+            )
+
     def test_layout_history_restore_replaces_panel_layout_without_touching_sources(self) -> None:
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "desktop"
@@ -3033,7 +3095,12 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             )
             home = app.model.home_tab()
             assert home is not None
-            cached = {"city": "London", "summary": "Cloudy 路 18掳C", "provider": "cached"}
+            cached = {
+                "city": "London",
+                "summary": "Cloudy 路 18掳C",
+                "provider": "cached",
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            }
             home.widget_settings["weather"] = cached
             home.widget_settings["module_settings"] = {
                 "weather": {"weather": dict(cached)}
@@ -3045,6 +3112,59 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
 
             self.assertEqual(weather.calls, [])
             self.assertEqual(home.widget_settings["weather"]["provider"], "cached")
+
+    def test_home_weather_auto_refreshes_when_cached_summary_is_stale(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            cached = {
+                "city": "London",
+                "summary": "Cloudy",
+                "provider": "cached",
+                "fetched_at": (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds"),
+            }
+            home.widget_settings["weather"] = cached
+            home.widget_settings["module_settings"] = {
+                "weather": {"weather": dict(cached)}
+            }
+
+            app.show()
+
+            self.assertTrue(self._wait_until(lambda: weather.calls == ["London"]))
+
+    def test_home_weather_auto_refresh_preserves_manual_summary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "desktop"
+            desktop.mkdir()
+            store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
+            weather = FakeWeatherService()
+            app = DesktopCleanerApplication(
+                build_default_configuration(desktop),
+                store=store,
+                weather_service=weather,
+            )
+            home = app.model.home_tab()
+            assert home is not None
+            manual = {"city": "London", "summary": "Bring an umbrella"}
+            home.widget_settings["weather"] = manual
+            home.widget_settings["module_settings"] = {
+                "weather": {"weather": dict(manual)}
+            }
+
+            app.show()
+            QTest.qWait(100)
+            type(self).app.processEvents()
+
+            self.assertEqual(weather.calls, [])
 
     def test_home_weather_refresh_failure_keeps_existing_weather_settings(self) -> None:
         with TemporaryDirectory() as tmp:
