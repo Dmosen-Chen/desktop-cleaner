@@ -12,7 +12,7 @@ from typing import Sequence
 
 _DEFAULT_VERSION_PATH = Path(__file__).resolve().parents[1] / "desktop_tidy" / "version.py"
 _SIMPLE_SEMANTIC_VERSION = re.compile(
-    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
 
 
@@ -90,11 +90,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         version = read_app_version()
-        if args.tag is not None:
+        if args.tag:
             validate_release_tag(args.tag, version)
         if args.artifact is not None:
             validate_artifact(args.artifact)
-    except (ReleaseContractError, OSError) as exc:
+    except (ReleaseContractError, OSError, UnicodeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
