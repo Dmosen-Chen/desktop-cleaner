@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import unittest
 from pathlib import Path
@@ -61,10 +62,31 @@ class AppIconTests(unittest.TestCase):
         self.assertFalse(tray.icon().isNull())
 
     def test_pyinstaller_build_includes_icon_assets(self) -> None:
-        spec = Path("DesktopCleaner.spec").read_text(encoding="utf-8")
+        spec_tree = ast.parse(
+            Path("DesktopCleaner.spec").read_text(encoding="utf-8"),
+            filename="DesktopCleaner.spec",
+        )
+        options_by_call: dict[str, dict[str, object]] = {}
+        for statement in spec_tree.body:
+            if not isinstance(statement, ast.Assign):
+                continue
+            call = statement.value
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                continue
+            options_by_call[call.func.id] = {
+                keyword.arg: ast.literal_eval(keyword.value)
+                for keyword in call.keywords
+                if keyword.arg is not None
+            }
 
-        self.assertIn(r"icon=['assets\\icons\\app.ico']", spec)
-        self.assertIn(r"datas=[('assets\\icons', 'assets\\icons')]", spec)
+        self.assertIn(
+            (r"assets\icons", r"assets\icons"),
+            options_by_call["Analysis"]["datas"],
+        )
+        self.assertIn(
+            r"assets\icons\app.ico",
+            options_by_call["EXE"]["icon"],
+        )
 
 
 if __name__ == "__main__":

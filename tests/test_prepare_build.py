@@ -84,13 +84,17 @@ class PrepareBuildTests(unittest.TestCase):
         with self.assertRaises(BuildGuardError):
             run_guard(store=store, takeover=RaisingTakeover(), stop_processes=lambda: None)
 
-    def test_build_script_runs_guard_before_cleaning_output(self) -> None:
+    def test_build_script_runs_guard_before_cleanup_and_pyinstaller(self) -> None:
         script = Path("scripts/build_exe.bat").read_text(encoding="utf-8")
 
-        guard_index = script.index("prepare_build.py")
-        clean_index = script.index("Cleaning old build output")
+        guard_index = script.index(r"python scripts\prepare_build.py")
+        build_cleanup_index = script.index("if exist build rmdir /s /q build")
+        dist_cleanup_index = script.index("if exist dist rmdir /s /q dist")
+        pyinstaller_index = script.index("python -m PyInstaller")
 
-        self.assertLess(guard_index, clean_index)
+        self.assertLess(guard_index, build_cleanup_index)
+        self.assertLess(guard_index, dist_cleanup_index)
+        self.assertLess(guard_index, pyinstaller_index)
 
     def test_stop_running_app_tolerates_no_matching_process(self) -> None:
         from scripts.prepare_build import stop_running_desktop_cleaner
