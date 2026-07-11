@@ -946,14 +946,21 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
             startup = FakeStartupService()
             store = ConfigurationStore(Path(tmp) / "DesktopCleaner" / "config.json")
             app = DesktopCleanerApplication(config, store=store, startup_service=startup)
+            packaged = Path(tmp) / "dist" / "DesktopCleaner.exe"
+            packaged.parent.mkdir()
+            packaged.write_bytes(b"exe")
 
             config.desktop.startup_enabled = True
-            app._on_settings_saved()
+            with patch(
+                "desktop_tidy.application.resolve_startup_executable_path",
+                return_value=packaged.resolve(),
+            ):
+                app._on_settings_saved()
 
             self.assertEqual(len(startup.calls), 1)
             enabled, exe_path = startup.calls[0]
             self.assertTrue(enabled)
-            self.assertTrue(exe_path.is_absolute())
+            self.assertEqual(exe_path, packaged.resolve())
 
     def test_development_startup_path_uses_packaged_exe_not_main_py(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1007,11 +1014,19 @@ class DesktopCleanerApplicationTests(unittest.TestCase):
                 startup_service=startup,
                 tray_controller=tray,
             )
+            packaged = Path(tmp) / "dist" / "DesktopCleaner.exe"
+            packaged.parent.mkdir()
+            packaged.write_bytes(b"exe")
 
-            app._apply_startup_preference()
+            with patch(
+                "desktop_tidy.application.resolve_startup_executable_path",
+                return_value=packaged.resolve(),
+            ):
+                app._apply_startup_preference()
 
             self.assertTrue(app.model.config.desktop.startup_enabled)
             self.assertTrue(startup.calls[-1][0])
+            self.assertEqual(startup.calls[-1][1], packaged.resolve())
             self.assertIn("开机启动", tray.last_message[0])
 
     def test_settings_diagnostics_actions_use_recovery_export_and_log_services(self) -> None:
