@@ -41,8 +41,8 @@ def _assert_windows_python_setup(job: dict[str, Any]) -> None:
     steps = job["steps"]
 
     assert steps.index(checkout) < steps.index(setup) < steps.index(install)
-    assert checkout["uses"] == "actions/checkout@v4"
-    assert setup["uses"] == "actions/setup-python@v5"
+    assert checkout["uses"] == "actions/checkout@v7"
+    assert setup["uses"] == "actions/setup-python@v6"
     assert setup["with"] == {
         "python-version": "3.13",
         "cache": "pip",
@@ -63,6 +63,28 @@ def test_build_requirements_declare_pytest() -> None:
     assert "pytest>=8,<10" in requirements
 
 
+
+def test_workflow_uses_node24_compatible_official_action_majors(
+    workflow: dict[str, Any],
+) -> None:
+    uses = [
+        step["uses"]
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if "uses" in step
+    ]
+
+    assert uses.count("actions/checkout@v7") == 2
+    assert uses.count("actions/setup-python@v6") == 2
+    assert uses.count("actions/upload-artifact@v7") == 1
+    assert uses.count("actions/download-artifact@v8") == 1
+    assert not any(
+        re.search(
+            r"actions/(checkout|setup-python|upload-artifact|download-artifact)@v[1-5]$",
+            use,
+        )
+        for use in uses
+    )
 def test_triggers_root_permissions_and_concurrency(
     workflow: dict[str, Any],
 ) -> None:
@@ -162,7 +184,7 @@ def test_build_uploads_only_the_executable_and_checksum(
     build_job = _job(workflow, "build")
     upload = _step(build_job, "Upload Windows artifact")
 
-    assert upload["uses"] == "actions/upload-artifact@v4"
+    assert upload["uses"] == "actions/upload-artifact@v7"
     assert upload["with"] == {
         "name": "${{ steps.metadata.outputs.artifact_name }}",
         "path": "dist\\DesktopCleaner.exe\ndist\\DesktopCleaner.exe.sha256\n",
@@ -243,7 +265,7 @@ def test_release_downloads_and_creates_with_exact_assets(
     create = _step(release_job, "Create release")
     script = create["run"]
 
-    assert download["uses"] == "actions/download-artifact@v4"
+    assert download["uses"] == "actions/download-artifact@v8"
     assert download["with"] == {
         "name": "${{ needs.build.outputs.artifact_name }}",
         "path": "dist",

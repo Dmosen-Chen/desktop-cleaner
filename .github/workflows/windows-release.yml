@@ -21,9 +21,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
@@ -41,9 +41,9 @@ jobs:
       artifact_name: ${{ steps.metadata.outputs.artifact_name }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
@@ -69,7 +69,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "artifact_name=DesktopCleaner-v$version-windows-x64" >> $env:GITHUB_OUTPUT
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.metadata.outputs.artifact_name }}
           path: |
@@ -87,7 +87,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: dist
