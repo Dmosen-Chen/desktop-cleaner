@@ -50,16 +50,32 @@ python main.py
 
 ## 打包 exe
 
-```bash
+```bat
 pip install -r requirements-build.txt
 scripts\build_exe.bat
 ```
 
-输出文件：
+`scripts\build_exe.bat` 使用 `DesktopCleaner.spec` 构建，输出文件为：
 
 ```text
 dist\DesktopCleaner.exe
 ```
+
+## 自动发布
+
+PR、推送到 `main` 和手动触发 `workflow_dispatch` 都会运行测试，并上传名为 `DesktopCleaner-vX.Y.Z-windows-x64` 的工作流构件，其中包含 `DesktopCleaner.exe` 和 `DesktopCleaner.exe.sha256`。
+
+发布新版本时，先更新 `desktop_tidy\version.py` 中的 `APP_VERSION`，提交并推送改动，再创建并推送与版本完全匹配的 `vX.Y.Z` 标签：
+
+```bat
+git add desktop_tidy\version.py
+git commit -m "Bump version to X.Y.Z"
+git push origin main
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+标签必须与 `APP_VERSION` 完全匹配，否则发布会被拒绝；已有的 GitHub Release 不会被覆盖。GitHub Release 中的可执行文件必须始终严格命名为 `DesktopCleaner.exe`，以保持内置更新器兼容性。代码签名尚未启用。
 
 ## 项目结构
 
