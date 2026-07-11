@@ -1,198 +1,260 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 
-WORKFLOW_PATH = (
-    Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-release.yml"
-)
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "windows-release.yml"
+BUILD_REQUIREMENTS_PATH = ROOT / "requirements-build.txt"
 
 
 @pytest.fixture
-def workflow() -> str:
+def workflow_text() -> str:
     return WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
-def _top_level_block(workflow: str, key: str) -> str:
-    lines = workflow.splitlines()
-    start = lines.index(f"{key}:")
-    end = next(
-        (
-            index
-            for index in range(start + 1, len(lines))
-            if lines[index] and not lines[index][0].isspace()
-        ),
-        len(lines),
-    )
-    return "\n".join(lines[start:end]).rstrip()
+@pytest.fixture
+def workflow(workflow_text: str) -> dict[str, Any]:
+    loaded = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    assert isinstance(loaded, dict)
+    return loaded
 
 
-def _job(workflow: str, name: str) -> str:
-    lines = workflow.splitlines()
-    start = lines.index(f"  {name}:")
-    end = next(
-        (
-            index
-            for index in range(start + 1, len(lines))
-            if re.fullmatch(r"  [A-Za-z0-9_-]+:", lines[index])
-        ),
-        len(lines),
-    )
-    return "\n".join(lines[start:end])
+def _job(workflow: dict[str, Any], name: str) -> dict[str, Any]:
+    return workflow["jobs"][name]
 
 
-def _assert_windows_python_setup(job: str) -> None:
-    checkout = job.index("uses: actions/checkout@v4")
-    setup = job.index("uses: actions/setup-python@v5")
-    install = job.index("run: python -m pip install -r requirements-build.txt")
-    lines = {line.strip() for line in job.splitlines()}
-
-    assert checkout < setup < install
-    assert "run: python -m pip install -r requirements-build.txt" in lines
-    assert 'python-version: "3.13"' in job
-    assert "cache: pip" in job
-    assert "cache-dependency-path: requirements-build.txt" in job
+def _step(job: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(step for step in job["steps"] if step.get("name") == name)
 
 
-def test_triggers_root_permissions_and_concurrency(workflow: str) -> None:
-    triggers = _top_level_block(workflow, "on")
-    root_permissions = _top_level_block(workflow, "permissions")
-    concurrency = _top_level_block(workflow, "concurrency")
+def _assert_windows_python_setup(job: dict[str, Any]) -> None:
+    checkout = _step(job, "Check out repository")
+    setup = _step(job, "Set up Python")
+    install = _step(job, "Install build requirements")
+    steps = job["steps"]
 
-    assert "  pull_request:" in triggers
-    assert "  workflow_dispatch:" in triggers
-    assert re.search(r"(?m)^  push:\n    branches:\n      - main$", triggers)
-    assert re.search(r'(?m)^    tags:\n      - "v\*"$', triggers)
-    assert root_permissions == "permissions:\n  contents: read"
-    assert "contents: write" not in root_permissions
-    assert (
-        "group: windows-release-${{ github.workflow }}-${{ github.ref }}"
-        in concurrency
-    )
-    assert "cancel-in-progress: true" in concurrency
+    assert steps.index(checkout) < steps.index(setup) < steps.index(install)
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert setup["uses"] == "actions/setup-python@v5"
+    assert setup["with"] == {
+        "python-version": "3.13",
+        "cache": "pip",
+        "cache-dependency-path": "requirements-build.txt",
+    }
+    assert install["run"] == "python -m pip install -r requirements-build.txt"
 
 
-def test_test_job_runs_the_full_suite_on_windows(workflow: str) -> None:
+def test_build_requirements_declare_yaml_parser() -> None:
+    requirements = BUILD_REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines()
+
+    assert "PyYAML>=6,<7" in requirements
+
+
+def test_triggers_root_permissions_and_concurrency(
+    workflow: dict[str, Any],
+) -> None:
+    triggers = workflow["on"]
+
+    assert set(triggers) == {"pull_request", "push", "workflow_dispatch"}
+    assert triggers["push"]["branches"] == ["main"]
+    assert triggers["push"]["tags"] == ["v*"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {
+        "group": "windows-release-${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "true",
+    }
+
+
+def test_test_job_runs_the_full_suite_on_windows(workflow: dict[str, Any]) -> None:
     test_job = _job(workflow, "test")
 
-    assert "runs-on: windows-latest" in test_job
+    assert test_job["runs-on"] == "windows-latest"
     _assert_windows_python_setup(test_job)
-    assert "run: python -m pytest -q" in {
-        line.strip() for line in test_job.splitlines()
-    }
-    assert test_job.index("requirements-build.txt") < test_job.index(
-        "run: python -m pytest -q"
+    test_step = _step(test_job, "Run tests")
+    assert test_step["run"] == "python -m pytest -q"
+    assert test_job["steps"].index(_step(test_job, "Install build requirements")) < (
+        test_job["steps"].index(test_step)
     )
 
 
-def test_build_job_depends_on_tests_and_uses_only_the_spec(workflow: str) -> None:
+def test_build_job_depends_on_tests_and_uses_only_the_spec(
+    workflow: dict[str, Any],
+) -> None:
     build_job = _job(workflow, "build")
-    build_command = (
-        "run: python -m PyInstaller --noconfirm --clean DesktopCleaner.spec"
-    )
+    build_step = _step(build_job, "Build executable")
 
-    lines = {line.strip() for line in build_job.splitlines()}
-    assert "needs: test" in lines
-    assert "runs-on: windows-latest" in build_job
+    assert build_job["needs"] == "test"
+    assert build_job["runs-on"] == "windows-latest"
     _assert_windows_python_setup(build_job)
-    assert build_command in lines
-    assert build_job.index("requirements-build.txt") < build_job.index(build_command)
-    assert build_job.lower().count("pyinstaller") == 1
+    assert (
+        build_step["run"]
+        == "python -m PyInstaller --noconfirm --clean DesktopCleaner.spec"
+    )
+    assert build_job["steps"].index(
+        _step(build_job, "Install build requirements")
+    ) < build_job["steps"].index(build_step)
+    assert (
+        sum(
+            "pyinstaller" in step.get("run", "").lower()
+            for step in build_job["steps"]
+        )
+        == 1
+    )
 
 
 def test_build_metadata_validates_and_publishes_checksum_outputs(
-    workflow: str,
+    workflow: dict[str, Any],
 ) -> None:
     build_job = _job(workflow, "build")
+    metadata = _step(build_job, "Validate release metadata and create checksum")
+    script = metadata["run"]
 
-    assert "id: metadata" in build_job
-    assert "shell: pwsh" in build_job
-    assert (
-        "RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}"
-        in build_job
-    )
+    assert build_job["outputs"] == {
+        "version": "${{ steps.metadata.outputs.version }}",
+        "artifact_name": "${{ steps.metadata.outputs.artifact_name }}",
+    }
+    assert metadata["id"] == "metadata"
+    assert metadata["shell"] == "pwsh"
+    assert metadata["env"] == {
+        "RELEASE_TAG": "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+    }
     assert (
         'python scripts/release_contract.py --tag "$env:RELEASE_TAG" '
         '--artifact "dist\\DesktopCleaner.exe"'
-        in build_job
+        in script
     )
-    assert "if ($LASTEXITCODE -ne 0)" in build_job
-    assert "exit $LASTEXITCODE" in build_job
+    assert "if ($LASTEXITCODE -ne 0)" in script
+    assert "exit $LASTEXITCODE" in script
     assert (
         'Get-FileHash -Algorithm SHA256 -LiteralPath "dist\\DesktopCleaner.exe"'
-        in build_job
+        in script
     )
-    assert ".Hash.ToLowerInvariant()" in build_job
+    assert ".Hash.ToLowerInvariant()" in script
     assert (
         '"$hash  DesktopCleaner.exe" | Set-Content -LiteralPath '
         '"dist\\DesktopCleaner.exe.sha256" -Encoding ascii'
-        in build_job
+        in script
     )
-    assert '"version=$version" >> $env:GITHUB_OUTPUT' in build_job
+    assert '"version=$version" >> $env:GITHUB_OUTPUT' in script
     assert (
         '"artifact_name=DesktopCleaner-v$version-windows-x64" '
         ">> $env:GITHUB_OUTPUT"
-        in build_job
-    )
-    assert "version: ${{ steps.metadata.outputs.version }}" in build_job
-    assert (
-        "artifact_name: ${{ steps.metadata.outputs.artifact_name }}" in build_job
+        in script
     )
 
 
-def test_build_uploads_only_the_executable_and_checksum(workflow: str) -> None:
+def test_build_uploads_only_the_executable_and_checksum(
+    workflow: dict[str, Any],
+) -> None:
     build_job = _job(workflow, "build")
+    upload = _step(build_job, "Upload Windows artifact")
 
-    assert "uses: actions/upload-artifact@v4" in build_job
-    assert "name: ${{ steps.metadata.outputs.artifact_name }}" in build_job
-    assert re.search(
-        r"(?m)^          path: \|\n"
-        r"            dist\\DesktopCleaner\.exe\n"
-        r"            dist\\DesktopCleaner\.exe\.sha256\n"
-        r"          if-no-files-found: error$",
-        build_job,
-    )
-    assert "if-no-files-found: error" in build_job
+    assert upload["uses"] == "actions/upload-artifact@v4"
+    assert upload["with"] == {
+        "name": "${{ steps.metadata.outputs.artifact_name }}",
+        "path": "dist\\DesktopCleaner.exe\ndist\\DesktopCleaner.exe.sha256\n",
+        "if-no-files-found": "error",
+    }
 
 
-def test_release_job_is_tag_only_and_has_job_scoped_write_permission(
-    workflow: str,
+def test_release_job_is_tag_only_build_dependent_and_write_scoped(
+    workflow: dict[str, Any],
 ) -> None:
     release_job = _job(workflow, "release")
-    root = workflow.split("\njobs:", maxsplit=1)[0]
 
-    assert re.search(
-        r"(?m)^    if: startsWith\(github\.ref, 'refs/tags/v'\)$", release_job
-    )
-    assert "needs: build" in {line.strip() for line in release_job.splitlines()}
-    assert re.search(
-        r"(?m)^    permissions:\n      contents: write$", release_job
-    )
-    assert "contents: write" not in root
-    assert "GH_TOKEN: ${{ github.token }}" in release_job
+    assert workflow["permissions"] == {"contents": "read"}
+    assert release_job["if"] == "startsWith(github.ref, 'refs/tags/v')"
+    assert release_job["needs"] == "build"
+    assert release_job["permissions"] == {"contents": "write"}
+    assert release_job["env"]["GH_TOKEN"] == "${{ github.token }}"
 
 
-def test_release_downloads_current_artifact_and_guards_creation(
-    workflow: str,
+def test_run_scripts_never_interpolate_github_expressions(
+    workflow: dict[str, Any],
+) -> None:
+    scripts = [
+        (job_name, step["name"], step["run"])
+        for job_name, job in workflow["jobs"].items()
+        for step in job["steps"]
+        if "run" in step
+    ]
+
+    for job_name, step_name, script in scripts:
+        assert "${{" not in script, (
+            f"{job_name}/{step_name} directly interpolates an expression in a run script"
+        )
+        assert "${{ github.ref_name }}" not in script
+
+
+def test_existing_release_lookup_is_explicit_and_fail_closed(
+    workflow: dict[str, Any],
 ) -> None:
     release_job = _job(workflow, "release")
-    guard = release_job.index("gh release view")
-    create = release_job.index("gh release create")
+    guard = _step(release_job, "Ensure release does not already exist")
+    script = guard["run"]
 
-    assert "uses: actions/download-artifact@v4" in release_job
-    assert "name: ${{ needs.build.outputs.artifact_name }}" in release_job
-    assert "path: dist" in release_job
-    assert guard < create
-    assert 'gh release view "${{ github.ref_name }}"' in release_job
-    assert "exit 1" in release_job[guard:create]
-    assert 'gh release create "${{ github.ref_name }}"' in release_job
-    assert "--verify-tag" in release_job
-    assert "--title" in release_job
-    assert "--generate-notes" in release_job
-    assert re.findall(r'"dist/[^"\n]+"', release_job[create:]) == [
-        '"dist/DesktopCleaner.exe"',
-        '"dist/DesktopCleaner.exe.sha256"',
+    assert guard["shell"] == "pwsh"
+    assert guard["env"] == {
+        "RELEASE_TAG": "${{ github.ref_name }}",
+        "RELEASE_REPOSITORY": "${{ github.repository }}",
+    }
+    assert '$ErrorActionPreference = "Stop"' in script
+    assert (
+        "$encodedTag = [System.Uri]::EscapeDataString($env:RELEASE_TAG)" in script
+    )
+    assert "Invoke-WebRequest" in script
+    assert "-SkipHttpErrorCheck" in script
+    assert 'Authorization = "Bearer $env:GH_TOKEN"' in script
+    assert 'Accept = "application/vnd.github+json"' in script
+    assert "switch ([int]$response.StatusCode)" in script
+    assert "gh release view" not in script
+    assert "-ErrorAction" not in script
+    assert "SilentlyContinue" not in script
+    assert not re.search(r"(?im)^\s*(try|catch)\b", script)
+
+    cases = dict(
+        re.findall(r"(?ms)^\s+(200|404|default)\s+\{(.*?)^\s+\}", script)
+    )
+    assert set(cases) == {"200", "404", "default"}
+    assert "throw" in cases["200"]
+    assert "throw" not in cases["404"]
+    assert "throw" in cases["default"]
+
+
+def test_release_downloads_and_creates_with_exact_assets(
+    workflow: dict[str, Any],
+) -> None:
+    release_job = _job(workflow, "release")
+    download = _step(release_job, "Download Windows artifact")
+    guard = _step(release_job, "Ensure release does not already exist")
+    create = _step(release_job, "Create release")
+    script = create["run"]
+
+    assert download["uses"] == "actions/download-artifact@v4"
+    assert download["with"] == {
+        "name": "${{ needs.build.outputs.artifact_name }}",
+        "path": "dist",
+    }
+    assert release_job["steps"].index(guard) < release_job["steps"].index(create)
+    assert create["shell"] == "pwsh"
+    assert create["env"] == {
+        "RELEASE_TAG": "${{ github.ref_name }}",
+        "RELEASE_REPOSITORY": "${{ github.repository }}",
+    }
+    assert 'gh release create "$env:RELEASE_TAG"' in script
+    assert '--repo "$env:RELEASE_REPOSITORY"' in script
+    assert "--verify-tag" in script
+    assert '--title "DesktopCleaner $env:RELEASE_TAG"' in script
+    assert "--generate-notes" in script
+    tokens = shlex.split(script.replace("`\n", " "))
+    assert [token for token in tokens if token.startswith("dist/")] == [
+        "dist/DesktopCleaner.exe",
+        "dist/DesktopCleaner.exe.sha256",
     ]

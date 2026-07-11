@@ -92,19 +92,41 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: dist
       - name: Ensure release does not already exist
-        shell: bash
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
-          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "Release ${{ github.ref_name }} already exists." >&2
-            exit 1
-          fi
+          $ErrorActionPreference = "Stop"
+          $encodedTag = [System.Uri]::EscapeDataString($env:RELEASE_TAG)
+          $uri = "https://api.github.com/repos/$env:RELEASE_REPOSITORY/releases/tags/$encodedTag"
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $response = Invoke-WebRequest -Uri $uri -Headers $headers -SkipHttpErrorCheck
+          switch ([int]$response.StatusCode) {
+            200 {
+              throw "Release '$env:RELEASE_TAG' already exists."
+            }
+            404 {
+              Write-Host "Release '$env:RELEASE_TAG' does not exist."
+            }
+            default {
+              throw "Release lookup failed with HTTP status $($response.StatusCode)."
+            }
+          }
       - name: Create release
-        shell: bash
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --verify-tag \
-            --title "DesktopCleaner ${{ github.ref_name }}" \
-            --generate-notes \
-            "dist/DesktopCleaner.exe" \
+          gh release create "$env:RELEASE_TAG" `
+            --repo "$env:RELEASE_REPOSITORY" `
+            --verify-tag `
+            --title "DesktopCleaner $env:RELEASE_TAG" `
+            --generate-notes `
+            "dist/DesktopCleaner.exe" `
             "dist/DesktopCleaner.exe.sha256"
