@@ -1,0 +1,110 @@
+name: Windows Release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install build requirements
+        run: python -m pip install -r requirements-build.txt
+      - name: Run tests
+        run: python -m pytest -q
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install build requirements
+        run: python -m pip install -r requirements-build.txt
+      - name: Build executable
+        run: python -m PyInstaller --noconfirm --clean DesktopCleaner.spec
+      - name: Validate release metadata and create checksum
+        id: metadata
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = python scripts/release_contract.py --tag "$env:RELEASE_TAG" --artifact "dist\DesktopCleaner.exe"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $version = $version.Trim()
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "dist\DesktopCleaner.exe").Hash.ToLowerInvariant()
+          "$hash  DesktopCleaner.exe" | Set-Content -LiteralPath "dist\DesktopCleaner.exe.sha256" -Encoding ascii
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact_name=DesktopCleaner-v$version-windows-x64" >> $env:GITHUB_OUTPUT
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |
+            dist\DesktopCleaner.exe
+            dist\DesktopCleaner.exe.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+      - name: Ensure release does not already exist
+        shell: bash
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists." >&2
+            exit 1
+          fi
+      - name: Create release
+        shell: bash
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --verify-tag \
+            --title "DesktopCleaner ${{ github.ref_name }}" \
+            --generate-notes \
+            "dist/DesktopCleaner.exe" \
+            "dist/DesktopCleaner.exe.sha256"
