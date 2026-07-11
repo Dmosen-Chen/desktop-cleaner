@@ -10,6 +10,7 @@ build/
 dist/
 *.egg-info/
 *.spec
+!/DesktopCleaner.spec
 .claude/
 tempCodeRunnerFile.py
 drag_debug.log

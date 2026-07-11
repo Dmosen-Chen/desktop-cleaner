@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,36 @@ def _keyword_values(call: ast.Call) -> dict[str, object]:
 
 
 class BuildConfigTests(unittest.TestCase):
+    def test_canonical_spec_is_present_tracked_and_not_ignored(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        spec_path = repo_root / "DesktopCleaner.spec"
+
+        self.assertTrue(spec_path.is_file(), "DesktopCleaner.spec is missing")
+
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", spec_path.name],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", "--", spec_path.name],
+            cwd=repo_root,
+            check=False,
+        )
+
+        self.assertEqual(
+            tracked.returncode,
+            0,
+            f"DesktopCleaner.spec is not tracked by Git: {tracked.stderr.strip()}",
+        )
+        self.assertEqual(
+            ignored.returncode,
+            1,
+            "DesktopCleaner.spec is still matched by a Git ignore rule",
+        )
+
     def test_build_script_uses_spec_as_pyinstaller_source_of_truth(self) -> None:
         script = Path("scripts/build_exe.bat").read_text(encoding="utf-8")
 
