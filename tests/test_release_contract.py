@@ -117,6 +117,22 @@ def test_cli_reports_contract_failure_to_stderr(
     assert APP_VERSION in captured.err
 
 
+def test_cli_reports_version_read_oserror_to_stderr(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.release_contract as release_contract
+
+    def fail_to_read_version() -> str:
+        raise OSError("version file is unreadable")
+
+    monkeypatch.setattr(release_contract, "read_app_version", fail_to_read_version)
+
+    assert release_contract.main([]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "version file is unreadable\n"
+
+
 def test_package_version_uses_canonical_app_version() -> None:
     import desktop_tidy
     from desktop_tidy.version import APP_VERSION
