@@ -57,6 +57,12 @@ def test_build_requirements_declare_yaml_parser() -> None:
     assert "PyYAML>=6,<7" in requirements
 
 
+def test_build_requirements_declare_pytest() -> None:
+    requirements = BUILD_REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines()
+
+    assert "pytest>=8,<10" in requirements
+
+
 def test_triggers_root_permissions_and_concurrency(
     workflow: dict[str, Any],
 ) -> None:
