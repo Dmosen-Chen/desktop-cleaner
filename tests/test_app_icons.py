@@ -61,10 +61,10 @@ class AppIconTests(unittest.TestCase):
         self.assertFalse(tray.icon().isNull())
 
     def test_pyinstaller_build_includes_icon_assets(self) -> None:
-        script = Path("scripts/build_exe.bat").read_text(encoding="utf-8")
+        spec = Path("DesktopCleaner.spec").read_text(encoding="utf-8")
 
-        self.assertIn("--icon assets\\icons\\app.ico", script)
-        self.assertIn('--add-data "assets\\icons;assets\\icons"', script)
+        self.assertIn(r"icon=['assets\\icons\\app.ico']", spec)
+        self.assertIn(r"datas=[('assets\\icons', 'assets\\icons')]", spec)
 
 
 if __name__ == "__main__":
